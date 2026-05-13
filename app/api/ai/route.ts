@@ -1,4 +1,4 @@
-import { openai } from "@ai-sdk/openai";
+import { anthropic } from "@ai-sdk/anthropic";
 import { streamText } from "ai";
 import { type CoreMessage, Message } from "ai";
 import { type NextRequest, NextResponse } from "next/server";
@@ -118,18 +118,22 @@ Never provide investment advice or make specific trading recommendations.`;
 
     // Use the AI SDK to stream text with strict limits
     const result = streamText({
-      model: openai("gpt-4"),
+      model: anthropic("claude-sonnet-4-5"),
       messages: messagesWithSystem,
       temperature: 0.7,
       maxTokens: 500, // Strict token limit
     });
 
-    // Return the stream with rate limit headers
-    const response = result.toDataStreamResponse();
-    response.headers.set("X-RateLimit-Limit", rateLimitResult.limit.toString());
-    response.headers.set("X-RateLimit-Remaining", rateLimitResult.remaining.toString());
-    response.headers.set("X-RateLimit-Reset", rateLimitResult.reset.toString());
+   const response = result.toDataStreamResponse();
 
+const headers = new Headers(response.headers);
+headers.set("X-RateLimit-Limit", rateLimitResult.limit.toString());
+headers.set("X-RateLimit-Remaining", rateLimitResult.remaining.toString());
+headers.set("X-RateLimit-Reset", rateLimitResult.reset.toString());
+
+return new Response(response.body, { headers, status: response.status });
+
+return new Response(result.textStream, { headers });
     return response;
   } catch (error) {
     console.error("AI API error:", error);
