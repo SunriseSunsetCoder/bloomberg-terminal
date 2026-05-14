@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RegimeState",
+  "type": "object",
+  "required": ["schemaVersion", "timestamp", "instrument", "regime", "confidence"],
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "instrument": { "type": "string" },
+    "regime": {
+      "type": "string",
+      "enum": ["TRENDING_UP", "TRENDING_DOWN", "CHOPPY", "BREAKOUT"]
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "atrPct": { "type": "number" },
+    "adx": { "type": "number" },
+    "realizedVolRatio": { "type": "number" }
+  }
+}

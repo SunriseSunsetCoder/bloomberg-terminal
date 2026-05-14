@@ -1,0 +1,5 @@
+@echo off
+set UPSTASH_REDIS_REST_URL=https://aware-terrapin-116793.upstash.io
+set UPSTASH_REDIS_REST_TOKEN=gQAAAAAAAcg5AAIgcDJiMTdmYzljODc2ZTQ0ODAwOWIwMzdmZThmMzUzODc1Ng
+set BRIDGE_SECRET=NT8BotBridge2026
+node server.js

@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BotFleetState",
+  "type": "object",
+  "required": ["schemaVersion", "timestamp", "sessionDate", "bots"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Increment on any breaking field change"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 time of last NT8 export"
+    },
+    "sessionDate": {
+      "type": "string",
+      "description": "Trading date YYYY-MM-DD"
+    },
+    "bots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "instrument", "direction", "isTradingBlocked", "dailyPnL", "dailyTrades", "dailyWins", "ddUsedPct"],
+        "properties": {
+          "id": { "type": "string" },
+          "instrument": { "type": "string" },
+          "direction": { "type": "string" },
+          "isTradingBlocked": { "type": "boolean" },
+          "dailyPnL": { "type": "number" },
+          "dailyTrades": { "type": "integer" },
+          "dailyWins": { "type": "integer" },
+          "ddUsedPct": { "type": "number" },
+          "lastTradeAt": { "type": ["string", "null"] },
+          "lastTradeResult": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}
