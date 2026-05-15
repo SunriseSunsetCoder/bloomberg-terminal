@@ -23,6 +23,7 @@ import { TerminalFilterBar } from "../layout/terminal-filter-bar";
 import { TerminalHeader } from "../layout/terminal-header";
 import { TerminalLayout } from "../layout/terminal-layout";
 import type { FilterState, MarketItem } from "../types";
+import { FleetView } from "../views/fleet-view";
 import MarketMoversView from "../views/market-movers-view";
 import { MarketView } from "../views/market-view";
 import NewsView from "../views/news-view";
@@ -30,7 +31,6 @@ import { RmiView } from "../views/rmi-view";
 import VolatilityView from "../views/volatility-view";
 
 export default function BloombergTerminal() {
-  // Use our custom hooks for state management
   const {
     isDarkMode,
     error,
@@ -45,13 +45,13 @@ export default function BloombergTerminal() {
     handleMoversView,
     handleVolatilityView,
     handleRmiView,
+    handleFleetView,
     handleCancelClick,
     handleNewClick,
     handleBlancClick,
     handleHelpClick,
   } = useTerminalUI();
 
-  // Use Jotai atoms for state management
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useAtom(isConfirmModalOpenAtom);
   const [confirmModalProps, setConfirmModalProps] = useAtom(confirmModalPropsAtom);
   const [isWatchlistOpen, setIsWatchlistOpen] = useAtom(isWatchlistOpenAtom);
@@ -60,16 +60,13 @@ export default function BloombergTerminal() {
   const [filters, setFilters] = useAtom(writableFiltersAtom);
   const [, resetFilters] = useAtom(resetFiltersAtom);
 
-  // Action atoms
   const [, openConfirmModal] = useAtom(openConfirmModalAtom);
   const [, closeConfirmModal] = useAtom(closeConfirmModalAtom);
   const [, confirmAndCloseModal] = useAtom(confirmAndCloseModalAtom);
   const [, addWatchlist] = useAtom(addWatchlistAtom);
 
-  // Use our React Query hook for market data
   const { marketData: data, refreshData, toggleRealTimeUpdates, isLoading } = useMarketDataQuery();
 
-  // Get all market indices for watchlist
   const allMarketIndices = useCallback(() => {
     const indices: string[] = [];
     if (data?.americas) {
@@ -90,105 +87,53 @@ export default function BloombergTerminal() {
     return indices;
   }, [data]);
 
-  // Handle CANCL button with confirmation modal
   const handleCancelWithConfirm = () => {
     openConfirmModal({
       title: "Confirm Action",
       message: "Are you sure you want to cancel the current operation?",
       onConfirm: () => {
-        // Reset any pending changes or operations
         console.log("Operation cancelled");
       },
     });
   };
 
-  // Handle NEW button for watchlist
   const handleNewWatchlist = () => {
     setIsWatchlistOpen(true);
   };
 
-  // Handle BLANC button with confirmation modal
   const handleBlancWithConfirm = () => {
     openConfirmModal({
       title: "Clear All Filters",
       message: "Are you sure you want to reset all filters to default?",
       onConfirm: () => {
-        // Reset filters to default using the resetFiltersAtom
         resetFilters();
         console.log("Filters reset to default");
       },
     });
   };
 
-  // Handle back from specialized views
   const handleBackFromView = () => {
     setCurrentView("market");
   };
 
-  // Handle watchlist save
   const handleWatchlistSave = (watchlist: { name: string; indices: string[] }) => {
     addWatchlist(watchlist);
   };
 
-  // Define keyboard shortcuts
   const shortcuts = [
-    {
-      key: "n",
-      ctrlKey: true,
-      action: handleNewWatchlist,
-      description: "Create new watchlist",
-    },
-    {
-      key: "b",
-      ctrlKey: true,
-      action: handleBlancWithConfirm,
-      description: "Reset all filters",
-    },
-    {
-      key: "Escape",
-      action: handleCancelWithConfirm,
-      description: "Cancel current operation",
-    },
-    {
-      key: "r",
-      ctrlKey: true,
-      action: refreshData,
-      description: "Refresh data",
-    },
-    {
-      key: "l",
-      ctrlKey: true,
-      action: toggleRealTimeUpdates,
-      description: "Toggle live updates",
-    },
-    {
-      key: "1",
-      action: handleMarketView,
-      description: "Show market view",
-    },
-    {
-      key: "2",
-      action: handleNewsView,
-      description: "Show news view",
-    },
-    {
-      key: "3",
-      action: handleMoversView,
-      description: "Show market movers",
-    },
-    {
-      key: "4",
-      action: handleVolatilityView,
-      description: "Show volatility view",
-    },
-    {
-      key: "?",
-      action: handleHelpClick,
-      description: "Show keyboard shortcuts",
-    },
+    { key: "n", ctrlKey: true, action: handleNewWatchlist, description: "Create new watchlist" },
+    { key: "b", ctrlKey: true, action: handleBlancWithConfirm, description: "Reset all filters" },
+    { key: "Escape", action: handleCancelWithConfirm, description: "Cancel current operation" },
+    { key: "r", ctrlKey: true, action: refreshData, description: "Refresh data" },
+    { key: "l", ctrlKey: true, action: toggleRealTimeUpdates, description: "Toggle live updates" },
+    { key: "1", action: handleMarketView, description: "Show market view" },
+    { key: "2", action: handleNewsView, description: "Show news view" },
+    { key: "3", action: handleMoversView, description: "Show market movers" },
+    { key: "4", action: handleVolatilityView, description: "Show volatility view" },
+    { key: "5", action: handleFleetView, description: "Show fleet monitor" },
+    { key: "?", action: handleHelpClick, description: "Show keyboard shortcuts" },
   ];
 
-  // Render the appropriate view based on currentView state
   if (currentView === "news") {
     return (
       <TerminalLayout shortcuts={shortcuts}>
@@ -197,7 +142,6 @@ export default function BloombergTerminal() {
     );
   }
 
-  // Add the condition for the movers view
   if (currentView === "movers") {
     return (
       <TerminalLayout shortcuts={shortcuts}>
@@ -212,7 +156,6 @@ export default function BloombergTerminal() {
     );
   }
 
-  // Add the condition for the volatility view
   if (currentView === "volatility") {
     return (
       <TerminalLayout shortcuts={shortcuts}>
@@ -227,11 +170,18 @@ export default function BloombergTerminal() {
     );
   }
 
-  // Add the condition for the RMI view
   if (currentView === "rmi") {
     return (
       <TerminalLayout shortcuts={shortcuts}>
         <RmiView />
+      </TerminalLayout>
+    );
+  }
+
+  if (currentView === "fleet") {
+    return (
+      <TerminalLayout shortcuts={shortcuts}>
+        <FleetView isDarkMode={isDarkMode} onBack={handleBackFromView} />
       </TerminalLayout>
     );
   }
@@ -247,6 +197,7 @@ export default function BloombergTerminal() {
         onMoversClick={handleMoversView}
         onVolatilityClick={handleVolatilityView}
         onRmiClick={handleRmiView}
+        onFleetClick={handleFleetView}
         onHelpClick={handleHelpClick}
         onThemeToggle={handleThemeToggle}
       />
@@ -255,7 +206,6 @@ export default function BloombergTerminal() {
 
       <MarketView isDarkMode={isDarkMode} />
 
-      {/* Modals */}
       <ConfirmationModal
         isOpen={isConfirmModalOpen}
         onClose={closeConfirmModal}

@@ -8,12 +8,10 @@ export function useTerminalUI() {
   const [isShortcutsHelpOpen, setIsShortcutsHelpOpen] = useAtom(isShortcutsHelpOpenAtom);
   const [currentView, setCurrentView] = useAtom(currentViewAtom);
 
-  // Theme toggle handler
   const handleThemeToggle = useCallback(() => {
     setIsDarkMode(!isDarkMode);
   }, [isDarkMode, setIsDarkMode]);
 
-  // View handlers
   const handleMarketView = useCallback(() => {
     setCurrentView("market");
   }, [setCurrentView]);
@@ -34,20 +32,20 @@ export function useTerminalUI() {
     setCurrentView("rmi");
   }, [setCurrentView]);
 
-  // Other UI handlers
+  const handleFleetView = useCallback(() => {
+    setCurrentView("fleet");
+  }, [setCurrentView]);
+
   const handleCancelClick = useCallback(() => {
     console.log("Cancel clicked");
-    // Add your cancel logic here
   }, []);
 
   const handleNewClick = useCallback(() => {
     console.log("New clicked");
-    // Add your new item logic here
   }, []);
 
   const handleBlancClick = useCallback(() => {
     console.log("Blanc clicked");
-    // Add your blanc logic here
   }, []);
 
   const handleHelpClick = useCallback(() => {
@@ -59,25 +57,21 @@ export function useTerminalUI() {
   }, [setIsShortcutsHelpOpen]);
 
   return {
-    // State
     isDarkMode,
     error,
     isShortcutsHelpOpen,
     currentView,
-
-    // Setters
     setIsDarkMode,
     setError,
     setIsShortcutsHelpOpen,
     setCurrentView,
-
-    // Handlers
     handleThemeToggle,
     handleMarketView,
     handleNewsView,
     handleMoversView,
     handleVolatilityView,
     handleRmiView,
+    handleFleetView,
     handleCancelClick,
     handleNewClick,
     handleBlancClick,

@@ -26,6 +26,7 @@ type TerminalHeaderProps = {
   onMoversClick: () => void;
   onVolatilityClick: () => void;
   onRmiClick: () => void;
+  onFleetClick: () => void;
   onHelpClick: () => void;
   onThemeToggle: () => void;
 };
@@ -39,6 +40,7 @@ export function TerminalHeader({
   onMoversClick,
   onVolatilityClick,
   onRmiClick,
+  onFleetClick,
   onHelpClick,
   onThemeToggle,
 }: TerminalHeaderProps) {
@@ -54,24 +56,23 @@ export function TerminalHeader({
 
   const colors = isDarkMode ? bloombergColors.dark : bloombergColors.light;
 
-  // Calculate how fresh the data is
   const getDataFreshnessIndicator = () => {
     if (!lastUpdated) return null;
 
     const now = new Date();
     const diffSeconds = Math.floor((now.getTime() - lastUpdated.getTime()) / 1000);
 
-    let color = "bg-green-500"; // Fresh data (< 10 seconds)
+    let color = "bg-green-500";
     let pulseClass = "animate-pulse";
 
     if (diffSeconds > 60) {
-      color = "bg-red-500"; // Stale data (> 60 seconds)
+      color = "bg-red-500";
       pulseClass = "";
     } else if (diffSeconds > 30) {
-      color = "bg-yellow-500"; // Aging data (30-60 seconds)
+      color = "bg-yellow-500";
       pulseClass = "animate-pulse";
     } else if (diffSeconds > 10) {
-      color = "bg-green-500"; // Slightly aged data (10-30 seconds)
+      color = "bg-green-500";
       pulseClass = "";
     }
 
@@ -110,6 +111,10 @@ export function TerminalHeader({
         <Activity className="h-3 w-3 mr-1" />
         RMI
       </BloombergButton>
+      <BloombergButton color="green" onClick={onFleetClick}>
+        <Activity className="h-3 w-3 mr-1" />
+        FLEET
+      </BloombergButton>
 
       <BloombergButton color="accent" onClick={onHelpClick}>
         <HelpCircle className="h-3 w-3 mr-1" />
@@ -121,7 +126,6 @@ export function TerminalHeader({
         {isDarkMode ? "LIGHT" : "DARK"}
       </BloombergButton>
 
-      {/* Redis Control Buttons */}
       <div className="ml-auto flex items-center gap-2">
         <BloombergButton color="accent" onClick={refreshData} disabled={isLoading}>
           REFR
@@ -134,7 +138,6 @@ export function TerminalHeader({
           {isRealTimeEnabled ? "STOP" : "LIVE"}
         </BloombergButton>
 
-        {/* Data Status */}
         <div className="flex items-center gap-2 text-xs">
           {isLoading ? (
             <RefreshCw className="h-3 w-3 animate-spin" />
