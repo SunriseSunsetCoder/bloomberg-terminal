@@ -24,6 +24,8 @@ import { TerminalHeader } from "../layout/terminal-header";
 import { TerminalLayout } from "../layout/terminal-layout";
 import type { FilterState, MarketItem } from "../types";
 import { FleetView } from "../views/fleet-view";
+import { IVView } from "../views/iv-view";
+import { JackView } from "../views/jack-view";
 import MarketMoversView from "../views/market-movers-view";
 import { MarketView } from "../views/market-view";
 import NewsView from "../views/news-view";
@@ -46,6 +48,8 @@ export default function BloombergTerminal() {
     handleVolatilityView,
     handleRmiView,
     handleFleetView,
+    handleIVView,
+	handleJackView,
     handleCancelClick,
     handleNewClick,
     handleBlancClick,
@@ -131,6 +135,8 @@ export default function BloombergTerminal() {
     { key: "3", action: handleMoversView, description: "Show market movers" },
     { key: "4", action: handleVolatilityView, description: "Show volatility view" },
     { key: "5", action: handleFleetView, description: "Show fleet monitor" },
+    { key: "6", action: handleIVView, description: "Show IV regime + options signal" },
+	{ key: "7", action: handleJackView, description: "Show JACK swing setup validation" },
     { key: "?", action: handleHelpClick, description: "Show keyboard shortcuts" },
   ];
 
@@ -186,6 +192,22 @@ export default function BloombergTerminal() {
     );
   }
 
+  if (currentView === "iv") {
+    return (
+      <TerminalLayout shortcuts={shortcuts}>
+        <IVView isDarkMode={isDarkMode} onBack={handleBackFromView} />
+      </TerminalLayout>
+    );
+  }
+  
+  if (currentView === "jack") {
+    return (
+      <TerminalLayout shortcuts={shortcuts}>
+        <JackView isDarkMode={isDarkMode} onBack={handleBackFromView} />
+      </TerminalLayout>
+    );
+  }
+
   return (
     <TerminalLayout shortcuts={shortcuts}>
       <TerminalHeader
@@ -198,6 +220,8 @@ export default function BloombergTerminal() {
         onVolatilityClick={handleVolatilityView}
         onRmiClick={handleRmiView}
         onFleetClick={handleFleetView}
+        onIVClick={handleIVView}
+		onJackClick={handleJackView}
         onHelpClick={handleHelpClick}
         onThemeToggle={handleThemeToggle}
       />

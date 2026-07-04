@@ -1,0 +1,92 @@
+import { useMutation } from "@tanstack/react-query";
+import { useAtom } from "jotai";
+import { useEffect } from "react";
+import { jackResultAtom, jackIsPendingAtom } from "@/components/bloomberg/atoms";
+
+export interface SectionStats {
+  inputCount: number;
+  droppedHandleStale: number;
+  droppedOverCap: number;
+  finalCount: number;
+}
+
+export interface FilterStats {
+  inputRowCount: number;
+  live: SectionStats;
+  pending: SectionStats;
+  totalFinal: number;
+  tiingoCallsAttempted: number;
+  tiingoCallsSucceeded: number;
+}
+
+export interface JackValidationResponse {
+  schemaVersion: "1.2";
+  timestamp: string;
+  strategy: string;
+  riskPerTrade: number;
+  markdown: string;
+  model: string;
+  inputRowCount: number;
+  filterStats: FilterStats;
+  tokens?: { input: number; output: number };
+  degraded?: boolean;
+  error?: string | null;
+}
+
+export interface JackValidationRequest {
+  csv: string;
+  riskPerTrade?: number;
+}
+
+async function postValidation(
+  body: JackValidationRequest
+): Promise<JackValidationResponse> {
+  const res = await fetch("/api/jack-validation", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return (await res.json()) as JackValidationResponse;
+}
+
+/**
+ * useJackValidation
+ *
+ * Wraps React Query's useMutation and mirrors the result into a Jotai atom
+ * so it persists across view navigation (e.g., user clicks BACK to market
+ * view then returns to JACK — the prior result is still there).
+ *
+ * Returns:
+ *   - mutate / mutateAsync: trigger a validation run
+ *   - data: the latest result, sourced from atom (survives unmount)
+ *   - isPending: true while a request is in flight
+ *   - reset: clear both the mutation cache AND the atom
+ */
+export function useJackValidation() {
+  const [persistedResult, setPersistedResult] = useAtom(jackResultAtom);
+  const [, setPersistedPending] = useAtom(jackIsPendingAtom);
+
+  const mutation = useMutation<JackValidationResponse, Error, JackValidationRequest>({
+    mutationFn: postValidation,
+    onSuccess: (data) => {
+      setPersistedResult(data);
+    },
+  });
+
+  // Mirror in-flight state into the atom so a remounted component can show
+  // the spinner if a request is still pending elsewhere.
+  useEffect(() => {
+    setPersistedPending(mutation.isPending);
+  }, [mutation.isPending, setPersistedPending]);
+
+  return {
+    ...mutation,
+    // Prefer the persisted atom value over the mutation's own data field —
+    // mutation.data resets to undefined on unmount; persistedResult survives.
+    data: persistedResult ?? mutation.data,
+    reset: () => {
+      mutation.reset();
+      setPersistedResult(null);
+    },
+  };
+}

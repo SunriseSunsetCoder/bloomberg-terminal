@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sunrise-sunset-coder.github.io/bloomberg-terminal/iv-regime-state.schema.json",
+  "title": "IVRegimeState",
+  "description": "Implied-volatility regime snapshot derived from VIX term structure and 252-day IV Rank/Percentile.",
+  "type": "object",
+  "required": ["schemaVersion", "timestamp", "vix", "ivRank", "ivPercentile", "regime", "confidence"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "vix": {
+      "type": "number",
+      "description": "Latest VIX close"
+    },
+    "vix3m": {
+      "type": ["number", "null"],
+      "description": "Latest VIX3M close, or null if unavailable"
+    },
+    "vix9d": {
+      "type": ["number", "null"],
+      "description": "Latest VIX9D close, or null if unavailable"
+    },
+    "termStructureRatio": {
+      "type": "number",
+      "description": "VIX / VIX3M (or VIX / VIX9D fallback). <0.95 contango, 0.95-1.05 flat, >1.05 backwardation."
+    },
+    "termStructureSource": {
+      "type": "string",
+      "enum": ["VIX3M", "VIX9D", "NONE"],
+      "description": "Which series was used as the long leg of the ratio"
+    },
+    "termStructureState": {
+      "type": "string",
+      "enum": ["CONTANGO", "FLAT", "BACKWARDATION"]
+    },
+    "ivRank": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "(VIX - 252d_low) / (252d_high - 252d_low) * 100"
+    },
+    "ivPercentile": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Percentage of last 252 trading days with VIX below current"
+    },
+    "regime": {
+      "type": "string",
+      "enum": ["LOW_CONTANGO", "NORMAL", "ELEVATED", "PANIC"]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "sampleSize": {
+      "type": "integer",
+      "description": "Number of daily closes available (max 252)"
+    },
+    "degraded": {
+      "type": "boolean",
+      "description": "True if sample size < 252 or term structure source is fallback"
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import { atom } from "jotai";
 import { marketData as fallbackData } from "../lib/marketData";
 import type { FilterState, MarketData } from "../types";
+import type { JackValidationResponse } from "../hooks/useJackValidation";
 
 // Global state to prevent multiple API calls across component instances
 const GlobalState = {
@@ -17,7 +18,11 @@ export const errorAtom = atom<string | null>(null);
 export const isShortcutsHelpOpenAtom = atom(false);
 
 // View state atoms
-export const currentViewAtom = atom<"market" | "news" | "movers" | "volatility" | "rmi" | "fleet">("market");
+export const currentViewAtom = atom<"market" | "news" | "movers" | "volatility" | "rmi" | "iv" | "fleet" | "jack">("market");
+// JACK panel state — persists across view navigation
+export const jackResultAtom = atom<JackValidationResponse | null>(null);
+export const jackIsPendingAtom = atom<boolean>(false);
+
 
 // RMI view state atoms
 export const rmiSelectedRegionAtom = atom<"americas" | "emea" | "asiaPacific">("americas");
