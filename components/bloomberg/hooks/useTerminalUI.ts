@@ -36,6 +36,12 @@ export function useTerminalUI() {
     setCurrentView("fleet");
   }, [setCurrentView]);
 
+  const handleIVView = useCallback(() => {
+    setCurrentView("iv");
+  }, [setCurrentView]);
+  
+  const handleJackView = useCallback(() => setCurrentView("jack"), [setCurrentView]);
+
   const handleCancelClick = useCallback(() => {
     console.log("Cancel clicked");
   }, []);
@@ -72,6 +78,8 @@ export function useTerminalUI() {
     handleVolatilityView,
     handleRmiView,
     handleFleetView,
+    handleIVView,
+	handleJackView,
     handleCancelClick,
     handleNewClick,
     handleBlancClick,

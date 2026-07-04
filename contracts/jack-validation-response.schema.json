@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sunrise-sunset-coder.github.io/bloomberg-terminal/jack-validation-response.schema.json",
+  "title": "JackValidationResponse",
+  "description": "v1.2 — two-section (Live + Pending) with Tiingo enrichment",
+  "type": "object",
+  "required": ["schemaVersion", "timestamp", "markdown", "filterStats"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.2" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "strategy": { "type": "string" },
+    "riskPerTrade": { "type": "number" },
+    "markdown": { "type": "string" },
+    "model": { "type": "string" },
+    "inputRowCount": { "type": "integer" },
+    "filterStats": {
+      "type": "object",
+      "required": ["inputRowCount", "live", "pending", "totalFinal", "tiingoCallsAttempted", "tiingoCallsSucceeded"],
+      "properties": {
+        "inputRowCount": { "type": "integer" },
+        "live": {
+          "type": "object",
+          "properties": {
+            "inputCount": { "type": "integer" },
+            "droppedHandleStale": { "type": "integer" },
+            "droppedOverCap": { "type": "integer" },
+            "finalCount": { "type": "integer" }
+          }
+        },
+        "pending": {
+          "type": "object",
+          "properties": {
+            "inputCount": { "type": "integer" },
+            "droppedHandleStale": { "type": "integer" },
+            "droppedOverCap": { "type": "integer" },
+            "finalCount": { "type": "integer" }
+          }
+        },
+        "totalFinal": { "type": "integer" },
+        "tiingoCallsAttempted": { "type": "integer" },
+        "tiingoCallsSucceeded": { "type": "integer" }
+      }
+    },
+    "tokens": {
+      "type": "object",
+      "properties": { "input": { "type": "integer" }, "output": { "type": "integer" } }
+    },
+    "degraded": { "type": "boolean" },
+    "error": { "type": ["string", "null"] }
+  }
+}
