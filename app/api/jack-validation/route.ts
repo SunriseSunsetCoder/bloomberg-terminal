@@ -336,31 +336,66 @@ async function enrichSetup(
   // v1.2: only fetch EOD + news. Fundamentals removed — Tiingo's fundamentals
   // endpoint requires paid add-on ($10/mo); free tier returns 400. Earnings
   // validation deferred to manual EM check, or future Finnhub integration.
-  const [eodRes, newsRes] = await Promise.allSettled([
-    fetch(`${tiingoBase}/eod/${setup.ticker}?days=10`).then((r) => r.json()),
-    fetch(`${tiingoBase}/news/${setup.ticker}?days=7&limit=5`).then((r) => r.json()),
-  ]);
+  const eodUrl = `${tiingoBase}/eod/${setup.ticker}?days=10`;
+  const newsUrl = `${tiingoBase}/news/${setup.ticker}?days=7&limit=5`;
 
+  // Fetch the raw Response (do NOT chain .json() here): a 404/500 from the
+  // internal route returns non-JSON, and a blind .json() throws an opaque
+  // SyntaxError that hides the real HTTP status. Capture status explicitly.
+  const [eodRes, newsRes] = await Promise.allSettled([fetch(eodUrl), fetch(newsUrl)]);
+
+  // --- EOD ---
   if (eodRes.status === "fulfilled") {
-    const d = eodRes.value as { latestClose?: number; latestDate?: string; error?: string };
-    enriched.tiingo.eodClose = d.latestClose;
-    enriched.tiingo.eodDate = d.latestDate;
-    if (d.error) enriched.tiingo.eodError = d.error;
+    const res = eodRes.value;
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      // TEMP LOGGING (jack-tiingo-eod-route-fix): surface the real failure per ticker.
+      console.warn(`[jack-tiingo] EOD ${setup.ticker} HTTP ${res.status} <${eodUrl}> :: ${body.slice(0, 200)}`);
+      enriched.tiingo.eodError = `HTTP ${res.status}`;
+    } else {
+      const d = (await res.json().catch(() => ({}))) as {
+        latestClose?: number;
+        latestDate?: string;
+        error?: string;
+      };
+      enriched.tiingo.eodClose = d.latestClose;
+      enriched.tiingo.eodDate = d.latestDate;
+      if (d.error) {
+        enriched.tiingo.eodError = d.error;
+        console.warn(`[jack-tiingo] EOD ${setup.ticker} route error: ${d.error}`);
+      }
+    }
   } else {
     enriched.tiingo.eodError = String(eodRes.reason);
+    // TEMP LOGGING (jack-tiingo-eod-route-fix)
+    console.warn(`[jack-tiingo] EOD ${setup.ticker} fetch rejected: ${String(eodRes.reason)}`);
   }
 
+  // --- News ---
   if (newsRes.status === "fulfilled") {
-    const d = newsRes.value as {
-      articles?: Array<{ title: string; publishedDate: string }>;
-      error?: string;
-    };
-    enriched.tiingo.newsHeadlines = (d.articles ?? []).slice(0, 5).map(
-      (a) => `[${a.publishedDate.split("T")[0]}] ${a.title}`
-    );
-    if (d.error) enriched.tiingo.newsError = d.error;
+    const res = newsRes.value;
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      // TEMP LOGGING (jack-tiingo-eod-route-fix)
+      console.warn(`[jack-tiingo] NEWS ${setup.ticker} HTTP ${res.status} <${newsUrl}> :: ${body.slice(0, 200)}`);
+      enriched.tiingo.newsError = `HTTP ${res.status}`;
+    } else {
+      const d = (await res.json().catch(() => ({}))) as {
+        articles?: Array<{ title: string; publishedDate: string }>;
+        error?: string;
+      };
+      enriched.tiingo.newsHeadlines = (d.articles ?? []).slice(0, 5).map(
+        (a) => `[${a.publishedDate.split("T")[0]}] ${a.title}`
+      );
+      if (d.error) {
+        enriched.tiingo.newsError = d.error;
+        console.warn(`[jack-tiingo] NEWS ${setup.ticker} route error: ${d.error}`);
+      }
+    }
   } else {
     enriched.tiingo.newsError = String(newsRes.reason);
+    // TEMP LOGGING (jack-tiingo-eod-route-fix)
+    console.warn(`[jack-tiingo] NEWS ${setup.ticker} fetch rejected: ${String(newsRes.reason)}`);
   }
 
   // Fundamentals intentionally skipped in v1.2 — see note above
