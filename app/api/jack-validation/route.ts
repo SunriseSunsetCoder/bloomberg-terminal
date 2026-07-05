@@ -781,7 +781,11 @@ export async function POST(req: NextRequest) {
   const prompt = buildSectionedPrompt(headerLine, enrichedLive, enrichedPending, riskPerTrade);
 
   try {
-    const maxTokens = Math.min(20000, Math.max(4000, stats.totalFinal * 120 + 1000));
+    // Floor raised 4000 -> 8000 (Jul 2026): an 18-setup batch computed 3160 and
+    // floored to 4000, truncating output mid-response. The JSON decisions block is
+    // now emitted first (see prompt), but keep generous headroom so both the JSON
+    // and the full markdown fit under the cap.
+    const maxTokens = Math.min(20000, Math.max(8000, stats.totalFinal * 120 + 1000));
 
     const completion = await client.messages.create({
       model, max_tokens: maxTokens,

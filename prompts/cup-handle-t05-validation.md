@@ -24,7 +24,7 @@ Use the exact time given. Do not invent a date. All time-sensitive checks measur
 
 ## Setups to validate
 
-The input below is split into LIVE and PENDING sections. Each setup has been enriched with Tiingo data where available. Validate each setup using the five checks below, output two markdown tables (one per section), then the end-of-output summary.
+The input below is split into LIVE and PENDING sections. Each setup has been enriched with Tiingo data where available. Validate each setup using the five checks below. **Emit the machine-readable JSON decisions block FIRST, then** the two markdown tables (one per section) and the end-of-output summary.
 
 {{CSV_INPUT}}
 
@@ -73,7 +73,16 @@ The input below is split into LIVE and PENDING sections. Each setup has been enr
 
 ## Output format
 
-Begin output with two lines:
+**Output ordering (CRITICAL — persistence depends on it):** Emit your response in exactly two parts, in this order:
+
+1. **FIRST: the machine-readable JSON decisions block** (schema defined in "MACHINE-READABLE OUTPUT BLOCK" below). This must be the very first thing in your response — nothing before it.
+2. **THEN: the human-readable markdown** — the two-line header, both tables, and the end-of-output summary.
+
+The JSON block goes first so it is never lost when the response is long and hits the output-token cap. The server extracts the fenced `json` block by content (not by position), so leading placement is safe and required.
+
+### Human-readable markdown (Part 2 — emit AFTER the JSON block)
+
+Begin the markdown portion with two lines:
 - `Session:` use the exact SESSION_CONTEXT given above
 - `Data sources:` "Tiingo (EOD close, news); earnings via training-data inference (Tiingo fundamentals deferred to v1.3+); sector RS and cross-asset via training-data inference"
 
@@ -119,9 +128,9 @@ After both tables:
 
 **Verification reminder:** End with: "Tiingo data: EOD close (reliable), news headlines (last 7d). Earnings via training-data inference — VERIFY ON EM before trading. Sector RS and cross-asset also training-data inference."
 
-## MACHINE-READABLE OUTPUT BLOCK (v1.3 — required)
+## MACHINE-READABLE OUTPUT BLOCK (v1.3 — required, emitted FIRST)
 
-After the verification reminder, emit ONE fenced JSON code block containing structured versions of every row from BOTH tables. This is parsed by the server for persistence — the schema below is exact and non-negotiable.
+**This block is Part 1 of your output — emit it before the markdown header and tables.** It is ONE fenced JSON code block containing structured versions of every row from BOTH tables. This is parsed by the server for persistence — the schema below is exact and non-negotiable. Placing it first guarantees the decisions are captured even if the later markdown is truncated.
 
 ```json
 {
@@ -168,7 +177,7 @@ After the verification reminder, emit ONE fenced JSON code block containing stru
 5. **Numeric fields (`shares`, `notional`, `live_close_delta_pct`, `pct_to_breakout`) must be JSON numbers, not strings.** If unavailable, omit the field entirely — do not use `null` or `"N/A"`.
 6. **`notes` should mirror the markdown Notes column but be concise** (~1-3 sentences).
 7. **All rows from the markdown tables must appear in the JSON.** Row count in markdown Live table = row count in `live_decisions`. Same for pending.
-8. **Do NOT put commentary outside the JSON block after the markdown/summary.** The JSON block is the last thing in your response.
+8. **The JSON block is the FIRST thing in your response** — emit nothing before it (no preamble, no commentary, no markdown header). The human-readable markdown follows immediately after the closing fence. Do NOT emit a second JSON block later.
 
 ## What's locked
 
