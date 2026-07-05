@@ -390,6 +390,13 @@ JACK ("Swing Setup Validation — Cup with Handle t05") is the swing-trading equ
 - Message format: `<panel/area>: <what changed>` (e.g., `jack: add SQLite persistence layer for Session A`)
 - Include validation status if relevant (e.g., `deploy-ready` vs `SIM-testing` vs `research-only`)
 
+**Git workflow:**
+- Direct push to `main` is blocked by husky pre-push hook
+- Feature branch workflow required for all code changes
+- Branch naming: `<feature>-<short-desc>` (e.g., `jack-v1.3-persistence`, `iv-fix-cache-key`)
+- Commits get squash-merged via GitHub PR
+- Bypass only for docs-only changes: `$env:BYPASS_PUSH_PROTECTION=1; git push`
+
 ---
 
 ## 11. Key file locations
@@ -422,3 +429,5 @@ JACK ("Swing Setup Validation — Cup with Handle t05") is the swing-trading equ
 ## Update log (append below)
 
 - **2026-07-04:** Initial write. PROJECT_STATE.md added as session-anchor for Claude Code workflow. All 8 sections filled in from current state as of mid-Session A deploy.
+
+- **2026-07-04 (Session A complete):** JACK v1.3 SQLite persistence shipped to branch `jack-v1.3-persistence` (commit cb653e6), pushed for PR merge to main (PR dance same as v1.2). Five items done: (1) `lib/db/` — schema.sql (setups / validation_runs / decisions / outcomes + decision_outcomes view), init.ts (WAL singleton), write.ts, read.ts; (2) authored `lib/db/env.ts` persistence gate and wired route.ts persistence writes behind a Vercel guard (type-only imports at top, lazy `require("@/lib/db/write")` inside persistRun, early-return with "Persistence: disabled (running on Vercel)" when !isPersistenceAvailable()); (3) prompt appended with the v1.3 MACHINE-READABLE JSON block spec; (4) next.config.mjs `serverExternalPackages: ["better-sqlite3"]` moved INSIDE the config object; (5) better-sqlite3 moved from dependencies to optionalDependencies (Vercel install-tolerant). Verification approach: DB layer unit-tested against a live `data/jack.db` (schema load — 4 tables + view, upsert/insert/read, both guard paths, exact banner strings all confirmed), route tsc-clean for all new files; live Claude click-test gap acknowledged — no ANTHROPIC_API_KEY on the Win10 clone, deferred to VPS post-merge (~5% incremental confidence, repeats what v1.2 already proved about the Claude call). Intentional schema mismatch retained: Claude JSON contract uses `schema_version "1.3"` while the HTTP wrapper `JackValidationResponse.schemaVersion` stays `"1.2"` — Session B bumps the wrapper. The real test — better-sqlite3 native compile on Vercel serverless — runs when Vercel builds main after merge.
