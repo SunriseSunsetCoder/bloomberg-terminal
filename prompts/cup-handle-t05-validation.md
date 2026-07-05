@@ -119,6 +119,57 @@ After both tables:
 
 **Verification reminder:** End with: "Tiingo data: EOD close (reliable), news headlines (last 7d). Earnings via training-data inference — VERIFY ON EM before trading. Sector RS and cross-asset also training-data inference."
 
+## MACHINE-READABLE OUTPUT BLOCK (v1.3 — required)
+
+After the verification reminder, emit ONE fenced JSON code block containing structured versions of every row from BOTH tables. This is parsed by the server for persistence — the schema below is exact and non-negotiable.
+
+```json
+{
+  "schema_version": "1.3",
+  "live_decisions": [
+    {
+      "ticker": "BK",
+      "handle_low_date": "2026-05-08",
+      "decision": "SIZE DOWN 50%",
+      "shares": 218,
+      "notional": 47645,
+      "earnings_flag": "Unknown",
+      "live_close_delta_pct": 0.5,
+      "news_class": "Pure technical",
+      "sector_rs": "Financials cluster (3) — flat",
+      "cross_asset": "Uncertain 2s10s",
+      "notes": "financials cluster present but sector strength unknown + cross-asset uncertain = SIZE DOWN"
+    }
+  ],
+  "pending_decisions": [
+    {
+      "ticker": "XYZ",
+      "handle_low_date": "2026-05-14",
+      "decision": "WATCH",
+      "pct_to_breakout": 1.8,
+      "earnings_flag": "None recalled in 20d",
+      "news_class": "Pure technical",
+      "sector_rs": "n/a (no cluster)",
+      "cross_asset": "n/a",
+      "notes": "clean setup, alert if breakout confirms"
+    }
+  ]
+}
+```
+
+### JSON schema rules (STRICT)
+
+1. **One JSON block only.** Wrapped in triple-backtick fenced code block with `json` language tag.
+2. **`ticker` and `handle_low_date` are REQUIRED for every row** — these are the primary key. If either is missing, DROP the row rather than fabricate.
+3. **`handle_low_date` must be ISO format YYYY-MM-DD.** If the input CSV used M/D/YYYY, convert.
+4. **`decision` must be one of these exact strings** (case-sensitive):
+   - LIVE section: `"TRADE"`, `"SIZE DOWN 50%"`, `"SKIP"`, `"INVALIDATED"`, `"ALREADY EXTENDED"`
+   - PENDING section: `"WATCH"`, `"WATCH-CAUTION"`, `"SKIP"`, `"ALREADY FIRED"`
+5. **Numeric fields (`shares`, `notional`, `live_close_delta_pct`, `pct_to_breakout`) must be JSON numbers, not strings.** If unavailable, omit the field entirely — do not use `null` or `"N/A"`.
+6. **`notes` should mirror the markdown Notes column but be concise** (~1-3 sentences).
+7. **All rows from the markdown tables must appear in the JSON.** Row count in markdown Live table = row count in `live_decisions`. Same for pending.
+8. **Do NOT put commentary outside the JSON block after the markdown/summary.** The JSON block is the last thing in your response.
+
 ## What's locked
 
 - Don't recompute Cup with Handle geometry

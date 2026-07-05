@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// Type-only imports compile away — safe on Vercel where the DB layer never loads.
+import type { SetupSeen, DecisionRow } from "@/lib/db/write";
+// The concrete write functions are loaded lazily via require() inside persistRun()
+// so better-sqlite3 is never required on Vercel (isPersistenceAvailable() === false).
+import { isPersistenceAvailable, persistenceUnavailableReason } from "@/lib/db/env";
 
 export const maxDuration = 120; // longer for parallel Tiingo enrichment
 export const dynamic = "force-dynamic";
@@ -383,6 +388,212 @@ async function enrichAllSetups(
 }
 
 // ============================================================
+// JSON extraction from Claude's response (v1.3 persistence)
+// ============================================================
+
+interface ExtractedDecision {
+  ticker?: string;
+  handle_low_date?: string;
+  decision?: string;
+  shares?: number;
+  notional?: number;
+  earnings_flag?: string;
+  live_close_delta_pct?: number;
+  pct_to_breakout?: number;
+  news_class?: string;
+  sector_rs?: string;
+  cross_asset?: string;
+  notes?: string;
+}
+
+interface ExtractedPayload {
+  schema_version?: string;
+  live_decisions?: ExtractedDecision[];
+  pending_decisions?: ExtractedDecision[];
+}
+
+/**
+ * Pull the ```json ... ``` fenced block from the response text.
+ * Returns null if not found or parse fails. Non-fatal — parse failure just
+ * means no structured writes for this run, markdown still gets stored.
+ */
+function extractJsonBlock(text: string): ExtractedPayload | null {
+  const fenceMatch = /```json\s*\n([\s\S]*?)\n```/.exec(text);
+  if (!fenceMatch) return null;
+
+  const jsonStr = fenceMatch[1].trim();
+  try {
+    return JSON.parse(jsonStr) as ExtractedPayload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Normalize a date from Claude's JSON to ISO YYYY-MM-DD.
+ * Accepts YYYY-MM-DD or M/D/YYYY. Returns null on unrecognized format.
+ */
+function normalizeIsoDate(input: string | undefined): string | null {
+  if (!input) return null;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(input);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(input);
+  if (us) {
+    const mm = us[1].padStart(2, "0");
+    const dd = us[2].padStart(2, "0");
+    return `${us[3]}-${mm}-${dd}`;
+  }
+  return null;
+}
+
+/**
+ * Convert an extracted decision to a DecisionRow ready for DB insert.
+ * Returns null if the row is unusable (missing ticker or handle_low_date).
+ */
+function extractedToDecisionRow(
+  ed: ExtractedDecision,
+  section: "live" | "pending"
+): DecisionRow | null {
+  const ticker = (ed.ticker ?? "").toUpperCase();
+  const handleLowDate = normalizeIsoDate(ed.handle_low_date);
+  if (!ticker || !handleLowDate) return null;
+
+  return {
+    ticker,
+    handleLowDate,
+    section,
+    decision: ed.decision ?? "UNKNOWN",
+    shares: typeof ed.shares === "number" ? ed.shares : undefined,
+    notional: typeof ed.notional === "number" ? ed.notional : undefined,
+    earningsFlag: ed.earnings_flag,
+    liveCloseDeltaPct:
+      typeof ed.live_close_delta_pct === "number" ? ed.live_close_delta_pct : undefined,
+    pctToBreakout: typeof ed.pct_to_breakout === "number" ? ed.pct_to_breakout : undefined,
+    newsClass: ed.news_class,
+    sectorRs: ed.sector_rs,
+    crossAsset: ed.cross_asset,
+    notes: ed.notes,
+  };
+}
+
+interface PersistResult {
+  runId?: number;
+  setupsUpserted: number;
+  decisionsInserted: number;
+  decisionsSkipped: number;
+  jsonParseSuccess: boolean;
+  error?: string;
+}
+
+/**
+ * Persist a completed validation run to SQLite. Non-fatal on DB errors.
+ *
+ * Vercel guard: if persistence is unavailable (Vercel serverless, or manual
+ * override), return early WITHOUT require()ing the DB layer — this is what keeps
+ * better-sqlite3 (a native module) off the Vercel deploy entirely. The write
+ * module is loaded lazily via require() only when we actually intend to write.
+ */
+function persistRun(args: {
+  timestamp: string;
+  liveSetups: EnrichedSetup[];
+  pendingSetups: EnrichedSetup[];
+  stats: FilterStats;
+  riskPerTrade: number;
+  tokensInput?: number;
+  tokensOutput?: number;
+  model: string;
+  rawMarkdown: string;
+  extracted: ExtractedPayload | null;
+  errorMsg?: string;
+}): PersistResult {
+  const result: PersistResult = {
+    setupsUpserted: 0,
+    decisionsInserted: 0,
+    decisionsSkipped: 0,
+    jsonParseSuccess: args.extracted !== null,
+  };
+
+  // Vercel guard — never touch the DB layer when persistence is off.
+  if (!isPersistenceAvailable()) {
+    result.error = persistenceUnavailableReason();
+    return result;
+  }
+
+  try {
+    // Lazy-load the write module so better-sqlite3 is only required on the VPS.
+    const dbWrite = require("@/lib/db/write") as typeof import("@/lib/db/write");
+
+    // 1. Upsert every setup we validated (both sections)
+    const setupIdMap = new Map<string, number>(); // "TICKER|YYYY-MM-DD" -> setup_id
+
+    const allSetups = [
+      ...args.liveSetups.map((s) => ({ setup: s, section: "live" as const })),
+      ...args.pendingSetups.map((s) => ({ setup: s, section: "pending" as const })),
+    ];
+
+    for (const { setup } of allSetups) {
+      const handleLowDate = normalizeIsoDate(setup.handleLowDate);
+      if (!handleLowDate) continue;
+
+      const seen: SetupSeen = {
+        ticker: setup.ticker,
+        handleLowDate,
+        status: setup.status,
+        // ParsedSetup carries no parsed geometry — leave entry/stop/target NULL
+        // for v1.3 minimum; the tracking primitive (ticker + handle_low_date) is enough.
+      };
+      const setupId = dbWrite.upsertSetup(seen, args.timestamp);
+      setupIdMap.set(`${setup.ticker}|${handleLowDate}`, setupId);
+      result.setupsUpserted++;
+    }
+
+    // 2. Insert the validation_runs row
+    const runId = dbWrite.insertValidationRun({
+      timestamp: args.timestamp,
+      inputRowCount: args.stats.inputRowCount,
+      totalFinalCount: args.stats.totalFinal,
+      liveFinalCount: args.stats.live.finalCount,
+      pendingFinalCount: args.stats.pending.finalCount,
+      liveDroppedStale: args.stats.live.droppedHandleStale,
+      pendingDroppedStale: args.stats.pending.droppedHandleStale,
+      liveDroppedOverCap: args.stats.live.droppedOverCap,
+      pendingDroppedOverCap: args.stats.pending.droppedOverCap,
+      tiingoAttempted: args.stats.tiingoCallsAttempted,
+      tiingoSucceeded: args.stats.tiingoCallsSucceeded,
+      riskPerTrade: args.riskPerTrade,
+      tokensInput: args.tokensInput,
+      tokensOutput: args.tokensOutput,
+      model: args.model,
+      rawMarkdown: args.rawMarkdown,
+      parseSuccess: args.extracted !== null,
+      errorMsg: args.errorMsg,
+    });
+    result.runId = runId;
+
+    // 3. Insert decisions if we successfully extracted JSON
+    if (args.extracted !== null) {
+      const decisionRows: DecisionRow[] = [];
+      for (const ed of args.extracted.live_decisions ?? []) {
+        const row = extractedToDecisionRow(ed, "live");
+        if (row) decisionRows.push(row);
+      }
+      for (const ed of args.extracted.pending_decisions ?? []) {
+        const row = extractedToDecisionRow(ed, "pending");
+        if (row) decisionRows.push(row);
+      }
+
+      const { inserted, skipped } = dbWrite.insertDecisions(decisionRows, runId, setupIdMap);
+      result.decisionsInserted = inserted;
+      result.decisionsSkipped = skipped;
+    }
+  } catch (err) {
+    result.error = err instanceof Error ? err.message : String(err);
+  }
+
+  return result;
+}
+
+// ============================================================
 // Prompt building — embed enriched data as structured text
 // ============================================================
 
@@ -577,31 +788,58 @@ export async function POST(req: NextRequest) {
       messages: [{ role: "user", content: prompt }],
     });
 
-    const markdown = completion.content
+    const fullResponse = completion.content
       .filter((b) => b.type === "text")
       .map((b) => (b as { type: "text"; text: string }).text)
       .join("\n");
 
     const truncated = completion.stop_reason === "max_tokens";
 
+    // Extract the structured JSON block for persistence, then strip it from the
+    // markdown that goes to the client (they only need the rendered tables).
+    const extracted = extractJsonBlock(fullResponse);
+    const markdownForClient = fullResponse.replace(/```json\s*\n[\s\S]*?\n```/g, "").trim();
+
+    // Persist to SQLite — guarded (VPS only) and non-fatal (DB errors don't fail the HTTP response).
+    const persistResult = persistRun({
+      timestamp,
+      liveSetups: enrichedLive,
+      pendingSetups: enrichedPending,
+      stats,
+      riskPerTrade,
+      tokensInput: completion.usage.input_tokens,
+      tokensOutput: completion.usage.output_tokens,
+      model,
+      rawMarkdown: fullResponse,
+      extracted,
+      errorMsg: truncated ? `Output truncated at ${maxTokens} tokens` : undefined,
+    });
+
+    const persistNote = !isPersistenceAvailable()
+      ? `> **Persistence:** ${persistenceUnavailableReason()}\n`
+      : persistResult.error
+        ? `> ⚠ Persistence error: ${persistResult.error}\n`
+        : `> **Persistence:** run #${persistResult.runId ?? "?"} · ${persistResult.setupsUpserted} setups tracked · ${persistResult.decisionsInserted} decisions recorded${persistResult.decisionsSkipped > 0 ? ` · ${persistResult.decisionsSkipped} skipped (unmatched)` : ""}${persistResult.jsonParseSuccess ? "" : " · ⚠ JSON parse failed, only run metadata stored"}\n`;
+
     const preface =
       `> **Filter pipeline:** ${stats.inputRowCount} input → ` +
       `Live: ${stats.live.finalCount} (dropped ${stats.live.droppedHandleStale} stale, ${stats.live.droppedOverCap} over cap) · ` +
       `Pending: ${stats.pending.finalCount} (dropped ${stats.pending.droppedHandleStale} stale, ${stats.pending.droppedOverCap} over cap)\n` +
       `> **Tiingo enrichment:** ${stats.tiingoCallsSucceeded}/${stats.tiingoCallsAttempted} setups with live data\n` +
+      persistNote +
       `> Handle-staleness filter validated May 2026 (drop >${MAX_HANDLE_DAYS}d).\n\n`;
 
     return NextResponse.json<JackValidationResponse>({
       schemaVersion: "1.2", timestamp,
       strategy: "Cup with Handle t05", riskPerTrade,
-      markdown: preface + (markdown || "**Warning:** Empty response."),
+      markdown: preface + (markdownForClient || "**Warning:** Empty response."),
       model, inputRowCount: stats.inputRowCount,
       filterStats: stats,
       tokens: {
         input: completion.usage.input_tokens,
         output: completion.usage.output_tokens,
       },
-      degraded: !markdown || truncated,
+      degraded: !markdownForClient || truncated,
       error: truncated ? `Output truncated at ${maxTokens} tokens` : null,
     });
   } catch (err) {
