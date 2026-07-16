@@ -35,6 +35,37 @@ interface UserFillsBody {
 
 type RequestBody = UserActionBody | UserFillsBody;
 
+// ============================================================
+// Re-hydration read (display-only): return the current user_action + fills for a
+// set of setups so the interactive table can reload them on mount. Saving fills
+// writes the DB but not the cached validation response, so returning to JACK
+// without re-VALIDATE would otherwise show stale/blank rows. Read-only, guarded.
+//   GET /api/jack-decisions?setupIds=1,2,3  ->  { marks: { "1": {...}, ... } }
+// ============================================================
+export async function GET(req: NextRequest) {
+  if (!isPersistenceAvailable()) {
+    return NextResponse.json({ marks: {} });
+  }
+  const raw = req.nextUrl.searchParams.get("setupIds") ?? "";
+  const setupIds = raw
+    .split(",")
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isFinite(n));
+  if (setupIds.length === 0) {
+    return NextResponse.json({ marks: {} });
+  }
+  try {
+    const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
+    const map = dbRead.getUserMarksForSetups(setupIds);
+    const marks: Record<string, import("@/lib/db/read").UserMark> = {};
+    for (const [setupId, mark] of map) marks[String(setupId)] = mark;
+    return NextResponse.json({ marks });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ marks: {}, error: msg }, { status: 500 });
+  }
+}
+
 export async function POST(req: NextRequest) {
   if (!isPersistenceAvailable()) {
     return NextResponse.json(

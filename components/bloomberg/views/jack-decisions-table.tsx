@@ -97,14 +97,65 @@ export function seedRows(decisions: JackDecisionClient[]): Record<string, RowSta
   return out;
 }
 
+interface MarkDto {
+  userAction: UserAction | null;
+  userEntryPrice: number | null;
+  userEntryDate: string | null;
+  userExitPrice: number | null;
+  userExitDate: string | null;
+}
+
+// Overlay freshly-fetched DB marks onto the (possibly stale) decisions so seedRows
+// re-displays the latest saved action + fills. DB is source of truth on mount.
+export function overlayMarks(decisions: JackDecisionClient[], marks: Record<string, MarkDto>): JackDecisionClient[] {
+  return decisions.map((d) => {
+    const m = d.setupId != null ? marks[String(d.setupId)] : undefined;
+    if (!m) return d;
+    return {
+      ...d,
+      userAction: m.userAction ?? null,
+      userEntryPrice: m.userEntryPrice ?? null,
+      userEntryDate: m.userEntryDate ?? null,
+      userExitPrice: m.userExitPrice ?? null,
+      userExitDate: m.userExitDate ?? null,
+    };
+  });
+}
+
 export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable }: JackDecisionsTableProps) {
-  // Seed from existing marks on first render, and re-seed whenever a new
-  // validation response arrives (decisions identity changes) — that's the
-  // re-VALIDATE case where persisted marks must reappear.
+  // Seed from the marks already on props (from the last VALIDATE) on first render,
+  // and re-seed whenever a new validation response arrives (decisions identity
+  // changes) — the re-VALIDATE case where persisted marks must reappear.
   const [rows, setRows] = useState<Record<string, RowState>>(() => seedRows(decisions));
   useEffect(() => {
     setRows(seedRows(decisions));
   }, [decisions]);
+
+  // Re-hydration on mount / return-to-JACK: saving fills writes the DB but NOT the
+  // cached validation response, so navigating away and back (without re-VALIDATE)
+  // would show stale/blank rows. Fetch the latest marks + fills from the DB and
+  // overlay them. Display-only; no write-path change.
+  useEffect(() => {
+    if (!persistenceAvailable) return;
+    const setupIds = Array.from(
+      new Set(decisions.map((d) => d.setupId).filter((x): x is number => x != null))
+    );
+    if (setupIds.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/jack-decisions?setupIds=${setupIds.join(",")}`);
+        const json = (await res.json()) as { marks?: Record<string, MarkDto> };
+        if (cancelled || !json.marks) return;
+        setRows(seedRows(overlayMarks(decisions, json.marks)));
+      } catch {
+        // Non-fatal — the props-based seed above still stands.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [decisions, persistenceAvailable]);
 
   const getRow = (key: string): RowState => rows[key] ?? defaultRow();
 
@@ -292,50 +343,55 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
                       </td>
                     </tr>
 
-                    {/* Fills sub-row — only for TRADED. Full-width so the Save button
-                        is always visible (was previously lost in horizontal scroll). */}
+                    {/* Fills sub-row — only for TRADED. Full-width tinted panel so the
+                        Save button is always visible (never lost in horizontal scroll). */}
                     {isTraded && (
                       <tr className={`border-b ${border}`}>
-                        <td colSpan={4} className="px-1.5 pb-2 pt-0.5">
-                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 pl-2">
-                            <span className={`text-[10px] font-bold ${subFg}`}>FILLS →</span>
-                            <label className={`flex items-center gap-1 ${subFg}`}>
-                              Entry
-                              <input
-                                type="text" inputMode="decimal" value={row.entry}
-                                onChange={(e) => patch(key, { entry: sanitizePrice(e.target.value), fillsSave: "idle" })}
-                                onKeyDown={stopKeys} className={inputCls} placeholder="—"
-                              />
-                            </label>
-                            <label className={`flex items-center gap-1 ${subFg}`}>
-                              Entry date
-                              <input
-                                type="date" value={row.entryDate}
-                                onChange={(e) => patch(key, { entryDate: e.target.value, fillsSave: "idle" })}
-                                onKeyDown={stopKeys} className={dateCls}
-                              />
-                            </label>
-                            <label className={`flex items-center gap-1 ${subFg}`}>
-                              Exit
-                              <input
-                                type="text" inputMode="decimal" value={row.exit}
-                                onChange={(e) => patch(key, { exit: sanitizePrice(e.target.value), fillsSave: "idle" })}
-                                onKeyDown={stopKeys} className={inputCls} placeholder="—"
-                              />
-                            </label>
-                            <label className={`flex items-center gap-1 ${subFg}`}>
-                              Exit date
-                              <input
-                                type="date" value={row.exitDate}
-                                onChange={(e) => patch(key, { exitDate: e.target.value, fillsSave: "idle" })}
-                                onKeyDown={stopKeys} className={dateCls}
-                              />
-                            </label>
-                            <span className={`font-bold ${rPreview != null ? (rPreview >= 0 ? "text-green-400" : "text-red-400") : subFg}`}>
-                              user R: {rPreview != null ? `${rPreview >= 0 ? "+" : ""}${rPreview.toFixed(2)}R` : "—"}
+                        <td colSpan={4} className="px-1.5 pb-2">
+                          <div
+                            className={`flex flex-wrap items-end gap-x-3 gap-y-2 rounded border ${border} px-3 py-2 ${
+                              isDarkMode ? "bg-orange-950/20" : "bg-orange-50"
+                            }`}
+                          >
+                            <span className={`self-center text-[10px] font-bold tracking-widest ${fg}`}>
+                              FILLS
                             </span>
-                            {renderSaveButton(d, key, row.fillsSave)}
-                            {row.error && <span className="text-red-400 text-[10px]">{row.error}</span>}
+                            {(
+                              [
+                                { lbl: "Entry price", val: row.entry, kind: "price", set: (v: string) => patch(key, { entry: sanitizePrice(v), fillsSave: "idle" }) },
+                                { lbl: "Entry date", val: row.entryDate, kind: "date", set: (v: string) => patch(key, { entryDate: v, fillsSave: "idle" }) },
+                                { lbl: "Exit price", val: row.exit, kind: "price", set: (v: string) => patch(key, { exit: sanitizePrice(v), fillsSave: "idle" }) },
+                                { lbl: "Exit date", val: row.exitDate, kind: "date", set: (v: string) => patch(key, { exitDate: v, fillsSave: "idle" }) },
+                              ] as const
+                            ).map((f) => (
+                              <label key={f.lbl} className="flex flex-col gap-0.5">
+                                <span className={`text-[9px] uppercase tracking-wide ${subFg}`}>{f.lbl}</span>
+                                <input
+                                  type={f.kind === "date" ? "date" : "text"}
+                                  inputMode={f.kind === "price" ? "decimal" : undefined}
+                                  value={f.val}
+                                  onChange={(e) => f.set(e.target.value)}
+                                  onKeyDown={stopKeys}
+                                  className={f.kind === "date" ? dateCls : inputCls}
+                                  placeholder={f.kind === "price" ? "0.00" : undefined}
+                                />
+                              </label>
+                            ))}
+                            <div className={`self-stretch w-px ${isDarkMode ? "bg-orange-900" : "bg-orange-200"}`} />
+                            <div className="flex flex-col gap-0.5">
+                              <span className={`text-[9px] uppercase tracking-wide ${subFg}`}>user R</span>
+                              <span
+                                className={`text-[13px] font-bold leading-6 ${
+                                  rPreview != null ? (rPreview >= 0 ? "text-green-400" : "text-red-400") : subFg
+                                }`}
+                              >
+                                {rPreview != null ? `${rPreview >= 0 ? "+" : ""}${rPreview.toFixed(2)}R` : "—"}
+                              </span>
+                            </div>
+                            <div className="ml-auto flex items-center gap-2">
+                              {row.error && <span className="text-red-400 text-[10px] max-w-40">{row.error}</span>}
+                              {renderSaveButton(d, key, row.fillsSave)}
+                            </div>
                           </div>
                         </td>
                       </tr>
