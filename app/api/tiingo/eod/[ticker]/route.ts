@@ -32,6 +32,20 @@ export async function GET(
   const { searchParams } = new URL(req.url);
   const days = parseInt(searchParams.get("days") ?? "30", 10);
 
+  // Session B additions (all backward-compatible — `days` behaves as before when
+  // these are absent):
+  //   startDate=YYYY-MM-DD  explicit window start (overrides `days`). The outcome
+  //                         tracker passes handle_low_date so it gets the full
+  //                         post-setup history (≥90 trading days) for the replay.
+  //   endDate=YYYY-MM-DD    explicit window end (defaults to today).
+  //   raw=1                 return UNADJUSTED OHLC. The replay compares against
+  //                         nominal breakout/stop/target price levels, so raw
+  //                         (split/div-unadjusted) prices line up; the default
+  //                         (adjusted) is kept for the enrichment callers.
+  const startDateParam = searchParams.get("startDate");
+  const endDateParam = searchParams.get("endDate");
+  const useRaw = searchParams.get("raw") === "1";
+
   const token = process.env.TIINGO_API_KEY;
   if (!token) {
     return NextResponse.json<EodResponse>(
@@ -40,12 +54,18 @@ export async function GET(
     );
   }
 
-  const endDate = new Date();
-  const startDate = new Date();
-  startDate.setDate(startDate.getDate() - days);
   const fmt = (d: Date) => d.toISOString().split("T")[0];
+  const endStr = endDateParam ?? fmt(new Date());
+  let startStr: string;
+  if (startDateParam) {
+    startStr = startDateParam;
+  } else {
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+    startStr = fmt(startDate);
+  }
 
-  const url = `${TIINGO_BASE}/${ticker}/prices?startDate=${fmt(startDate)}&endDate=${fmt(endDate)}&format=json`;
+  const url = `${TIINGO_BASE}/${ticker}/prices?startDate=${startStr}&endDate=${endStr}&format=json`;
 
   try {
     const res = await fetch(url, {
@@ -67,6 +87,11 @@ export async function GET(
 
     const data = (await res.json()) as Array<{
       date: string;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
       adjOpen: number;
       adjHigh: number;
       adjLow: number;
@@ -76,11 +101,11 @@ export async function GET(
 
     const bars: Bar[] = data.map((d) => ({
       date: d.date.split("T")[0],
-      open: d.adjOpen,
-      high: d.adjHigh,
-      low: d.adjLow,
-      close: d.adjClose,
-      volume: d.adjVolume,
+      open: useRaw ? d.open : d.adjOpen,
+      high: useRaw ? d.high : d.adjHigh,
+      low: useRaw ? d.low : d.adjLow,
+      close: useRaw ? d.close : d.adjClose,
+      volume: useRaw ? d.volume : d.adjVolume,
     }));
 
     const latest = bars.length > 0 ? bars[bars.length - 1] : null;
