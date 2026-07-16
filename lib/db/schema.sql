@@ -90,6 +90,15 @@ CREATE TABLE IF NOT EXISTS outcomes (
     R_realized            REAL,
     max_favorable_pct     REAL,
     max_adverse_pct       REAL,
+    -- Session B (v1.4): user-fill columns. These are the EXECUTION-quality numbers
+    -- (what the trader actually got), kept alongside the theoretical replay columns
+    -- above (what the setup offered). One outcomes row per setup carries both.
+    -- theoretical R (R_realized) vs user_R_realized answers
+    -- "was the setup good?" vs "did I trade it well?".
+    user_entry_price      REAL,
+    user_exit_price       REAL,
+    user_exit_date        TEXT,
+    user_R_realized       REAL,
     outcome_computed_at   TEXT NOT NULL,
     outcome_source        TEXT NOT NULL,
     CHECK (fired IN (0, 1)),

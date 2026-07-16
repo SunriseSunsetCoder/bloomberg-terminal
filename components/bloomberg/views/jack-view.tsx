@@ -3,8 +3,14 @@
 import { useState, useCallback, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database } from "lucide-react";
+import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database, RefreshCw } from "lucide-react";
 import { useJackValidation } from "@/components/bloomberg/hooks/useJackValidation";
+import { JackDecisionsTable } from "@/components/bloomberg/views/jack-decisions-table";
+
+interface OutcomesToast {
+  kind: "ok" | "error";
+  message: string;
+}
 
 const DEFAULT_RISK = 2000;
 const LS_KEY_RISK = "jack.riskPerTrade";
@@ -30,6 +36,36 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
 
   const [copied, setCopied] = useState(false);
   const { mutate, data, isPending, reset } = useJackValidation();
+
+  // "Update Outcomes" trigger (Session B, Deliverable 3) — POST the tracker,
+  // toast the summary. React state only, no storage.
+  const [outcomesPending, setOutcomesPending] = useState(false);
+  const [outcomesToast, setOutcomesToast] = useState<OutcomesToast | null>(null);
+
+  const handleUpdateOutcomes = useCallback(async () => {
+    setOutcomesPending(true);
+    setOutcomesToast(null);
+    try {
+      const res = await fetch("/api/jack-outcomes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}), // resolutionDays defaults to 90 server-side
+      });
+      const json = (await res.json()) as {
+        ok: boolean;
+        message?: string;
+        error?: string;
+      };
+      setOutcomesToast({
+        kind: json.ok ? "ok" : "error",
+        message: json.message ?? json.error ?? "No response",
+      });
+    } catch (e) {
+      setOutcomesToast({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setOutcomesPending(false);
+    }
+  }, []);
 
   const handleRiskChange = useCallback((next: number) => {
     setRiskPerTrade(next);
@@ -116,12 +152,40 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
             </span>
           </div>
         </div>
-        <div className={`text-xs ${subFg}`}>
-          Risk/trade: <span className={fg}>${riskPerTrade.toLocaleString()}</span>
-          {" · "}Indiv cap: <span className={fg}>${individualCap.toLocaleString()}</span>
-          {" · "}Session cap: <span className={fg}>${sessionCap.toLocaleString()}</span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleUpdateOutcomes}
+            disabled={outcomesPending}
+            title="Run the Tiingo outcome tracker: replay each resolved setup (90 trading days), write theoretical R to the outcomes table."
+            className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${btnSecondary} disabled:opacity-50`}
+          >
+            {outcomesPending ? (
+              <><RefreshCw size={12} className="animate-spin" /> UPDATING…</>
+            ) : (
+              <><RefreshCw size={12} /> UPDATE OUTCOMES</>
+            )}
+          </button>
+          <div className={`text-xs ${subFg}`}>
+            Risk/trade: <span className={fg}>${riskPerTrade.toLocaleString()}</span>
+            {" · "}Indiv cap: <span className={fg}>${individualCap.toLocaleString()}</span>
+            {" · "}Session cap: <span className={fg}>${sessionCap.toLocaleString()}</span>
+          </div>
         </div>
       </div>
+
+      {/* Outcome-tracker toast */}
+      {outcomesToast && (
+        <div
+          className={`px-4 py-2 border-b ${border} flex-shrink-0 text-xs flex items-center justify-between ${
+            outcomesToast.kind === "ok" ? "text-green-400" : "text-yellow-400"
+          }`}
+        >
+          <span>
+            <span className="font-bold">Outcomes:</span> {outcomesToast.message}
+          </span>
+          <button onClick={() => setOutcomesToast(null)} className={subFg}>✕</button>
+        </div>
+      )}
 
       {/* Strategy + pipeline info strip */}
       <div className={`px-4 py-2 border-b ${border} text-xs ${subFg} flex-shrink-0`}>
@@ -300,6 +364,16 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
                 <div className="font-bold mb-1">⚠ {data.degraded ? "Degraded result" : "Validation error"}</div>
                 <div className="text-xs">{data.error}</div>
               </div>
+            )}
+
+            {/* Interactive decision table — source of truth for user writes.
+                Renders from the JSON decisions block, above the markdown summary. */}
+            {!isPending && data?.decisions && data.decisions.length > 0 && (
+              <JackDecisionsTable
+                decisions={data.decisions}
+                isDarkMode={isDarkMode}
+                persistenceAvailable={data.persistenceAvailable ?? false}
+              />
             )}
 
             {!isPending && data?.markdown && (

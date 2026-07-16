@@ -19,6 +19,18 @@ export interface FilterStats {
   tiingoCallsSucceeded: number;
 }
 
+export interface JackDecisionClient {
+  decisionId: number | null;
+  setupId: number | null;
+  ticker: string;
+  handleLowDate: string;
+  section: "live" | "pending";
+  decision: string;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+}
+
 export interface JackValidationResponse {
   schemaVersion: "1.2";
   timestamp: string;
@@ -31,6 +43,9 @@ export interface JackValidationResponse {
   tokens?: { input: number; output: number };
   degraded?: boolean;
   error?: string | null;
+  // Session B — interactive decision rows + persistence availability flag.
+  decisions?: JackDecisionClient[];
+  persistenceAvailable?: boolean;
 }
 
 export interface JackValidationRequest {
