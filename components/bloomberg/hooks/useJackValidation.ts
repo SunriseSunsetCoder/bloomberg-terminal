@@ -29,6 +29,15 @@ export interface JackDecisionClient {
   entry: number | null;
   stop: number | null;
   target: number | null;
+  // v2 expandable-row content (plumbed from the JSON decision + enriched data).
+  breakout: number | null;
+  currentPrice: number | null;
+  note: string | null;
+  newsClass: string | null;
+  sectorRs: string | null;
+  crossAsset: string | null;
+  earningsFlag: string | null;
+  pctToBreakout: number | null;
   // Bug A re-hydration: existing user marks for this setup, so re-VALIDATE
   // re-displays them instead of blank rows.
   userAction: "TRADED" | "PASSED" | "WATCHED" | null;

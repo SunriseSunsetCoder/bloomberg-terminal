@@ -130,6 +130,16 @@ interface JackDecisionClient {
   entry: number | null;
   stop: number | null;
   target: number | null;
+  // v2 expandable-row content, plumbed from the already-parsed JSON decision +
+  // enriched Tiingo data (presentation only — no new fetch or logic).
+  breakout: number | null;
+  currentPrice: number | null;
+  note: string | null;
+  newsClass: string | null;
+  sectorRs: string | null;
+  crossAsset: string | null;
+  earningsFlag: string | null;
+  pctToBreakout: number | null;
   // Bug A re-hydration: existing user marks for this setup (from prior runs),
   // so re-VALIDATE re-displays them instead of rendering blank. Read-only;
   // new writes still target the current run's decision row.
@@ -600,7 +610,10 @@ export function buildClientDecisions(
   // Bug A: existing user marks keyed by setup_id (empty when persistence off).
   userMarks: Map<number, import("@/lib/db/read").UserMark> = new Map()
 ): JackDecisionClient[] {
-  const geo = new Map<string, { entry: number | null; stop: number | null; target: number | null }>();
+  const geo = new Map<
+    string,
+    { entry: number | null; stop: number | null; target: number | null; breakout: number | null; currentPrice: number | null }
+  >();
   for (const s of [...enrichedLive, ...enrichedPending]) {
     const hld = normalizeIsoDate(s.handleLowDate);
     if (!hld) continue;
@@ -608,6 +621,8 @@ export function buildClientDecisions(
       entry: s.entry ?? null,
       stop: s.stop ?? null,
       target: s.t05Target ?? null,
+      breakout: s.breakoutLevel ?? null,
+      currentPrice: s.tiingo.eodClose ?? null,
     });
   }
 
@@ -635,6 +650,14 @@ export function buildClientDecisions(
       entry: g?.entry ?? null,
       stop: g?.stop ?? null,
       target: g?.target ?? null,
+      breakout: g?.breakout ?? null,
+      currentPrice: g?.currentPrice ?? null,
+      note: ed.notes ?? null,
+      newsClass: ed.news_class ?? null,
+      sectorRs: ed.sector_rs ?? null,
+      crossAsset: ed.cross_asset ?? null,
+      earningsFlag: ed.earnings_flag ?? null,
+      pctToBreakout: typeof ed.pct_to_breakout === "number" ? ed.pct_to_breakout : null,
       userAction: mark?.userAction ?? null,
       userEntryPrice: mark?.userEntryPrice ?? null,
       userEntryDate: mark?.userEntryDate ?? null,
