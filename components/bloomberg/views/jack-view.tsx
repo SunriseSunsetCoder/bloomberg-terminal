@@ -3,7 +3,7 @@
 import { useState, useCallback, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database, RefreshCw } from "lucide-react";
+import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database, RefreshCw, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useJackValidation } from "@/components/bloomberg/hooks/useJackValidation";
 import { JackDecisionsTable } from "@/components/bloomberg/views/jack-decisions-table";
 
@@ -35,6 +35,10 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
   });
 
   const [copied, setCopied] = useState(false);
+  // Collapsible input panel so the decision output gets primary space (React
+  // state only — no storage). Auto-collapses once a result exists is deliberately
+  // NOT done; the user drives it.
+  const [inputCollapsed, setInputCollapsed] = useState(false);
   const { mutate, data, isPending, reset } = useJackValidation();
 
   // "Update Outcomes" trigger (Session B, Deliverable 3) — POST the tracker,
@@ -127,9 +131,14 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
   const btnSecondary = isDarkMode
     ? "bg-gray-900 hover:bg-gray-800 text-orange-300 border border-gray-800"
     : "bg-white hover:bg-gray-100 text-gray-800 border border-gray-300";
+  // `break-words` + anywhere-wrap stop long tokens from running off the right edge;
+  // wide markdown tables get their OWN horizontal scroll (block + overflow-x) rather
+  // than pushing the whole page sideways; <pre> wraps instead of overflowing.
+  const proseWrap =
+    "max-w-none break-words [overflow-wrap:anywhere] [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:overflow-x-auto [&_pre]:whitespace-pre-wrap [&_pre]:break-words";
   const proseClass = isDarkMode
-    ? "prose prose-invert prose-sm max-w-none prose-table:text-orange-200 prose-th:text-orange-400 prose-th:border-orange-900 prose-td:border-orange-900 prose-strong:text-orange-300 prose-blockquote:border-orange-900 prose-blockquote:text-orange-300"
-    : "prose prose-sm max-w-none";
+    ? `prose prose-invert prose-sm ${proseWrap} prose-table:text-orange-200 prose-th:text-orange-400 prose-th:border-orange-900 prose-td:border-orange-900 prose-strong:text-orange-300 prose-blockquote:border-orange-900 prose-blockquote:text-orange-300`
+    : `prose prose-sm ${proseWrap}`;
 
   return (
     <div className={`flex flex-col w-full ${bg} ${fg} font-mono text-sm overflow-hidden`} style={{ height: "calc(100vh - 4rem)" }}>
@@ -202,8 +211,31 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
 
       {/* Main body */}
       <div className="flex-1 flex flex-col lg:flex-row min-h-0">
-        {/* Left: input */}
-        <div className={`lg:w-2/5 flex flex-col border-r ${border} min-h-0`}>
+        {/* Left: input (collapsible — so the decision output gets primary space) */}
+        <div className={`${inputCollapsed ? "lg:w-9" : "lg:w-2/5"} flex flex-col border-r ${border} min-h-0 flex-shrink-0 transition-[width] duration-150`}>
+          {inputCollapsed ? (
+            <button
+              type="button"
+              onClick={() => setInputCollapsed(false)}
+              title="Expand input panel"
+              className={`flex-1 flex flex-col items-center gap-3 py-3 ${subFg} hover:text-orange-400`}
+            >
+              <PanelLeftOpen size={16} />
+              <span className="[writing-mode:vertical-rl] rotate-180 text-[10px] tracking-widest">INPUT · CSV</span>
+            </button>
+          ) : (
+          <>
+          <div className={`flex items-center justify-between px-3 py-2 border-b ${border} flex-shrink-0`}>
+            <span className={`text-xs font-bold ${subFg}`}>INPUT</span>
+            <button
+              type="button"
+              onClick={() => setInputCollapsed(true)}
+              title="Collapse input panel"
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${btnSecondary}`}
+            >
+              <PanelLeftClose size={12} /> Collapse
+            </button>
+          </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             <div>
               <label className={`block text-xs mb-1 ${subFg}`}>RISK PER TRADE (USD)</label>
@@ -261,10 +293,12 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
               <span className={fg}>v1.2 changes:</span> Two-section output (Live + Pending). Tiingo integration for EOD prices, news headlines, and estimated earnings dates. Sector RS and cross-asset still training-data inference. Pending ranking is freshness-only (untested) — Colab pending test pending.
             </div>
           </div>
+          </>
+          )}
         </div>
 
         {/* Right: output */}
-        <div className="lg:flex-1 flex flex-col min-h-0" style={{ maxHeight: "calc(100vh - 8rem)" }}>
+        <div className="lg:flex-1 flex flex-col min-h-0 min-w-0" style={{ maxHeight: "calc(100vh - 8rem)" }}>
           {/* Output header */}
           <div className={`flex items-center justify-between px-4 py-2 border-b ${border} flex-shrink-0`}>
             <div className={`text-xs ${subFg}`}>
@@ -343,8 +377,9 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
             </div>
           )}
 
-          {/* Output scroll area */}
-          <div className="flex-1 overflow-y-auto overflow-x-auto p-4">
+          {/* Output scroll area — vertical only; wide content (markdown tables,
+              decision table) scrolls inside its OWN container, not the page. */}
+          <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 min-w-0">
             {isPending && (
               <div className={`text-center ${subFg} py-12`}>
                 <RotateCcw size={32} className="animate-spin mx-auto mb-3" />
