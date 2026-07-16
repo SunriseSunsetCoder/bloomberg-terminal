@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Check, Loader2 } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { Check, Loader2, Save } from "lucide-react";
 import type { JackDecisionClient } from "@/components/bloomberg/hooks/useJackValidation";
 
 // ============================================================================
@@ -141,7 +141,16 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     const entryDate = row.entryDate === "" ? null : row.entryDate;
     const exit = row.exit === "" ? null : Number(row.exit);
     const exitDate = row.exitDate === "" ? null : row.exitDate;
-    if (!persistenceAvailable || d.setupId == null) return;
+    // Surface the no-op cases the old code swallowed silently (which looked like
+    // "I clicked Save and nothing persisted").
+    if (!persistenceAvailable) {
+      patch(key, { fillsSave: "error", error: "persistence disabled (Vercel) — no writes here" });
+      return;
+    }
+    if (d.setupId == null) {
+      patch(key, { fillsSave: "error", error: "no DB id for this setup — re-run VALIDATE first" });
+      return;
+    }
     patch(key, { fillsSave: "saving", error: undefined });
     try {
       const r = await postDecision({ type: "user_fills", setupId: d.setupId, entry, entryDate, exit, exitDate });
@@ -204,8 +213,41 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     );
   };
 
+  // Prominent per-row Save button for the fills. Lives in the full-width fills
+  // sub-row (below), so it's never hidden by the table's horizontal scroll.
+  const renderSaveButton = (d: JackDecisionClient, key: string, state: SaveState) => {
+    const base = "flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold border transition-colors disabled:opacity-50";
+    const cls =
+      state === "saved"
+        ? "border-green-600 text-green-400 bg-green-950/30"
+        : state === "error"
+          ? "border-red-600 text-red-400 bg-red-950/30 hover:bg-red-950/50"
+          : "bg-orange-600 border-orange-500 text-black hover:bg-orange-500"; // idle / saving — prominent
+    return (
+      <button
+        type="button"
+        onClick={() => handleSaveFills(d, key)}
+        disabled={state === "saving"}
+        className={`${base} ${cls}`}
+      >
+        {state === "saving" ? (
+          <><Loader2 size={12} className="animate-spin" /> Saving…</>
+        ) : state === "saved" ? (
+          <><Check size={12} /> Saved</>
+        ) : state === "error" ? (
+          <><Save size={12} /> Retry</>
+        ) : (
+          <><Save size={12} /> Save fills</>
+        )}
+      </button>
+    );
+  };
+
   const renderSection = (title: string, list: JackDecisionClient[], color: string) => {
     if (list.length === 0) return null;
+    const stopKeys = (e: { stopPropagation: () => void }) => e.stopPropagation();
+    const inputCls = `w-20 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500`;
+    const dateCls = `w-32 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500`;
     return (
       <div className="mb-3">
         <div className={`text-[11px] font-bold mb-1 ${color}`}>
@@ -219,12 +261,6 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
                 <th className="text-left px-1.5 py-1 font-normal">JACK</th>
                 <th className="text-left px-1.5 py-1 font-normal">Stop/Tgt</th>
                 <th className="text-center px-1.5 py-1 font-normal">Action</th>
-                <th className="text-left px-1.5 py-1 font-normal">Entry</th>
-                <th className="text-left px-1.5 py-1 font-normal">Entry date</th>
-                <th className="text-left px-1.5 py-1 font-normal">Exit</th>
-                <th className="text-left px-1.5 py-1 font-normal">Exit date</th>
-                <th className="text-right px-1.5 py-1 font-normal">user R</th>
-                <th className="px-1.5 py-1 font-normal"></th>
               </tr>
             </thead>
             <tbody>
@@ -232,86 +268,79 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
                 const key = rowKey(d, i);
                 const row = getRow(key);
                 const isTraded = row.userAction === "TRADED";
-                const disabledFill = !isTraded;
                 const rPreview = row.serverUserR ?? previewR(d, row);
-                const inputCls = `w-16 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500 disabled:opacity-40`;
-                const dateCls = `w-28 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500 disabled:opacity-40`;
-                // stopPropagation keeps keystrokes from reaching the global window
-                // keydown handler (KeyboardShortcuts), which matches digit keys to
-                // panel shortcuts and preventDefault()s them — that's what blocked typing.
-                const stopKeys = (e: { stopPropagation: () => void }) => e.stopPropagation();
                 return (
-                  <tr key={key} className={`border-b ${border}`}>
-                    <td className={`px-1.5 py-1 font-bold ${fg}`}>{d.ticker}</td>
-                    <td className={`px-1.5 py-1 ${subFg}`}>{d.decision}</td>
-                    <td className={`px-1.5 py-1 ${subFg} whitespace-nowrap`}>
-                      {d.stop != null ? d.stop.toFixed(2) : "—"} / {d.target != null ? d.target.toFixed(2) : "—"}
-                    </td>
-                    <td className="px-1.5 py-1">
-                      <div className="flex items-center justify-center gap-1">
-                        {actionBtn(d, key, "TRADED", row.userAction === "TRADED")}
-                        {actionBtn(d, key, "PASSED", row.userAction === "PASSED")}
-                        {actionBtn(d, key, "WATCHED", row.userAction === "WATCHED")}
-                        {row.userAction && (
-                          <span className={`flex items-center gap-1 ${actionTextColor(row.userAction)}`}>
-                            {renderSaveIcon(row.actionSave)}
-                            <span className="text-[10px] font-bold">{row.userAction}</span>
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-1.5 py-1">
-                      <input
-                        type="text" inputMode="decimal" disabled={disabledFill}
-                        value={row.entry}
-                        onChange={(e) => patch(key, { entry: sanitizePrice(e.target.value), fillsSave: "idle" })}
-                        onKeyDown={stopKeys}
-                        className={inputCls} placeholder="—"
-                      />
-                    </td>
-                    <td className="px-1.5 py-1">
-                      <input
-                        type="date" disabled={disabledFill}
-                        value={row.entryDate}
-                        onChange={(e) => patch(key, { entryDate: e.target.value, fillsSave: "idle" })}
-                        onKeyDown={stopKeys}
-                        className={dateCls}
-                      />
-                    </td>
-                    <td className="px-1.5 py-1">
-                      <input
-                        type="text" inputMode="decimal" disabled={disabledFill}
-                        value={row.exit}
-                        onChange={(e) => patch(key, { exit: sanitizePrice(e.target.value), fillsSave: "idle" })}
-                        onKeyDown={stopKeys}
-                        className={inputCls} placeholder="—"
-                      />
-                    </td>
-                    <td className="px-1.5 py-1">
-                      <input
-                        type="date" disabled={disabledFill}
-                        value={row.exitDate}
-                        onChange={(e) => patch(key, { exitDate: e.target.value, fillsSave: "idle" })}
-                        onKeyDown={stopKeys}
-                        className={dateCls}
-                      />
-                    </td>
-                    <td className={`px-1.5 py-1 text-right font-bold ${rPreview != null ? (rPreview >= 0 ? "text-green-400" : "text-red-400") : subFg}`}>
-                      {rPreview != null ? `${rPreview >= 0 ? "+" : ""}${rPreview.toFixed(2)}R` : "—"}
-                    </td>
-                    <td className="px-1.5 py-1">
-                      {isTraded && (
-                        <button
-                          type="button"
-                          onClick={() => handleSaveFills(d, key)}
-                          disabled={!persistenceAvailable || d.setupId == null || row.fillsSave === "saving"}
-                          className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border ${inputBorder} ${subFg} hover:border-orange-500 disabled:opacity-40`}
-                        >
-                          {row.fillsSave === "idle" ? "Save" : renderSaveIcon(row.fillsSave)}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
+                  <Fragment key={key}>
+                    <tr className={isTraded ? "" : `border-b ${border}`}>
+                      <td className={`px-1.5 py-1 font-bold ${fg}`}>{d.ticker}</td>
+                      <td className={`px-1.5 py-1 ${subFg}`}>{d.decision}</td>
+                      <td className={`px-1.5 py-1 ${subFg} whitespace-nowrap`}>
+                        {d.stop != null ? d.stop.toFixed(2) : "—"} / {d.target != null ? d.target.toFixed(2) : "—"}
+                      </td>
+                      <td className="px-1.5 py-1">
+                        <div className="flex items-center justify-center gap-1">
+                          {actionBtn(d, key, "TRADED", row.userAction === "TRADED")}
+                          {actionBtn(d, key, "PASSED", row.userAction === "PASSED")}
+                          {actionBtn(d, key, "WATCHED", row.userAction === "WATCHED")}
+                          {row.userAction && (
+                            <span className={`flex items-center gap-1 ${actionTextColor(row.userAction)}`}>
+                              {renderSaveIcon(row.actionSave)}
+                              <span className="text-[10px] font-bold">{row.userAction}</span>
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+
+                    {/* Fills sub-row — only for TRADED. Full-width so the Save button
+                        is always visible (was previously lost in horizontal scroll). */}
+                    {isTraded && (
+                      <tr className={`border-b ${border}`}>
+                        <td colSpan={4} className="px-1.5 pb-2 pt-0.5">
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 pl-2">
+                            <span className={`text-[10px] font-bold ${subFg}`}>FILLS →</span>
+                            <label className={`flex items-center gap-1 ${subFg}`}>
+                              Entry
+                              <input
+                                type="text" inputMode="decimal" value={row.entry}
+                                onChange={(e) => patch(key, { entry: sanitizePrice(e.target.value), fillsSave: "idle" })}
+                                onKeyDown={stopKeys} className={inputCls} placeholder="—"
+                              />
+                            </label>
+                            <label className={`flex items-center gap-1 ${subFg}`}>
+                              Entry date
+                              <input
+                                type="date" value={row.entryDate}
+                                onChange={(e) => patch(key, { entryDate: e.target.value, fillsSave: "idle" })}
+                                onKeyDown={stopKeys} className={dateCls}
+                              />
+                            </label>
+                            <label className={`flex items-center gap-1 ${subFg}`}>
+                              Exit
+                              <input
+                                type="text" inputMode="decimal" value={row.exit}
+                                onChange={(e) => patch(key, { exit: sanitizePrice(e.target.value), fillsSave: "idle" })}
+                                onKeyDown={stopKeys} className={inputCls} placeholder="—"
+                              />
+                            </label>
+                            <label className={`flex items-center gap-1 ${subFg}`}>
+                              Exit date
+                              <input
+                                type="date" value={row.exitDate}
+                                onChange={(e) => patch(key, { exitDate: e.target.value, fillsSave: "idle" })}
+                                onKeyDown={stopKeys} className={dateCls}
+                              />
+                            </label>
+                            <span className={`font-bold ${rPreview != null ? (rPreview >= 0 ? "text-green-400" : "text-red-400") : subFg}`}>
+                              user R: {rPreview != null ? `${rPreview >= 0 ? "+" : ""}${rPreview.toFixed(2)}R` : "—"}
+                            </span>
+                            {renderSaveButton(d, key, row.fillsSave)}
+                            {row.error && <span className="text-red-400 text-[10px]">{row.error}</span>}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -332,9 +361,10 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
       {renderSection("LIVE", liveDecisions, "text-green-400")}
       {renderSection("PENDING", pendingDecisions, "text-blue-400")}
       <div className={`text-[10px] ${subFg} mt-1`}>
-        Action letters: <b>T</b>raded · <b>P</b>assed · <b>W</b>atched. Fill fields enable on TRADED. user R =
-        (exit − entry) / (entry − stop) — execution quality, separate from the theoretical replay R.
-        Entry/Exit dates capture your actual holding period (compare vs the replay's timing).
+        Action letters: <b>T</b>raded · <b>P</b>assed · <b>W</b>atched. Marking <b>TRADED</b> opens a fills row —
+        enter entry/exit price + dates, then click <b>Save fills</b> (it must go green <b>Saved</b> to persist).
+        Saved fills re-appear when you return to JACK. user R = (exit − entry) / (entry − stop); Entry/Exit dates
+        capture your actual holding period.
       </div>
     </div>
   );
