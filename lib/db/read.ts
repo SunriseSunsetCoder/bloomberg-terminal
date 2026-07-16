@@ -214,7 +214,27 @@ export function markDecisionUserAction(
   userNotes?: string
 ): void {
   const db = getDb();
-  db.prepare(
-    `UPDATE decisions SET user_action = ?, user_action_at = ?, user_notes = ? WHERE id = ?`
-  ).run(action, new Date().toISOString(), userNotes ?? null, decisionId);
+  const now = new Date().toISOString();
+
+  // Re-mark = UPDATE per setup (JACK UI v2 §3 data contract). Each VALIDATE inserts
+  // a fresh decision row per run, so marking across runs could otherwise leave
+  // several marked rows for one setup (the duplicate-GLNG behaviour). Guarantee
+  // exactly ONE marked decision per setup by clearing any prior marks on the
+  // setup's other rows, then setting this one. This is an UPDATE, never an INSERT.
+  const row = db.prepare(`SELECT setup_id FROM decisions WHERE id = ?`).get(decisionId) as
+    | { setup_id: number }
+    | undefined;
+
+  const apply = db.transaction(() => {
+    if (row) {
+      db.prepare(
+        `UPDATE decisions SET user_action = NULL, user_action_at = NULL
+           WHERE setup_id = ? AND id != ? AND user_action IS NOT NULL`
+      ).run(row.setup_id, decisionId);
+    }
+    db.prepare(
+      `UPDATE decisions SET user_action = ?, user_action_at = ?, user_notes = ? WHERE id = ?`
+    ).run(action, now, userNotes ?? null, decisionId);
+  });
+  apply();
 }
