@@ -39,6 +39,9 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
   // state only — no storage). Auto-collapses once a result exists is deliberately
   // NOT done; the user drives it.
   const [inputCollapsed, setInputCollapsed] = useState(false);
+  // v2: expandable rows are the primary surface; the raw markdown (wide Table 1/2)
+  // is a collapsed fallback for copy/reference. Default hidden.
+  const [showRaw, setShowRaw] = useState(false);
   const { mutate, data, isPending, reset } = useJackValidation();
 
   // "Update Outcomes" trigger (Session B, Deliverable 3) — POST the tracker,
@@ -411,9 +414,23 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
               />
             )}
 
+            {/* Raw markdown analysis — collapsed fallback. The expandable rows above
+                are the primary surface; this keeps the full text for copy/reference
+                (the wide Table 1/2 that used to overflow lives here, behind a toggle). */}
             {!isPending && data?.markdown && (
-              <div className={proseClass}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.markdown}</ReactMarkdown>
+              <div className="mt-4 border-t pt-3 border-orange-900/40">
+                <button
+                  type="button"
+                  onClick={() => setShowRaw((v) => !v)}
+                  className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${btnSecondary}`}
+                >
+                  {showRaw ? "▾ Hide raw analysis" : "▸ Raw analysis (markdown)"}
+                </button>
+                {showRaw && (
+                  <div className={`${proseClass} mt-3`}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.markdown}</ReactMarkdown>
+                  </div>
+                )}
               </div>
             )}
           </div>
