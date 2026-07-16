@@ -1,19 +1,21 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
-import { Check, Loader2, Save } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Check, Loader2, Save, ChevronRight } from "lucide-react";
 import type { JackDecisionClient } from "@/components/bloomberg/hooks/useJackValidation";
 
 // ============================================================================
-// JACK interactive decision table (Session B, Deliverable 2).
+// JACK decision surface (UI v2). ONE expandable row per setup, in two preserved
+// groups (LIVE / PENDING). Replaces the old interactive table + wide markdown
+// tables. Progressive disclosure — collapsed by default, expand on click — so
+// nothing is a wide table and there's no horizontal scroll / char-wrap.
 //
 // SOURCE OF TRUTH for user writes. Binds to the parsed JSON decisions block
-// (props.decisions), NOT scraped markdown. Two writes per row:
-//   - Action TRADED/PASSED/WATCHED → decisions.user_action
-//   - Fills (entry/exit/exit-date, enabled when TRADED) → outcomes user-fill cols
-//
-// State is React-only — NO localStorage/sessionStorage (forbidden in this repo).
-// On Vercel (persistenceAvailable=false) rows render but writes are disabled.
+// (props.decisions), NOT scraped markdown:
+//   - Action TRADED/PASSED/WATCHED → decisions.user_action (upsert per setup)
+//   - Fills (entry/exit price + dates, only on TRADED) → outcomes user-fill cols
+// React state only — NO localStorage/sessionStorage. On Vercel
+// (persistenceAvailable=false) rows render but writes are disabled.
 // ============================================================================
 
 type UserAction = "TRADED" | "PASSED" | "WATCHED";
@@ -74,9 +76,8 @@ function defaultRow(): RowState {
   };
 }
 
-// Bug A re-hydration: seed row state from existing marks/fills the route attached
-// to each decision, so a re-VALIDATE re-displays what the user previously recorded
-// instead of blank rows. Rows with no prior marks are left to lazy defaults.
+// Seed row state from existing marks/fills the route attached to each decision,
+// so a re-VALIDATE re-displays what the user previously recorded (Bug A).
 export function seedRows(decisions: JackDecisionClient[]): Record<string, RowState> {
   const out: Record<string, RowState> = {};
   decisions.forEach((d, i) => {
@@ -122,24 +123,37 @@ export function overlayMarks(decisions: JackDecisionClient[], marks: Record<stri
   });
 }
 
+// Reward:risk multiple from the setup geometry (theoretical, NOT user R).
+function rewardRisk(d: JackDecisionClient): number | null {
+  if (d.entry == null || d.stop == null || d.target == null || d.entry === d.stop) return null;
+  return (d.target - d.entry) / (d.entry - d.stop);
+}
+
+// JACK verdict → colour class family.
+type Verdict = "trade" | "skip" | "watch" | "fired" | "other";
+function classifyVerdict(decision: string): Verdict {
+  const s = (decision || "").toUpperCase();
+  if (s.includes("TRADE")) return "trade";
+  if (s.includes("SKIP") || s.includes("AVOID") || s.includes("PASS")) return "skip";
+  if (s.includes("WATCH")) return "watch";
+  if (s.includes("FIRED") || s.includes("EXTENDED")) return "fired";
+  return "other";
+}
+
 export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable }: JackDecisionsTableProps) {
-  // Seed from the marks already on props (from the last VALIDATE) on first render,
-  // and re-seed whenever a new validation response arrives (decisions identity
-  // changes) — the re-VALIDATE case where persisted marks must reappear.
   const [rows, setRows] = useState<Record<string, RowState>>(() => seedRows(decisions));
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({}); // all collapsed by default
+
   useEffect(() => {
     setRows(seedRows(decisions));
   }, [decisions]);
 
   // Re-hydration on mount / return-to-JACK: saving fills writes the DB but NOT the
   // cached validation response, so navigating away and back (without re-VALIDATE)
-  // would show stale/blank rows. Fetch the latest marks + fills from the DB and
-  // overlay them. Display-only; no write-path change.
+  // would show stale/blank rows. Fetch the latest marks + fills and overlay them.
   useEffect(() => {
     if (!persistenceAvailable) return;
-    const setupIds = Array.from(
-      new Set(decisions.map((d) => d.setupId).filter((x): x is number => x != null))
-    );
+    const setupIds = Array.from(new Set(decisions.map((d) => d.setupId).filter((x): x is number => x != null)));
     if (setupIds.length === 0) return;
     let cancelled = false;
     (async () => {
@@ -149,7 +163,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
         if (cancelled || !json.marks) return;
         setRows(seedRows(overlayMarks(decisions, json.marks)));
       } catch {
-        // Non-fatal — the props-based seed above still stands.
+        // Non-fatal — the props-based seed still stands.
       }
     })();
     return () => {
@@ -159,21 +173,27 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
 
   const getRow = (key: string): RowState => rows[key] ?? defaultRow();
 
-  // Merge onto the LATEST state (prev), not the render-snapshot `rows` closure.
-  // Reading `rows` here dropped earlier updates when two patches fired in one
-  // handler (e.g. handleAction's userAction patch then actionSave patch) — the
-  // second clobbered userAction back to null, so the highlight/enable never stuck.
+  // Merge onto the LATEST state (prev), not the render-snapshot `rows` closure —
+  // so two patches in one handler don't clobber each other.
   const patch = (key: string, next: Partial<RowState>) =>
     setRows((prev) => ({ ...prev, [key]: { ...(prev[key] ?? defaultRow()), ...next } }));
 
+  const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  // ---- theme tokens (Bloomberg language: mono, orange accents, dark tokens) ----
   const subFg = isDarkMode ? "text-gray-400" : "text-gray-600";
   const fg = isDarkMode ? "text-orange-400" : "text-orange-700";
-  const border = isDarkMode ? "border-orange-900" : "border-orange-200";
+  const textFg = isDarkMode ? "text-orange-200" : "text-gray-800";
+  const border = isDarkMode ? "border-orange-900/60" : "border-orange-200";
+  const rowBg = isDarkMode ? "bg-gray-950/40" : "bg-gray-50";
+  const rowHover = isDarkMode ? "hover:bg-gray-900/50" : "hover:bg-gray-100";
+  const openBg = isDarkMode ? "bg-gray-950/70" : "bg-white";
   const inputBg = isDarkMode ? "bg-gray-950" : "bg-gray-50";
   const inputBorder = isDarkMode ? "border-gray-800" : "border-gray-300";
   const inputFg = isDarkMode ? "text-orange-300" : "text-gray-900";
-  const headBg = isDarkMode ? "bg-gray-950" : "bg-gray-100";
+  const track = isDarkMode ? "bg-gray-700" : "bg-gray-300";
 
+  // ---- action write (T/P/W) → decisions.user_action (upsert per setup, server-side) ----
   const handleAction = async (d: JackDecisionClient, key: string, action: UserAction) => {
     patch(key, { userAction: action, error: undefined });
     if (!persistenceAvailable || d.decisionId == null) return; // Vercel / unpersisted — local only
@@ -186,14 +206,13 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     }
   };
 
+  // ---- fill write → outcomes user-fill columns (reuses updateUserFills unchanged) ----
   const handleSaveFills = async (d: JackDecisionClient, key: string) => {
     const row = getRow(key);
     const entry = row.entry === "" ? null : Number(row.entry);
     const entryDate = row.entryDate === "" ? null : row.entryDate;
     const exit = row.exit === "" ? null : Number(row.exit);
     const exitDate = row.exitDate === "" ? null : row.exitDate;
-    // Surface the no-op cases the old code swallowed silently (which looked like
-    // "I clicked Save and nothing persisted").
     if (!persistenceAvailable) {
       patch(key, { fillsSave: "error", error: "persistence disabled (Vercel) — no writes here" });
       return;
@@ -207,9 +226,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
       const r = await postDecision({ type: "user_fills", setupId: d.setupId, entry, entryDate, exit, exitDate });
       patch(
         key,
-        r.ok
-          ? { fillsSave: "saved", serverUserR: r.userRRealized ?? null }
-          : { fillsSave: "error", error: r.error }
+        r.ok ? { fillsSave: "saved", serverUserR: r.userRRealized ?? null } : { fillsSave: "error", error: r.error }
       );
     } catch (e) {
       patch(key, { fillsSave: "error", error: e instanceof Error ? e.message : String(e) });
@@ -230,57 +247,98 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
 
   if (decisions.length === 0) return null;
 
-  const renderSaveIcon = (state: SaveState) => {
-    if (state === "saving") return <Loader2 size={11} className="animate-spin" />;
-    if (state === "saved") return <Check size={11} className="text-green-400" />;
-    if (state === "error") return <span className="text-red-400">!</span>;
-    return null;
-  };
+  // ================= small presentational helpers =================
 
-  // Distinct color per action so the recorded choice is unmistakable (bug: all
-  // three previously read as an identical green check).
-  const actionTextColor = (a: UserAction | null): string =>
-    a === "TRADED" ? "text-green-400" : a === "PASSED" ? "text-gray-300" : a === "WATCHED" ? "text-blue-400" : "";
-
-  const actionBtn = (d: JackDecisionClient, key: string, action: UserAction, active: boolean) => {
-    const base = "px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors";
-    const on =
-      action === "TRADED"
-        ? "bg-green-600 border-green-500 text-black"
-        : action === "PASSED"
-          ? "bg-gray-600 border-gray-500 text-white"
-          : "bg-blue-600 border-blue-500 text-white";
-    const off = isDarkMode
-      ? "bg-transparent border-gray-700 text-gray-400 hover:border-gray-500"
-      : "bg-transparent border-gray-300 text-gray-600 hover:border-gray-500";
+  const verdictPill = (decision: string) => {
+    const v = classifyVerdict(decision);
+    const cls =
+      v === "trade"
+        ? "bg-green-600/20 text-green-400 border-green-700"
+        : v === "skip"
+          ? "bg-red-600/20 text-red-400 border-red-700"
+          : v === "watch"
+            ? "bg-amber-500/20 text-amber-400 border-amber-600"
+            : "bg-gray-600/20 text-gray-400 border-gray-600";
     return (
-      <button
-        type="button"
-        onClick={() => handleAction(d, key, action)}
-        className={`${base} ${active ? on : off}`}
-      >
-        {action.charAt(0)}
-      </button>
+      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide border ${cls} whitespace-nowrap`}>
+        {decision}
+      </span>
     );
   };
 
-  // Prominent per-row Save button for the fills. Lives in the full-width fills
-  // sub-row (below), so it's never hidden by the table's horizontal scroll.
+  const rMultipleChip = (rr: number | null) => {
+    if (rr == null) return <span className={`text-[11px] ${subFg}`}>R/R —</span>;
+    const color = rr >= 1.5 ? "text-green-400" : rr >= 1 ? "text-amber-400" : "text-red-400";
+    return (
+      <span className={`text-[11px] font-bold ${color} whitespace-nowrap`}>R/R {rr.toFixed(2)}</span>
+    );
+  };
+
+  const actionBadge = (action: UserAction | null) => {
+    if (action === "TRADED") return <span className="text-[10px] font-bold text-green-400">✓ TRADED</span>;
+    if (action === "PASSED") return <span className="text-[10px] font-bold text-gray-300">✓ PASSED</span>;
+    if (action === "WATCHED") return <span className="text-[10px] font-bold text-sky-400">✓ WATCHED</span>;
+    return <span className={`text-[10px] ${subFg}`}>unmarked</span>;
+  };
+
+  const priceLadder = (d: JackDecisionClient) => {
+    type LadderPt = { label: string; v: number | null; dot: string; text: string };
+    const raw: LadderPt[] = [
+      { label: "STOP", v: d.stop, dot: "bg-red-500", text: "text-red-400" },
+      { label: "ENTRY", v: d.entry, dot: "bg-orange-500", text: "text-orange-400" },
+      { label: "NOW", v: d.currentPrice, dot: "bg-sky-400", text: "text-sky-400" },
+      { label: "TGT", v: d.target, dot: "bg-green-500", text: "text-green-400" },
+    ];
+    const pts = raw.filter((p): p is { label: string; v: number; dot: string; text: string } => p.v != null);
+    if (pts.length < 2) return null;
+    const vals = pts.map((p) => p.v);
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    const pct = (v: number) => (hi === lo ? 50 : ((v - lo) / (hi - lo)) * 100);
+    return (
+      <div>
+        <div className={`text-[9px] uppercase tracking-widest ${subFg} mb-1`}>Price ladder</div>
+        <div className="relative h-4">
+          <div className={`absolute top-1/2 left-1 right-1 h-px ${track}`} />
+          {pts.map((p) => (
+            <div
+              key={p.label}
+              className="absolute -translate-x-1/2 top-1/2 -translate-y-1/2"
+              style={{ left: `${pct(p.v)}%` }}
+            >
+              <div className={`w-2 h-2 rounded-full ${p.dot} ring-2 ${isDarkMode ? "ring-gray-950" : "ring-white"}`} />
+            </div>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
+          {pts.map((p) => (
+            <span key={p.label} className={`text-[10px] ${p.text}`}>
+              <b>{p.label}</b> {p.v.toFixed(2)}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const chip = (label: string, val: string | null | undefined) =>
+    val ? (
+      <span className={`text-[10px] px-1.5 py-0.5 rounded border ${border} ${subFg}`}>
+        <span className={fg}>{label}</span> {val}
+      </span>
+    ) : null;
+
   const renderSaveButton = (d: JackDecisionClient, key: string, state: SaveState) => {
-    const base = "flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold border transition-colors disabled:opacity-50";
+    const base =
+      "flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold border transition-colors disabled:opacity-50";
     const cls =
       state === "saved"
         ? "border-green-600 text-green-400 bg-green-950/30"
         : state === "error"
           ? "border-red-600 text-red-400 bg-red-950/30 hover:bg-red-950/50"
-          : "bg-orange-600 border-orange-500 text-black hover:bg-orange-500"; // idle / saving — prominent
+          : "bg-orange-600 border-orange-500 text-black hover:bg-orange-500";
     return (
-      <button
-        type="button"
-        onClick={() => handleSaveFills(d, key)}
-        disabled={state === "saving"}
-        className={`${base} ${cls}`}
-      >
+      <button type="button" onClick={() => handleSaveFills(d, key)} disabled={state === "saving"} className={`${base} ${cls}`}>
         {state === "saving" ? (
           <><Loader2 size={12} className="animate-spin" /> Saving…</>
         ) : state === "saved" ? (
@@ -294,133 +352,168 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     );
   };
 
-  const renderSection = (title: string, list: JackDecisionClient[], color: string) => {
-    if (list.length === 0) return null;
-    const stopKeys = (e: { stopPropagation: () => void }) => e.stopPropagation();
-    const inputCls = `w-20 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500`;
-    const dateCls = `w-32 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500`;
+  const actionButton = (d: JackDecisionClient, key: string, action: UserAction, active: boolean) => {
+    const on =
+      action === "TRADED"
+        ? "bg-green-600 border-green-500 text-black"
+        : action === "PASSED"
+          ? "bg-gray-600 border-gray-500 text-white"
+          : "bg-sky-600 border-sky-500 text-white";
+    const off = isDarkMode
+      ? "bg-transparent border-gray-700 text-gray-400 hover:border-gray-500"
+      : "bg-transparent border-gray-300 text-gray-600 hover:border-gray-500";
     return (
-      <div className="mb-3">
-        <div className={`text-[11px] font-bold mb-1 ${color}`}>
-          {title} ({list.length})
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-[11px] border-collapse">
-            <thead>
-              <tr className={`${headBg} ${subFg}`}>
-                <th className="text-left px-1.5 py-1 font-normal">Ticker</th>
-                <th className="text-left px-1.5 py-1 font-normal">JACK</th>
-                <th className="text-left px-1.5 py-1 font-normal">Stop/Tgt</th>
-                <th className="text-center px-1.5 py-1 font-normal">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {list.map((d, i) => {
-                const key = rowKey(d, i);
-                const row = getRow(key);
-                const isTraded = row.userAction === "TRADED";
-                const rPreview = row.serverUserR ?? previewR(d, row);
-                return (
-                  <Fragment key={key}>
-                    <tr className={isTraded ? "" : `border-b ${border}`}>
-                      <td className={`px-1.5 py-1 font-bold ${fg}`}>{d.ticker}</td>
-                      <td className={`px-1.5 py-1 ${subFg}`}>{d.decision}</td>
-                      <td className={`px-1.5 py-1 ${subFg} whitespace-nowrap`}>
-                        {d.stop != null ? d.stop.toFixed(2) : "—"} / {d.target != null ? d.target.toFixed(2) : "—"}
-                      </td>
-                      <td className="px-1.5 py-1">
-                        <div className="flex items-center justify-center gap-1">
-                          {actionBtn(d, key, "TRADED", row.userAction === "TRADED")}
-                          {actionBtn(d, key, "PASSED", row.userAction === "PASSED")}
-                          {actionBtn(d, key, "WATCHED", row.userAction === "WATCHED")}
-                          {row.userAction && (
-                            <span className={`flex items-center gap-1 ${actionTextColor(row.userAction)}`}>
-                              {renderSaveIcon(row.actionSave)}
-                              <span className="text-[10px] font-bold">{row.userAction}</span>
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
+      <button
+        type="button"
+        onClick={() => handleAction(d, key, action)}
+        className={`px-2.5 py-1 rounded text-[11px] font-bold border transition-colors ${active ? on : off}`}
+      >
+        {action}
+      </button>
+    );
+  };
 
-                    {/* Fills sub-row — only for TRADED. Full-width tinted panel so the
-                        Save button is always visible (never lost in horizontal scroll). */}
-                    {isTraded && (
-                      <tr className={`border-b ${border}`}>
-                        <td colSpan={4} className="px-1.5 pb-2">
-                          <div
-                            className={`flex flex-wrap items-end gap-x-3 gap-y-2 rounded border ${border} px-3 py-2 ${
-                              isDarkMode ? "bg-orange-950/20" : "bg-orange-50"
-                            }`}
-                          >
-                            <span className={`self-center text-[10px] font-bold tracking-widest ${fg}`}>
-                              FILLS
-                            </span>
-                            {(
-                              [
-                                { lbl: "Entry price", val: row.entry, kind: "price", set: (v: string) => patch(key, { entry: sanitizePrice(v), fillsSave: "idle" }) },
-                                { lbl: "Entry date", val: row.entryDate, kind: "date", set: (v: string) => patch(key, { entryDate: v, fillsSave: "idle" }) },
-                                { lbl: "Exit price", val: row.exit, kind: "price", set: (v: string) => patch(key, { exit: sanitizePrice(v), fillsSave: "idle" }) },
-                                { lbl: "Exit date", val: row.exitDate, kind: "date", set: (v: string) => patch(key, { exitDate: v, fillsSave: "idle" }) },
-                              ] as const
-                            ).map((f) => (
-                              <label key={f.lbl} className="flex flex-col gap-0.5">
-                                <span className={`text-[9px] uppercase tracking-wide ${subFg}`}>{f.lbl}</span>
-                                <input
-                                  type={f.kind === "date" ? "date" : "text"}
-                                  inputMode={f.kind === "price" ? "decimal" : undefined}
-                                  value={f.val}
-                                  onChange={(e) => f.set(e.target.value)}
-                                  onKeyDown={stopKeys}
-                                  className={f.kind === "date" ? dateCls : inputCls}
-                                  placeholder={f.kind === "price" ? "0.00" : undefined}
-                                />
-                              </label>
-                            ))}
-                            <div className={`self-stretch w-px ${isDarkMode ? "bg-orange-900" : "bg-orange-200"}`} />
-                            <div className="flex flex-col gap-0.5">
-                              <span className={`text-[9px] uppercase tracking-wide ${subFg}`}>user R</span>
-                              <span
-                                className={`text-[13px] font-bold leading-6 ${
-                                  rPreview != null ? (rPreview >= 0 ? "text-green-400" : "text-red-400") : subFg
-                                }`}
-                              >
-                                {rPreview != null ? `${rPreview >= 0 ? "+" : ""}${rPreview.toFixed(2)}R` : "—"}
-                              </span>
-                            </div>
-                            <div className="ml-auto flex items-center gap-2">
-                              {row.error && <span className="text-red-400 text-[10px] max-w-40">{row.error}</span>}
-                              {renderSaveButton(d, key, row.fillsSave)}
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
+  const stopKeys = (e: { stopPropagation: () => void }) => e.stopPropagation();
+  const priceCls = `w-20 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500`;
+  const dateCls = `w-32 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500`;
+
+  const renderRow = (d: JackDecisionClient, i: number) => {
+    const key = rowKey(d, i);
+    const row = getRow(key);
+    const isOpen = !!expanded[key];
+    const isTraded = row.userAction === "TRADED";
+    const rr = rewardRisk(d);
+    const rPreview = row.serverUserR ?? previewR(d, row);
+
+    return (
+      <div key={key} className={`border rounded ${border} ${isOpen ? openBg : rowBg}`}>
+        {/* Collapsed header — scannable, click to expand */}
+        <button
+          type="button"
+          onClick={() => toggle(key)}
+          className={`w-full flex items-center gap-2 px-2 py-1.5 text-left rounded ${rowHover}`}
+        >
+          <ChevronRight
+            size={13}
+            className={`${subFg} shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`}
+          />
+          <span className={`font-bold ${fg} w-14 shrink-0`}>{d.ticker}</span>
+          {verdictPill(d.decision)}
+          <span className={`text-[11px] ${subFg} whitespace-nowrap`}>
+            {d.stop != null ? d.stop.toFixed(2) : "—"} <span className="opacity-60">→</span>{" "}
+            {d.target != null ? d.target.toFixed(2) : "—"}
+          </span>
+          {rMultipleChip(rr)}
+          <span className="ml-auto shrink-0 flex items-center gap-1">
+            {row.actionSave === "saving" && <Loader2 size={10} className="animate-spin" />}
+            {actionBadge(row.userAction)}
+          </span>
+        </button>
+
+        {/* Expanded detail */}
+        {isOpen && (
+          <div className={`px-3 pb-3 pt-2 space-y-3 border-t ${border}`}>
+            {priceLadder(d)}
+
+            {/* Reasoning — full width, primary content */}
+            <div>
+              <div className="flex flex-wrap gap-1.5 mb-1.5">
+                {chip("earnings", d.earningsFlag)}
+                {chip("news", d.newsClass)}
+                {chip("sector", d.sectorRs)}
+                {chip("cross", d.crossAsset)}
+                {chip("→breakout", d.pctToBreakout != null ? `${d.pctToBreakout.toFixed(1)}%` : null)}
+              </div>
+              <p className={`text-xs leading-relaxed break-words ${textFg}`}>
+                {d.note && d.note.trim().length > 0 ? d.note : <span className={subFg}>No JACK note for this setup.</span>}
+              </p>
+            </div>
+
+            {/* Action controls */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`text-[9px] uppercase tracking-widest ${subFg}`}>Mark</span>
+              {actionButton(d, key, "TRADED", row.userAction === "TRADED")}
+              {actionButton(d, key, "PASSED", row.userAction === "PASSED")}
+              {actionButton(d, key, "WATCHED", row.userAction === "WATCHED")}
+              {row.actionSave === "saved" && <Check size={12} className="text-green-400" />}
+              {row.actionSave === "error" && <span className="text-red-400 text-[10px]">{row.error}</span>}
+              {!persistenceAvailable && <span className="text-[10px] text-yellow-500">writes disabled</span>}
+            </div>
+
+            {/* Fill panel — ONLY on TRADED rows (any section) */}
+            {isTraded && (
+              <div className={`rounded border ${border} px-3 py-2 ${isDarkMode ? "bg-orange-950/20" : "bg-orange-50"}`}>
+                <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+                  <span className={`self-center text-[10px] font-bold tracking-widest ${fg}`}>FILLS</span>
+                  {(
+                    [
+                      { lbl: "Entry price", val: row.entry, kind: "price", set: (v: string) => patch(key, { entry: sanitizePrice(v), fillsSave: "idle" }) },
+                      { lbl: "Entry date", val: row.entryDate, kind: "date", set: (v: string) => patch(key, { entryDate: v, fillsSave: "idle" }) },
+                      { lbl: "Exit price", val: row.exit, kind: "price", set: (v: string) => patch(key, { exit: sanitizePrice(v), fillsSave: "idle" }) },
+                      { lbl: "Exit date", val: row.exitDate, kind: "date", set: (v: string) => patch(key, { exitDate: v, fillsSave: "idle" }) },
+                    ] as const
+                  ).map((f) => (
+                    <label key={f.lbl} className="flex flex-col gap-0.5">
+                      <span className={`text-[9px] uppercase tracking-wide ${subFg}`}>{f.lbl}</span>
+                      <input
+                        type={f.kind === "date" ? "date" : "text"}
+                        inputMode={f.kind === "price" ? "decimal" : undefined}
+                        value={f.val}
+                        onChange={(e) => f.set(e.target.value)}
+                        onKeyDown={stopKeys}
+                        className={f.kind === "date" ? dateCls : priceCls}
+                        placeholder={f.kind === "price" ? "0.00" : undefined}
+                      />
+                    </label>
+                  ))}
+                  <div className={`self-stretch w-px ${isDarkMode ? "bg-orange-900" : "bg-orange-200"}`} />
+                  <div className="flex flex-col gap-0.5">
+                    <span className={`text-[9px] uppercase tracking-wide ${subFg}`}>user R</span>
+                    <span
+                      className={`text-[13px] font-bold leading-6 ${
+                        rPreview != null ? (rPreview >= 0 ? "text-green-400" : "text-red-400") : subFg
+                      }`}
+                    >
+                      {rPreview != null ? `${rPreview >= 0 ? "+" : ""}${rPreview.toFixed(2)}R` : "—"}
+                    </span>
+                  </div>
+                  <div className="ml-auto flex items-center gap-2">
+                    {row.error && row.fillsSave === "error" && (
+                      <span className="text-red-400 text-[10px] max-w-40">{row.error}</span>
                     )}
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
+                    {renderSaveButton(d, key, row.fillsSave)}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderGroup = (title: string, list: JackDecisionClient[], color: string) => {
+    if (list.length === 0) return null;
+    return (
+      <div>
+        <div className="flex items-center gap-2 mb-2">
+          <span className={`text-[11px] font-bold tracking-widest ${color}`}>{title}</span>
+          <span className={`text-[11px] ${subFg}`}>({list.length})</span>
+          <div className={`flex-1 h-px ${isDarkMode ? "bg-orange-900/50" : "bg-orange-200"}`} />
         </div>
+        <div className="space-y-1">{list.map((d, i) => renderRow(d, i))}</div>
       </div>
     );
   };
 
   return (
-    <div className={`mb-4 border rounded ${border} p-3`}>
-      <div className="flex items-center justify-between mb-2">
-        <span className={`text-xs font-bold ${fg}`}>DECISIONS — mark what you did (source of truth)</span>
-        {!persistenceAvailable && (
-          <span className="text-[10px] text-yellow-500">writes disabled (persistence off)</span>
-        )}
-      </div>
-      {renderSection("LIVE", liveDecisions, "text-green-400")}
-      {renderSection("PENDING", pendingDecisions, "text-blue-400")}
-      <div className={`text-[10px] ${subFg} mt-1`}>
-        Action letters: <b>T</b>raded · <b>P</b>assed · <b>W</b>atched. Marking <b>TRADED</b> opens a fills row —
-        enter entry/exit price + dates, then click <b>Save fills</b> (it must go green <b>Saved</b> to persist).
-        Saved fills re-appear when you return to JACK. user R = (exit − entry) / (entry − stop); Entry/Exit dates
-        capture your actual holding period.
+    <div className="mb-4 space-y-4 min-w-0">
+      {renderGroup("LIVE", liveDecisions, "text-green-400")}
+      {renderGroup("PENDING", pendingDecisions, "text-sky-400")}
+      <div className={`text-[10px] ${subFg}`}>
+        Click a row to expand. <b>Mark</b> T/P/W → recorded per setup (unmarked stays neutral, not passed).
+        Fill fields appear only on <b>TRADED</b> rows — enter prices/dates then <b>Save fills</b> (must go green
+        <b> Saved</b> to persist). Marks &amp; fills reload from the DB when you return to JACK.
       </div>
     </div>
   );
