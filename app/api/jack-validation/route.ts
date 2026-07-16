@@ -132,6 +132,7 @@ interface JackDecisionClient {
   target: number | null;
   // v2 expandable-row content, plumbed from the already-parsed JSON decision +
   // enriched Tiingo data (presentation only — no new fetch or logic).
+  shares: number | null;
   breakout: number | null;
   currentPrice: number | null;
   note: string | null;
@@ -650,6 +651,7 @@ export function buildClientDecisions(
       entry: g?.entry ?? null,
       stop: g?.stop ?? null,
       target: g?.target ?? null,
+      shares: typeof ed.shares === "number" ? ed.shares : null,
       breakout: g?.breakout ?? null,
       currentPrice: g?.currentPrice ?? null,
       note: ed.notes ?? null,
