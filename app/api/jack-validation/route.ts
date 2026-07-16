@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 // Type-only imports compile away — safe on Vercel where the DB layer never loads.
-import type { SetupSeen, DecisionRow } from "@/lib/db/write";
+import type { SetupSeen, DecisionRow, InsertedDecisionId } from "@/lib/db/write";
 // The concrete write functions are loaded lazily via require() inside persistRun()
 // so better-sqlite3 is never required on Vercel (isPersistenceAvailable() === false).
 import { isPersistenceAvailable, persistenceUnavailableReason } from "@/lib/db/env";
@@ -75,6 +75,14 @@ interface ParsedSetup {
   daysSinceHandleLow: number;
   isValid: boolean;
   invalidReason?: string;
+  // Geometry parsed from the scanner CSV (when present). Stored on the setups row
+  // so the Session B outcome replay can fire/exit against real price levels.
+  entry?: number;
+  stop?: number;
+  t05Target?: number;
+  breakoutLevel?: number;
+  cupDepthPct?: number;
+  handleRetrPct?: number;
 }
 
 interface EnrichedSetup extends ParsedSetup {
@@ -109,6 +117,21 @@ interface FilterStats {
   tiingoCallsSucceeded: number;
 }
 
+// One row for the interactive decision table (Session B). Bound to the parsed
+// JSON decisions block, enriched with DB ids (null when persistence is off, e.g.
+// on Vercel) and the setup geometry the user_R display needs.
+interface JackDecisionClient {
+  decisionId: number | null;
+  setupId: number | null;
+  ticker: string;
+  handleLowDate: string;
+  section: "live" | "pending";
+  decision: string;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+}
+
 interface JackValidationResponse {
   schemaVersion: "1.2";
   timestamp: string;
@@ -121,6 +144,10 @@ interface JackValidationResponse {
   tokens?: { input: number; output: number };
   degraded?: boolean;
   error?: string | null;
+  // Session B: structured, DB-keyed decisions for the interactive table, plus a
+  // flag so the UI knows whether row writes will land (VPS) or no-op (Vercel).
+  decisions?: JackDecisionClient[];
+  persistenceAvailable?: boolean;
 }
 
 // ============================================================
@@ -190,6 +217,24 @@ function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: 
   const status = (get("status") ?? "").toLowerCase();
   const handleLowDateRaw = get("handle_low_date") ?? "";
 
+  // Geometry columns — optional, best-effort numeric parse. Accepts a few header
+  // aliases the scanner has used across versions.
+  const getNum = (...names: string[]): number | undefined => {
+    for (const n of names) {
+      const v = get(n);
+      if (v === undefined || v === "") continue;
+      const num = Number(v.replace(/[$,%\s]/g, ""));
+      if (Number.isFinite(num)) return num;
+    }
+    return undefined;
+  };
+  const entry = getNum("entry", "entry_price");
+  const stop = getNum("stop", "stop_price", "stop_loss");
+  const t05Target = getNum("t05_target", "target", "t05");
+  const breakoutLevel = getNum("breakout_level", "breakout", "cup_rim", "rim");
+  const cupDepthPct = getNum("cup_depth_pct", "cup_depth");
+  const handleRetrPct = getNum("handle_retr_pct", "handle_retracement_pct");
+
   if (!ticker || !handleLowDateRaw) {
     return {
       raw: rowLine, rowCols: cols, ticker, status,
@@ -222,6 +267,7 @@ function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: 
     raw: rowLine, rowCols: cols, ticker, status,
     handleLowDate: handleLowDateRaw, daysSinceHandleLow: days,
     isValid: true,
+    entry, stop, t05Target, breakoutLevel, cupDepthPct, handleRetrPct,
   };
 }
 
@@ -511,12 +557,65 @@ function extractedToDecisionRow(
   };
 }
 
+/**
+ * Build the interactive-table rows from the parsed JSON decisions (NOT the
+ * markdown). Enriches each with the setup geometry (from the scanner CSV) and the
+ * DB decision_id/setup_id (from the persist step; null when persistence is off).
+ */
+function buildClientDecisions(
+  extracted: ExtractedPayload | null,
+  enrichedLive: EnrichedSetup[],
+  enrichedPending: EnrichedSetup[],
+  decisionIds: InsertedDecisionId[]
+): JackDecisionClient[] {
+  const geo = new Map<string, { entry: number | null; stop: number | null; target: number | null }>();
+  for (const s of [...enrichedLive, ...enrichedPending]) {
+    const hld = normalizeIsoDate(s.handleLowDate);
+    if (!hld) continue;
+    geo.set(`${s.ticker}|${hld}`, {
+      entry: s.entry ?? null,
+      stop: s.stop ?? null,
+      target: s.t05Target ?? null,
+    });
+  }
+
+  const idMap = new Map<string, { decisionId: number; setupId: number }>();
+  for (const d of decisionIds) {
+    idMap.set(`${d.ticker}|${d.handleLowDate}`, { decisionId: d.decisionId, setupId: d.setupId });
+  }
+
+  const out: JackDecisionClient[] = [];
+  const push = (ed: ExtractedDecision, section: "live" | "pending") => {
+    const ticker = (ed.ticker ?? "").toUpperCase();
+    const hld = normalizeIsoDate(ed.handle_low_date);
+    if (!ticker || !hld) return;
+    const key = `${ticker}|${hld}`;
+    const g = geo.get(key);
+    const ids = idMap.get(key);
+    out.push({
+      decisionId: ids?.decisionId ?? null,
+      setupId: ids?.setupId ?? null,
+      ticker,
+      handleLowDate: hld,
+      section,
+      decision: ed.decision ?? "UNKNOWN",
+      entry: g?.entry ?? null,
+      stop: g?.stop ?? null,
+      target: g?.target ?? null,
+    });
+  };
+  for (const ed of extracted?.live_decisions ?? []) push(ed, "live");
+  for (const ed of extracted?.pending_decisions ?? []) push(ed, "pending");
+  return out;
+}
+
 interface PersistResult {
   runId?: number;
   setupsUpserted: number;
   decisionsInserted: number;
   decisionsSkipped: number;
   jsonParseSuccess: boolean;
+  decisionIds: InsertedDecisionId[];
   error?: string;
 }
 
@@ -546,6 +645,7 @@ function persistRun(args: {
     decisionsInserted: 0,
     decisionsSkipped: 0,
     jsonParseSuccess: args.extracted !== null,
+    decisionIds: [],
   };
 
   // Vercel guard — never touch the DB layer when persistence is off.
@@ -574,8 +674,15 @@ function persistRun(args: {
         ticker: setup.ticker,
         handleLowDate,
         status: setup.status,
-        // ParsedSetup carries no parsed geometry — leave entry/stop/target NULL
-        // for v1.3 minimum; the tracking primitive (ticker + handle_low_date) is enough.
+        // v1.4 (Session B): persist geometry so the outcome replay can fire/exit
+        // against real levels. Parsed from the scanner CSV; may be undefined if the
+        // scanner omitted a column (then that setup just won't be replay-eligible).
+        entry: setup.entry,
+        stop: setup.stop,
+        t05Target: setup.t05Target,
+        breakoutLevel: setup.breakoutLevel,
+        cupDepthPct: setup.cupDepthPct,
+        handleRetrPct: setup.handleRetrPct,
       };
       const setupId = dbWrite.upsertSetup(seen, args.timestamp);
       setupIdMap.set(`${setup.ticker}|${handleLowDate}`, setupId);
@@ -617,9 +724,10 @@ function persistRun(args: {
         if (row) decisionRows.push(row);
       }
 
-      const { inserted, skipped } = dbWrite.insertDecisions(decisionRows, runId, setupIdMap);
+      const { inserted, skipped, ids } = dbWrite.insertDecisions(decisionRows, runId, setupIdMap);
       result.decisionsInserted = inserted;
       result.decisionsSkipped = skipped;
+      result.decisionIds = ids;
     }
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err);
@@ -868,6 +976,15 @@ export async function POST(req: NextRequest) {
       persistNote +
       `> Handle-staleness filter validated May 2026 (drop >${MAX_HANDLE_DAYS}d).\n\n`;
 
+    // Structured decisions for the interactive table — from the JSON block,
+    // enriched with geometry + DB ids. Renders even on Vercel (ids null, writes no-op).
+    const clientDecisions = buildClientDecisions(
+      extracted,
+      enrichedLive,
+      enrichedPending,
+      persistResult.decisionIds
+    );
+
     return NextResponse.json<JackValidationResponse>({
       schemaVersion: "1.2", timestamp,
       strategy: "Cup with Handle t05", riskPerTrade,
@@ -880,6 +997,8 @@ export async function POST(req: NextRequest) {
       },
       degraded: !markdownForClient || truncated,
       error: truncated ? `Output truncated at ${maxTokens} tokens` : null,
+      decisions: clientDecisions,
+      persistenceAvailable: isPersistenceAvailable(),
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
