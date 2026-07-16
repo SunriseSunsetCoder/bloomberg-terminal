@@ -30,6 +30,7 @@ export interface JackDecisionClient {
   stop: number | null;
   target: number | null;
   // v2 expandable-row content (plumbed from the JSON decision + enriched data).
+  shares: number | null;
   breakout: number | null;
   currentPrice: number | null;
   note: string | null;

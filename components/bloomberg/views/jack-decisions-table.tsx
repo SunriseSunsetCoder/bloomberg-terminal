@@ -251,26 +251,44 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
 
   const verdictPill = (decision: string) => {
     const v = classifyVerdict(decision);
-    const cls =
-      v === "trade"
-        ? "bg-green-600/20 text-green-400 border-green-700"
+    // Filled pills with black/white text — high contrast in BOTH themes (the
+    // previous /20 tints on colored text were unreadable in light mode).
+    const cls = isDarkMode
+      ? v === "trade"
+        ? "bg-green-600 text-black border-green-400"
         : v === "skip"
-          ? "bg-red-600/20 text-red-400 border-red-700"
+          ? "bg-red-600 text-white border-red-400"
           : v === "watch"
-            ? "bg-amber-500/20 text-amber-400 border-amber-600"
-            : "bg-gray-600/20 text-gray-400 border-gray-600";
+            ? "bg-amber-500 text-black border-amber-300"
+            : "bg-gray-500 text-white border-gray-300"
+      : v === "trade"
+        ? "bg-green-600 text-white border-green-700"
+        : v === "skip"
+          ? "bg-red-600 text-white border-red-700"
+          : v === "watch"
+            ? "bg-amber-500 text-black border-amber-600"
+            : "bg-gray-500 text-white border-gray-600";
     return (
-      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide border ${cls} whitespace-nowrap`}>
+      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide border ${cls} whitespace-nowrap shrink-0`}>
         {decision}
       </span>
     );
   };
 
   const rMultipleChip = (rr: number | null) => {
-    if (rr == null) return <span className={`text-[11px] ${subFg}`}>R/R —</span>;
-    const color = rr >= 1.5 ? "text-green-400" : rr >= 1 ? "text-amber-400" : "text-red-400";
+    if (rr == null) return <span className={`text-[11px] ${subFg} shrink-0`}>R/R —</span>;
+    // Sub-1.0 R/R is a bad setup — make it alarming (red bordered pill + ⚠),
+    // not just red text.
+    if (rr < 1) {
+      return (
+        <span className="text-[10px] font-bold text-red-300 bg-red-600/30 border border-red-500 rounded px-1.5 py-0.5 whitespace-nowrap shrink-0">
+          ⚠ R/R {rr.toFixed(2)}
+        </span>
+      );
+    }
+    const color = rr >= 1.5 ? "text-green-400" : "text-amber-400";
     return (
-      <span className={`text-[11px] font-bold ${color} whitespace-nowrap`}>R/R {rr.toFixed(2)}</span>
+      <span className={`text-[11px] font-bold ${color} whitespace-nowrap shrink-0`}>R/R {rr.toFixed(2)}</span>
     );
   };
 
@@ -384,6 +402,8 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     const isTraded = row.userAction === "TRADED";
     const rr = rewardRisk(d);
     const rPreview = row.serverUserR ?? previewR(d, row);
+    // Position size vs the caps shown in the header. Notional = shares × entry.
+    const notional = d.shares != null && d.entry != null ? d.shares * d.entry : null;
 
     return (
       <div key={key} className={`border rounded ${border} ${isOpen ? openBg : rowBg}`}>
@@ -391,7 +411,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
         <button
           type="button"
           onClick={() => toggle(key)}
-          className={`w-full flex items-center gap-2 px-2 py-1.5 text-left rounded ${rowHover}`}
+          className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left rounded ${rowHover}`}
         >
           <ChevronRight
             size={13}
@@ -399,12 +419,16 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
           />
           <span className={`font-bold ${fg} w-14 shrink-0`}>{d.ticker}</span>
           {verdictPill(d.decision)}
-          <span className={`text-[11px] ${subFg} whitespace-nowrap`}>
+          <span className={`text-[11px] ${subFg} whitespace-nowrap shrink-0`}>
             {d.stop != null ? d.stop.toFixed(2) : "—"} <span className="opacity-60">→</span>{" "}
             {d.target != null ? d.target.toFixed(2) : "—"}
           </span>
           {rMultipleChip(rr)}
-          <span className="ml-auto shrink-0 flex items-center gap-1">
+          {d.shares != null && (
+            <span className={`text-[10px] ${subFg} whitespace-nowrap shrink-0`}>{d.shares.toLocaleString()} sh</span>
+          )}
+          {/* Packed left (no ml-auto) so the badge isn't stranded across dead space. */}
+          <span className="shrink-0 flex items-center gap-1 ml-1">
             {row.actionSave === "saving" && <Loader2 size={10} className="animate-spin" />}
             {actionBadge(row.userAction)}
           </span>
@@ -414,6 +438,21 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
         {isOpen && (
           <div className={`px-3 pb-3 pt-2 space-y-3 border-t ${border}`}>
             {priceLadder(d)}
+
+            {/* Position size — shares + notional ($ = shares × entry), so size vs the
+                individual/session caps in the header is visible at decision time. */}
+            {(d.shares != null || notional != null) && (
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px]">
+                <span className={subFg}>
+                  <span className={`${fg} font-bold`}>Shares</span> {d.shares != null ? d.shares.toLocaleString() : "—"}
+                </span>
+                <span className={subFg}>
+                  <span className={`${fg} font-bold`}>Notional</span>{" "}
+                  {notional != null ? `$${notional.toLocaleString("en-US", { maximumFractionDigits: 0 })}` : "—"}
+                  <span className="opacity-60"> (shares × entry)</span>
+                </span>
+              </div>
+            )}
 
             {/* Reasoning — full width, primary content */}
             <div>
