@@ -54,19 +54,24 @@ async function postDecision(body: unknown): Promise<{ ok: boolean; userRRealized
 export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable }: JackDecisionsTableProps) {
   const [rows, setRows] = useState<Record<string, RowState>>({});
 
-  const getRow = (key: string): RowState =>
-    rows[key] ?? {
-      userAction: null,
-      entry: "",
-      exit: "",
-      exitDate: "",
-      actionSave: "idle",
-      fillsSave: "idle",
-      serverUserR: null,
-    };
+  const defaultRow = (): RowState => ({
+    userAction: null,
+    entry: "",
+    exit: "",
+    exitDate: "",
+    actionSave: "idle",
+    fillsSave: "idle",
+    serverUserR: null,
+  });
 
+  const getRow = (key: string): RowState => rows[key] ?? defaultRow();
+
+  // Merge onto the LATEST state (prev), not the render-snapshot `rows` closure.
+  // Reading `rows` here dropped earlier updates when two patches fired in one
+  // handler (e.g. handleAction's userAction patch then actionSave patch) — the
+  // second clobbered userAction back to null, so the highlight/enable never stuck.
   const patch = (key: string, next: Partial<RowState>) =>
-    setRows((prev) => ({ ...prev, [key]: { ...getRow(key), ...next } }));
+    setRows((prev) => ({ ...prev, [key]: { ...(prev[key] ?? defaultRow()), ...next } }));
 
   const subFg = isDarkMode ? "text-gray-400" : "text-gray-600";
   const fg = isDarkMode ? "text-orange-400" : "text-orange-700";
@@ -128,6 +133,11 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     if (state === "error") return <span className="text-red-400">!</span>;
     return null;
   };
+
+  // Distinct color per action so the recorded choice is unmistakable (bug: all
+  // three previously read as an identical green check).
+  const actionTextColor = (a: UserAction | null): string =>
+    a === "TRADED" ? "text-green-400" : a === "PASSED" ? "text-gray-300" : a === "WATCHED" ? "text-blue-400" : "";
 
   const actionBtn = (d: JackDecisionClient, key: string, action: UserAction, active: boolean) => {
     const base = "px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors";
@@ -193,7 +203,12 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
                         {actionBtn(d, key, "TRADED", row.userAction === "TRADED")}
                         {actionBtn(d, key, "PASSED", row.userAction === "PASSED")}
                         {actionBtn(d, key, "WATCHED", row.userAction === "WATCHED")}
-                        {renderSaveIcon(row.actionSave)}
+                        {row.userAction && (
+                          <span className={`flex items-center gap-1 ${actionTextColor(row.userAction)}`}>
+                            {renderSaveIcon(row.actionSave)}
+                            <span className="text-[10px] font-bold">{row.userAction}</span>
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="px-1.5 py-1">
@@ -231,8 +246,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
                           disabled={!persistenceAvailable || d.setupId == null || row.fillsSave === "saving"}
                           className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border ${inputBorder} ${subFg} hover:border-orange-500 disabled:opacity-40`}
                         >
-                          {renderSaveIcon(row.fillsSave) ?? "Save"}
-                          {row.fillsSave === "idle" && "Save"}
+                          {row.fillsSave === "idle" ? "Save" : renderSaveIcon(row.fillsSave)}
                         </button>
                       )}
                     </td>
