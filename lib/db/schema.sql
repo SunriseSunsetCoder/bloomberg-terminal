@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS outcomes (
     -- theoretical R (R_realized) vs user_R_realized answers
     -- "was the setup good?" vs "did I trade it well?".
     user_entry_price      REAL,
+    user_entry_date       TEXT,
     user_exit_price       REAL,
     user_exit_date        TEXT,
     user_R_realized       REAL,
