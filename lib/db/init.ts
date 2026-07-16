@@ -47,6 +47,7 @@ export function getDb(): Database.Database {
 function runMigrations(database: Database.Database): void {
   ensureColumns(database, "outcomes", [
     { name: "user_entry_price", def: "REAL" },
+    { name: "user_entry_date", def: "TEXT" },
     { name: "user_exit_price", def: "REAL" },
     { name: "user_exit_date", def: "TEXT" },
     { name: "user_R_realized", def: "REAL" },

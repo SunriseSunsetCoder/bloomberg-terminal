@@ -28,6 +28,7 @@ interface UserFillsBody {
   type: "user_fills";
   setupId: number;
   entry: number | null;
+  entryDate: string | null;
   exit: number | null;
   exitDate: string | null;
 }
@@ -71,6 +72,7 @@ export async function POST(req: NextRequest) {
       const result = dbWrite.updateUserFills(
         body.setupId,
         body.entry ?? null,
+        body.entryDate ?? null,
         body.exit ?? null,
         body.exitDate ?? null
       );

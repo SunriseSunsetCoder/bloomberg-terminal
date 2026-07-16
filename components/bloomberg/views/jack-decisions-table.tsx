@@ -22,12 +22,22 @@ type SaveState = "idle" | "saving" | "saved" | "error";
 interface RowState {
   userAction: UserAction | null;
   entry: string;
+  entryDate: string;
   exit: string;
   exitDate: string;
   actionSave: SaveState;
   fillsSave: SaveState;
   serverUserR: number | null;
   error?: string;
+}
+
+// Keep only digits and a single decimal point so the field stays a valid price
+// while allowing normal keyboard entry (type=number mangles partial decimals).
+export function sanitizePrice(v: string): string {
+  let s = v.replace(/[^0-9.]/g, "");
+  const dot = s.indexOf(".");
+  if (dot !== -1) s = s.slice(0, dot + 1) + s.slice(dot + 1).replace(/\./g, "");
+  return s;
 }
 
 interface JackDecisionsTableProps {
@@ -57,6 +67,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   const defaultRow = (): RowState => ({
     userAction: null,
     entry: "",
+    entryDate: "",
     exit: "",
     exitDate: "",
     actionSave: "idle",
@@ -96,12 +107,13 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   const handleSaveFills = async (d: JackDecisionClient, key: string) => {
     const row = getRow(key);
     const entry = row.entry === "" ? null : Number(row.entry);
+    const entryDate = row.entryDate === "" ? null : row.entryDate;
     const exit = row.exit === "" ? null : Number(row.exit);
     const exitDate = row.exitDate === "" ? null : row.exitDate;
     if (!persistenceAvailable || d.setupId == null) return;
     patch(key, { fillsSave: "saving", error: undefined });
     try {
-      const r = await postDecision({ type: "user_fills", setupId: d.setupId, entry, exit, exitDate });
+      const r = await postDecision({ type: "user_fills", setupId: d.setupId, entry, entryDate, exit, exitDate });
       patch(
         key,
         r.ok
@@ -177,6 +189,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
                 <th className="text-left px-1.5 py-1 font-normal">Stop/Tgt</th>
                 <th className="text-center px-1.5 py-1 font-normal">Action</th>
                 <th className="text-left px-1.5 py-1 font-normal">Entry</th>
+                <th className="text-left px-1.5 py-1 font-normal">Entry date</th>
                 <th className="text-left px-1.5 py-1 font-normal">Exit</th>
                 <th className="text-left px-1.5 py-1 font-normal">Exit date</th>
                 <th className="text-right px-1.5 py-1 font-normal">user R</th>
@@ -191,6 +204,11 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
                 const disabledFill = !isTraded;
                 const rPreview = row.serverUserR ?? previewR(d, row);
                 const inputCls = `w-16 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500 disabled:opacity-40`;
+                const dateCls = `w-28 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500 disabled:opacity-40`;
+                // stopPropagation keeps keystrokes from reaching the global window
+                // keydown handler (KeyboardShortcuts), which matches digit keys to
+                // panel shortcuts and preventDefault()s them — that's what blocked typing.
+                const stopKeys = (e: { stopPropagation: () => void }) => e.stopPropagation();
                 return (
                   <tr key={key} className={`border-b ${border}`}>
                     <td className={`px-1.5 py-1 font-bold ${fg}`}>{d.ticker}</td>
@@ -213,17 +231,28 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
                     </td>
                     <td className="px-1.5 py-1">
                       <input
-                        type="number" step="0.01" disabled={disabledFill}
+                        type="text" inputMode="decimal" disabled={disabledFill}
                         value={row.entry}
-                        onChange={(e) => patch(key, { entry: e.target.value, fillsSave: "idle" })}
+                        onChange={(e) => patch(key, { entry: sanitizePrice(e.target.value), fillsSave: "idle" })}
+                        onKeyDown={stopKeys}
                         className={inputCls} placeholder="—"
                       />
                     </td>
                     <td className="px-1.5 py-1">
                       <input
-                        type="number" step="0.01" disabled={disabledFill}
+                        type="date" disabled={disabledFill}
+                        value={row.entryDate}
+                        onChange={(e) => patch(key, { entryDate: e.target.value, fillsSave: "idle" })}
+                        onKeyDown={stopKeys}
+                        className={dateCls}
+                      />
+                    </td>
+                    <td className="px-1.5 py-1">
+                      <input
+                        type="text" inputMode="decimal" disabled={disabledFill}
                         value={row.exit}
-                        onChange={(e) => patch(key, { exit: e.target.value, fillsSave: "idle" })}
+                        onChange={(e) => patch(key, { exit: sanitizePrice(e.target.value), fillsSave: "idle" })}
+                        onKeyDown={stopKeys}
                         className={inputCls} placeholder="—"
                       />
                     </td>
@@ -232,7 +261,8 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
                         type="date" disabled={disabledFill}
                         value={row.exitDate}
                         onChange={(e) => patch(key, { exitDate: e.target.value, fillsSave: "idle" })}
-                        className={`w-28 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500 disabled:opacity-40`}
+                        onKeyDown={stopKeys}
+                        className={dateCls}
                       />
                     </td>
                     <td className={`px-1.5 py-1 text-right font-bold ${rPreview != null ? (rPreview >= 0 ? "text-green-400" : "text-red-400") : subFg}`}>
@@ -273,6 +303,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
       <div className={`text-[10px] ${subFg} mt-1`}>
         Action letters: <b>T</b>raded · <b>P</b>assed · <b>W</b>atched. Fill fields enable on TRADED. user R =
         (exit − entry) / (entry − stop) — execution quality, separate from the theoretical replay R.
+        Entry/Exit dates capture your actual holding period (compare vs the replay's timing).
       </div>
     </div>
   );

@@ -317,6 +317,7 @@ export interface UserFillsResult {
 export function updateUserFills(
   setupId: number,
   entry: number | null,
+  entryDate: string | null,
   exit: number | null,
   exitDate: string | null
 ): UserFillsResult {
@@ -336,15 +337,16 @@ export function updateUserFills(
   db.prepare(
     `INSERT INTO outcomes (
        setup_id, fired,
-       user_entry_price, user_exit_price, user_exit_date, user_R_realized,
+       user_entry_price, user_entry_date, user_exit_price, user_exit_date, user_R_realized,
        outcome_computed_at, outcome_source
-     ) VALUES (?, 1, ?, ?, ?, ?, ?, 'user_fill')
+     ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, 'user_fill')
      ON CONFLICT(setup_id) DO UPDATE SET
        user_entry_price = excluded.user_entry_price,
+       user_entry_date  = excluded.user_entry_date,
        user_exit_price  = excluded.user_exit_price,
        user_exit_date   = excluded.user_exit_date,
        user_R_realized  = excluded.user_R_realized`
-  ).run(setupId, entry, exit, exitDate, userR, now);
+  ).run(setupId, entry, entryDate, exit, exitDate, userR, now);
 
   return { userRRealized: userR, stop };
 }
