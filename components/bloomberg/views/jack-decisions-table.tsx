@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Check, Loader2 } from "lucide-react";
 import type { JackDecisionClient } from "@/components/bloomberg/hooks/useJackValidation";
 
@@ -61,10 +61,8 @@ async function postDecision(body: unknown): Promise<{ ok: boolean; userRRealized
   return (await res.json()) as { ok: boolean; userRRealized?: number | null; error?: string };
 }
 
-export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable }: JackDecisionsTableProps) {
-  const [rows, setRows] = useState<Record<string, RowState>>({});
-
-  const defaultRow = (): RowState => ({
+function defaultRow(): RowState {
+  return {
     userAction: null,
     entry: "",
     entryDate: "",
@@ -73,7 +71,40 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     actionSave: "idle",
     fillsSave: "idle",
     serverUserR: null,
+  };
+}
+
+// Bug A re-hydration: seed row state from existing marks/fills the route attached
+// to each decision, so a re-VALIDATE re-displays what the user previously recorded
+// instead of blank rows. Rows with no prior marks are left to lazy defaults.
+export function seedRows(decisions: JackDecisionClient[]): Record<string, RowState> {
+  const out: Record<string, RowState> = {};
+  decisions.forEach((d, i) => {
+    const hasFill =
+      d.userEntryPrice != null || d.userEntryDate != null || d.userExitPrice != null || d.userExitDate != null;
+    if (d.userAction == null && !hasFill) return;
+    out[rowKey(d, i)] = {
+      ...defaultRow(),
+      userAction: d.userAction ?? null,
+      entry: d.userEntryPrice != null ? String(d.userEntryPrice) : "",
+      entryDate: d.userEntryDate ?? "",
+      exit: d.userExitPrice != null ? String(d.userExitPrice) : "",
+      exitDate: d.userExitDate ?? "",
+      actionSave: d.userAction != null ? "saved" : "idle",
+      fillsSave: hasFill ? "saved" : "idle",
+    };
   });
+  return out;
+}
+
+export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable }: JackDecisionsTableProps) {
+  // Seed from existing marks on first render, and re-seed whenever a new
+  // validation response arrives (decisions identity changes) — that's the
+  // re-VALIDATE case where persisted marks must reappear.
+  const [rows, setRows] = useState<Record<string, RowState>>(() => seedRows(decisions));
+  useEffect(() => {
+    setRows(seedRows(decisions));
+  }, [decisions]);
 
   const getRow = (key: string): RowState => rows[key] ?? defaultRow();
 

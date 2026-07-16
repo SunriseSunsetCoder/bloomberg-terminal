@@ -29,6 +29,13 @@ export interface JackDecisionClient {
   entry: number | null;
   stop: number | null;
   target: number | null;
+  // Bug A re-hydration: existing user marks for this setup, so re-VALIDATE
+  // re-displays them instead of blank rows.
+  userAction: "TRADED" | "PASSED" | "WATCHED" | null;
+  userEntryPrice: number | null;
+  userEntryDate: string | null;
+  userExitPrice: number | null;
+  userExitDate: string | null;
 }
 
 export interface JackValidationResponse {

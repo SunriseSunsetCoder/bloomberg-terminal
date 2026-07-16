@@ -130,6 +130,14 @@ interface JackDecisionClient {
   entry: number | null;
   stop: number | null;
   target: number | null;
+  // Bug A re-hydration: existing user marks for this setup (from prior runs),
+  // so re-VALIDATE re-displays them instead of rendering blank. Read-only;
+  // new writes still target the current run's decision row.
+  userAction: "TRADED" | "PASSED" | "WATCHED" | null;
+  userEntryPrice: number | null;
+  userEntryDate: string | null;
+  userExitPrice: number | null;
+  userExitDate: string | null;
 }
 
 interface JackValidationResponse {
@@ -158,33 +166,30 @@ function formatUsd(n: number): string {
   return `$${n.toLocaleString("en-US")}`;
 }
 
-function buildSessionContext(): string {
-  const now = new Date();
-  const fmt = new Intl.DateTimeFormat("en-US", {
+// Bug B hardening: DAY-precision session context. Previously this embedded the
+// clock time (minute) and the intra-day session phase (PREMARKET/REGULAR/...),
+// both of which change through the day — so re-VALIDATE minutes later produced a
+// different prompt even at temperature 0. Now it's stable for the whole calendar
+// day: identical CSV re-validated later the same day → identical prompt text.
+// `now` is injectable for deterministic testing.
+export function buildSessionContext(now: Date = new Date()): string {
+  const dateStr = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     weekday: "long", year: "numeric", month: "long", day: "numeric",
-    hour: "numeric", minute: "2-digit", hour12: true,
-  });
-  const dateStr = fmt.format(now);
+  }).format(now);
 
-  const hourFmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York", hour: "numeric", hour12: false,
-  });
-  const dayFmt = new Intl.DateTimeFormat("en-US", {
+  const day = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York", weekday: "short",
-  });
-  const hour = parseInt(hourFmt.format(now), 10);
-  const day = dayFmt.format(now);
+  }).format(now);
+  const marketDay = day === "Sat" || day === "Sun" ? "market closed (weekend)" : "trading day";
 
-  let session: string;
-  if (day === "Sat" || day === "Sun") session = "WEEKEND";
-  else if (hour < 4) session = "AFTER-HOURS (previous session)";
-  else if (hour < 9 || (hour === 9 && now.getMinutes() < 30)) session = "PREMARKET";
-  else if (hour < 16) session = "REGULAR HOURS";
-  else if (hour < 20) session = "AFTER-HOURS";
-  else session = "AFTER-HOURS (late)";
+  return `${dateStr} ET (${marketDay})`;
+}
 
-  return `${dateStr} ET (${session})`;
+// ET calendar-day key (ISO YYYY-MM-DD) — used to scope the Tiingo enrichment
+// cache so a re-VALIDATE the same market day reuses identical data.
+export function etDayKey(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(now);
 }
 
 // ============================================================
@@ -373,10 +378,25 @@ function applyFilters(rawCsv: string): { headerLine: string; sectioned: Sectione
 // Tiingo enrichment — parallel fetches for surviving setups
 // ============================================================
 
+// Bug B hardening: cache Tiingo enrichment per (ticker, ET calendar-day). A
+// re-VALIDATE the same market day reuses identical price/news data instead of
+// re-fetching (the news endpoint especially can return new articles intraday,
+// which would perturb the prompt). In-memory, per server process. Exported so
+// tests can reset it; other-day entries are pruned in enrichAllSetups.
+type TiingoData = EnrichedSetup["tiingo"];
+export const enrichCache = new Map<string, TiingoData>();
+
 async function enrichSetup(
   setup: ParsedSetup,
   tiingoBase: string
 ): Promise<EnrichedSetup> {
+  const cacheKey = `${setup.ticker}|${etDayKey()}`;
+  const cached = enrichCache.get(cacheKey);
+  if (cached) {
+    // Reuse today's external data; the setup's own parsed fields are current.
+    return { ...setup, tiingo: cached };
+  }
+
   const enriched: EnrichedSetup = { ...setup, tiingo: {} };
 
   // v1.2: only fetch EOD + news. Fundamentals removed — Tiingo's fundamentals
@@ -447,13 +467,23 @@ async function enrichSetup(
   // Fundamentals intentionally skipped in v1.2 — see note above
   enriched.tiingo.earningsNote = "Fundamentals not fetched in v1.2 (Tiingo paid add-on required) — verify earnings on EM";
 
+  // Cache today's external data for this ticker so a same-day re-VALIDATE reuses it.
+  enrichCache.set(cacheKey, enriched.tiingo);
+
   return enriched;
 }
 
-async function enrichAllSetups(
+export async function enrichAllSetups(
   setups: ParsedSetup[],
   tiingoBase: string
 ): Promise<{ enriched: EnrichedSetup[]; attempted: number; succeeded: number }> {
+  // Prune enrichment-cache entries from previous calendar days (keep memory bounded
+  // and never serve stale-day data).
+  const today = etDayKey();
+  for (const k of enrichCache.keys()) {
+    if (!k.endsWith(`|${today}`)) enrichCache.delete(k);
+  }
+
   let attempted = 0;
   let succeeded = 0;
   const results = await Promise.all(setups.map((s) => enrichSetup(s, tiingoBase)));
@@ -562,11 +592,13 @@ function extractedToDecisionRow(
  * markdown). Enriches each with the setup geometry (from the scanner CSV) and the
  * DB decision_id/setup_id (from the persist step; null when persistence is off).
  */
-function buildClientDecisions(
+export function buildClientDecisions(
   extracted: ExtractedPayload | null,
   enrichedLive: EnrichedSetup[],
   enrichedPending: EnrichedSetup[],
-  decisionIds: InsertedDecisionId[]
+  decisionIds: InsertedDecisionId[],
+  // Bug A: existing user marks keyed by setup_id (empty when persistence off).
+  userMarks: Map<number, import("@/lib/db/read").UserMark> = new Map()
 ): JackDecisionClient[] {
   const geo = new Map<string, { entry: number | null; stop: number | null; target: number | null }>();
   for (const s of [...enrichedLive, ...enrichedPending]) {
@@ -592,6 +624,7 @@ function buildClientDecisions(
     const key = `${ticker}|${hld}`;
     const g = geo.get(key);
     const ids = idMap.get(key);
+    const mark = ids ? userMarks.get(ids.setupId) : undefined;
     out.push({
       decisionId: ids?.decisionId ?? null,
       setupId: ids?.setupId ?? null,
@@ -602,6 +635,11 @@ function buildClientDecisions(
       entry: g?.entry ?? null,
       stop: g?.stop ?? null,
       target: g?.target ?? null,
+      userAction: mark?.userAction ?? null,
+      userEntryPrice: mark?.userEntryPrice ?? null,
+      userEntryDate: mark?.userEntryDate ?? null,
+      userExitPrice: mark?.userExitPrice ?? null,
+      userExitDate: mark?.userExitDate ?? null,
     });
   };
   for (const ed of extracted?.live_decisions ?? []) push(ed, "live");
@@ -616,6 +654,8 @@ interface PersistResult {
   decisionsSkipped: number;
   jsonParseSuccess: boolean;
   decisionIds: InsertedDecisionId[];
+  // Bug A: existing marks for the setups in this run, keyed by setup_id.
+  userMarks: Map<number, import("@/lib/db/read").UserMark>;
   error?: string;
 }
 
@@ -646,6 +686,7 @@ function persistRun(args: {
     decisionsSkipped: 0,
     jsonParseSuccess: args.extracted !== null,
     decisionIds: [],
+    userMarks: new Map(),
   };
 
   // Vercel guard — never touch the DB layer when persistence is off.
@@ -729,6 +770,12 @@ function persistRun(args: {
       result.decisionsSkipped = skipped;
       result.decisionIds = ids;
     }
+
+    // 4. Bug A: load existing user marks for these setups so the interactive
+    // table can re-hydrate them (this run's decision rows are freshly unmarked,
+    // but prior runs' marks + the setup's outcomes fills still live in the DB).
+    const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
+    result.userMarks = dbRead.getUserMarksForSetups([...setupIdMap.values()]);
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err);
   }
@@ -779,7 +826,7 @@ function formatEnrichedSetup(s: EnrichedSetup): string {
   return lines.join("\n");
 }
 
-function buildSectionedPrompt(
+export function buildSectionedPrompt(
   headerLine: string,
   liveSetups: EnrichedSetup[],
   pendingSetups: EnrichedSetup[],
@@ -932,6 +979,11 @@ export async function POST(req: NextRequest) {
 
     const completion = await client.messages.create({
       model, max_tokens: maxTokens,
+      // Bug B: pin temperature to 0 for reproducible validations — same input
+      // should yield the same recommendations run-to-run. (Not bit-guaranteed
+      // deterministic, but collapses the sampling variance that flipped
+      // TRADE↔SKIP and dropped rows between identical runs.)
+      temperature: 0,
       messages: [{ role: "user", content: prompt }],
     });
 
@@ -982,7 +1034,8 @@ export async function POST(req: NextRequest) {
       extracted,
       enrichedLive,
       enrichedPending,
-      persistResult.decisionIds
+      persistResult.decisionIds,
+      persistResult.userMarks
     );
 
     return NextResponse.json<JackValidationResponse>({

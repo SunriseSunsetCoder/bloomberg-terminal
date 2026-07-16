@@ -125,6 +125,89 @@ export function getSetupsNeedingOutcomes(resolutionDays = 90): SetupNeedingOutco
   }));
 }
 
+export interface UserMark {
+  userAction: "TRADED" | "PASSED" | "WATCHED" | null;
+  userEntryPrice: number | null;
+  userEntryDate: string | null;
+  userExitPrice: number | null;
+  userExitDate: string | null;
+}
+
+/**
+ * Existing user marks (action + fills) for a set of setups, so the interactive
+ * table can re-hydrate them after a re-VALIDATE (Bug A). Read-only.
+ *
+ * user_action is per-decision (one row per run); we take the MOST RECENT non-null
+ * user_action across all of a setup's decision rows. Fills live once per setup on
+ * the outcomes row. Returns a map keyed by setup_id; setups with no marks are absent.
+ */
+export function getUserMarksForSetups(setupIds: number[]): Map<number, UserMark> {
+  const marks = new Map<number, UserMark>();
+  if (setupIds.length === 0) return marks;
+
+  const db = getDb();
+  const placeholders = setupIds.map(() => "?").join(",");
+
+  // Latest non-null user_action per setup (highest decision id wins).
+  const actionRows = db
+    .prepare(
+      `SELECT d.setup_id AS setup_id, d.user_action AS user_action
+         FROM decisions d
+         JOIN (
+                SELECT setup_id, MAX(id) AS max_id
+                  FROM decisions
+                 WHERE user_action IS NOT NULL AND setup_id IN (${placeholders})
+                 GROUP BY setup_id
+              ) latest
+           ON d.id = latest.max_id`
+    )
+    .all(...setupIds) as Array<{ setup_id: number; user_action: UserMark["userAction"] }>;
+
+  for (const r of actionRows) {
+    marks.set(r.setup_id, {
+      userAction: r.user_action,
+      userEntryPrice: null,
+      userEntryDate: null,
+      userExitPrice: null,
+      userExitDate: null,
+    });
+  }
+
+  // User fills from the (single) outcomes row per setup.
+  const fillRows = db
+    .prepare(
+      `SELECT setup_id, user_entry_price, user_entry_date, user_exit_price, user_exit_date
+         FROM outcomes
+        WHERE setup_id IN (${placeholders})`
+    )
+    .all(...setupIds) as Array<{
+    setup_id: number;
+    user_entry_price: number | null;
+    user_entry_date: string | null;
+    user_exit_price: number | null;
+    user_exit_date: string | null;
+  }>;
+
+  for (const r of fillRows) {
+    const existing = marks.get(r.setup_id) ?? {
+      userAction: null,
+      userEntryPrice: null,
+      userEntryDate: null,
+      userExitPrice: null,
+      userExitDate: null,
+    };
+    marks.set(r.setup_id, {
+      ...existing,
+      userEntryPrice: r.user_entry_price,
+      userEntryDate: r.user_entry_date,
+      userExitPrice: r.user_exit_price,
+      userExitDate: r.user_exit_date,
+    });
+  }
+
+  return marks;
+}
+
 export function markDecisionUserAction(
   decisionId: number,
   action: "TRADED" | "PASSED" | "WATCHED",
