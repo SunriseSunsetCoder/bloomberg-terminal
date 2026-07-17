@@ -411,6 +411,7 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
                 decisions={data.decisions}
                 isDarkMode={isDarkMode}
                 persistenceAvailable={data.persistenceAvailable ?? false}
+                individualCap={individualCap}
               />
             )}
 
