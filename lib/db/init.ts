@@ -26,6 +26,14 @@ export function getDb(): Database.Database {
   newDb.pragma("journal_mode = WAL");
   newDb.pragma("synchronous = NORMAL");
   newDb.pragma("foreign_keys = ON");
+  // busy_timeout: when the write lock is momentarily held by another connection
+  // (a second dev-server worker's own better-sqlite3 handle, an external DBeaver
+  // session, or a WAL checkpoint), wait up to 5s for it to free instead of
+  // throwing SQLITE_BUSY immediately. Without this, a concurrent write — e.g. a
+  // JACK fill-save landing while a validation run is mid-write — fails outright
+  // and the fill silently doesn't persist. WAL (above) already lets readers not
+  // block the writer; busy_timeout is what makes competing WRITES queue.
+  newDb.pragma("busy_timeout = 5000");
 
   const schemaSql = readFileSync(resolveSchemaPath(), "utf-8");
   newDb.exec(schemaSql);
