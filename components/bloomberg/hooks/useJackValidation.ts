@@ -46,6 +46,9 @@ export interface JackDecisionClient {
   userEntryDate: string | null;
   userExitPrice: number | null;
   userExitDate: string | null;
+  // Frozen decision-time context (marked rows only).
+  jackDecisionAtMark: string | null;
+  sharesAtMark: number | null;
 }
 
 export interface JackValidationResponse {

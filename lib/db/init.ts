@@ -52,6 +52,9 @@ function runMigrations(database: Database.Database): void {
     { name: "user_exit_date", def: "TEXT" },
     { name: "user_R_realized", def: "REAL" },
   ]);
+  ensureColumns(database, "decisions", [
+    { name: "jack_decision_at_mark", def: "TEXT" },
+  ]);
 }
 
 /** ALTER TABLE ADD COLUMN for any of `columns` not already present on `table`. */

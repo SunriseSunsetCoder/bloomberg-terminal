@@ -46,6 +46,9 @@ interface JackDecisionsTableProps {
   decisions: JackDecisionClient[];
   isDarkMode: boolean;
   persistenceAvailable: boolean;
+  // Individual position notional cap (riskPerTrade × 100) from the JACK header,
+  // for the expanded-row notional fill-bar. Presentation only.
+  individualCap?: number;
 }
 
 function rowKey(d: JackDecisionClient, i: number): string {
@@ -104,10 +107,14 @@ interface MarkDto {
   userEntryDate: string | null;
   userExitPrice: number | null;
   userExitDate: string | null;
+  jackDecisionAtMark: string | null;
+  sharesAtMark: number | null;
 }
 
 // Overlay freshly-fetched DB marks onto the (possibly stale) decisions so seedRows
 // re-displays the latest saved action + fills. DB is source of truth on mount.
+// `decision`/`shares` stay LIVE (current re-assessment); the *AtMark fields carry
+// the frozen decision-time snapshot.
 export function overlayMarks(decisions: JackDecisionClient[], marks: Record<string, MarkDto>): JackDecisionClient[] {
   return decisions.map((d) => {
     const m = d.setupId != null ? marks[String(d.setupId)] : undefined;
@@ -119,6 +126,8 @@ export function overlayMarks(decisions: JackDecisionClient[], marks: Record<stri
       userEntryDate: m.userEntryDate ?? null,
       userExitPrice: m.userExitPrice ?? null,
       userExitDate: m.userExitDate ?? null,
+      jackDecisionAtMark: m.jackDecisionAtMark ?? null,
+      sharesAtMark: m.sharesAtMark ?? null,
     };
   });
 }
@@ -140,7 +149,7 @@ function classifyVerdict(decision: string): Verdict {
   return "other";
 }
 
-export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable }: JackDecisionsTableProps) {
+export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable, individualCap }: JackDecisionsTableProps) {
   const [rows, setRows] = useState<Record<string, RowState>>(() => seedRows(decisions));
   const [expanded, setExpanded] = useState<Record<string, boolean>>({}); // all collapsed by default
 
@@ -249,8 +258,22 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
 
   // ================= small presentational helpers =================
 
-  const verdictPill = (decision: string) => {
+  // muted=true → de-emphasized outline pill (used for JACK's FROZEN verdict on a
+  // marked row, so the user's action badge dominates instead of JACK's call).
+  const verdictPill = (decision: string, muted = false) => {
     const v = classifyVerdict(decision);
+    if (muted) {
+      return (
+        <span
+          className={`px-1 py-0.5 rounded text-[9px] font-semibold tracking-wide border whitespace-nowrap shrink-0 ${
+            isDarkMode ? "border-gray-700 text-gray-500" : "border-gray-300 text-gray-500"
+          }`}
+          title="JACK's verdict when you marked this setup"
+        >
+          {decision}
+        </span>
+      );
+    }
     // Filled pills with black/white text — high contrast in BOTH themes (the
     // previous /20 tints on colored text were unreadable in light mode).
     const cls = isDarkMode
@@ -262,12 +285,12 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
             ? "bg-amber-500 text-black border-amber-300"
             : "bg-gray-500 text-white border-gray-300"
       : v === "trade"
-        ? "bg-green-600 text-white border-green-700"
+        ? "bg-green-700 text-white border-green-800"
         : v === "skip"
-          ? "bg-red-600 text-white border-red-700"
+          ? "bg-red-700 text-white border-red-800"
           : v === "watch"
-            ? "bg-amber-500 text-black border-amber-600"
-            : "bg-gray-500 text-white border-gray-600";
+            ? "bg-amber-400 text-black border-amber-600"
+            : "bg-gray-600 text-white border-gray-700";
     return (
       <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide border ${cls} whitespace-nowrap shrink-0`}>
         {decision}
@@ -277,16 +300,19 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
 
   const rMultipleChip = (rr: number | null) => {
     if (rr == null) return <span className={`text-[11px] ${subFg} shrink-0`}>R/R —</span>;
-    // Sub-1.0 R/R is a bad setup — make it alarming (red bordered pill + ⚠),
-    // not just red text.
+    // Sub-1.0 R/R is a bad setup — alarming red pill (theme-aware; the previous
+    // red-300 on /30 tint was illegible in light mode).
     if (rr < 1) {
+      const alarm = isDarkMode
+        ? "text-red-100 bg-red-700/60 border-red-500"
+        : "text-white bg-red-700 border-red-800";
       return (
-        <span className="text-[10px] font-bold text-red-300 bg-red-600/30 border border-red-500 rounded px-1.5 py-0.5 whitespace-nowrap shrink-0">
+        <span className={`text-[10px] font-bold border rounded px-1.5 py-0.5 whitespace-nowrap shrink-0 ${alarm}`}>
           ⚠ R/R {rr.toFixed(2)}
         </span>
       );
     }
-    const color = rr >= 1.5 ? "text-green-400" : "text-amber-400";
+    const color = rr >= 1.5 ? (isDarkMode ? "text-green-400" : "text-green-700") : isDarkMode ? "text-amber-400" : "text-amber-600";
     return (
       <span className={`text-[11px] font-bold ${color} whitespace-nowrap shrink-0`}>R/R {rr.toFixed(2)}</span>
     );
@@ -402,8 +428,18 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     const isTraded = row.userAction === "TRADED";
     const rr = rewardRisk(d);
     const rPreview = row.serverUserR ?? previewR(d, row);
-    // Position size vs the caps shown in the header. Notional = shares × entry.
-    const notional = d.shares != null && d.entry != null ? d.shares * d.entry : null;
+    const marked = row.userAction != null;
+    const liveVerdict = d.decision;
+    const frozenVerdict = d.jackDecisionAtMark ?? null;
+    // Frozen share size on marked rows (mark-time context); current re-assessment's
+    // shares otherwise. Notional = effective shares × entry.
+    const effShares = marked ? d.sharesAtMark : d.shares;
+    const notional = effShares != null && effShares > 0 && d.entry != null ? effShares * d.entry : null;
+    const capPct = notional != null && individualCap ? (notional / individualCap) * 100 : null;
+    // JACK's LIVE verdict differs from what it said when the user marked → re-assessed.
+    const reassessed =
+      marked && frozenVerdict != null && classifyVerdict(liveVerdict) !== classifyVerdict(frozenVerdict);
+    const belowEntry = d.currentPrice != null && d.entry != null && d.currentPrice < d.entry;
 
     return (
       <div key={key} className={`border rounded ${border} ${isOpen ? openBg : rowBg}`}>
@@ -418,16 +454,23 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
             className={`${subFg} shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`}
           />
           <span className={`font-bold ${fg} w-14 shrink-0`}>{d.ticker}</span>
-          {verdictPill(d.decision)}
+          {/* Marked → frozen verdict, DE-EMPHASIZED (the user's action dominates,
+              not JACK's call). Unmarked → live verdict, prominent. */}
+          {marked ? verdictPill(frozenVerdict ?? liveVerdict, true) : verdictPill(liveVerdict)}
           <span className={`text-[11px] ${subFg} whitespace-nowrap shrink-0`}>
             {d.stop != null ? d.stop.toFixed(2) : "—"} <span className="opacity-60">→</span>{" "}
             {d.target != null ? d.target.toFixed(2) : "—"}
           </span>
           {rMultipleChip(rr)}
-          {d.shares != null && (
-            <span className={`text-[10px] ${subFg} whitespace-nowrap shrink-0`}>{d.shares.toLocaleString()} sh</span>
+          {reassessed && (
+            <span
+              className="text-[10px] font-bold text-amber-400 whitespace-nowrap shrink-0"
+              title={`JACK now says ${liveVerdict} (was ${frozenVerdict} when you marked)`}
+            >
+              ⚠ changed
+            </span>
           )}
-          {/* Packed left (no ml-auto) so the badge isn't stranded across dead space. */}
+          {/* Packed left; the action badge is the dominant signal on marked rows. */}
           <span className="shrink-0 flex items-center gap-1 ml-1">
             {row.actionSave === "saving" && <Loader2 size={10} className="animate-spin" />}
             {actionBadge(row.userAction)}
@@ -437,20 +480,57 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
         {/* Expanded detail */}
         {isOpen && (
           <div className={`px-3 pb-3 pt-2 space-y-3 border-t ${border}`}>
+            {/* JACK's CURRENT re-assessment — framed as position info, NOT a
+                contradictory verdict pill. Only shown when it changed post-mark. */}
+            {reassessed && (
+              <div
+                className={`rounded border px-2.5 py-1.5 text-[11px] ${
+                  isDarkMode ? "border-amber-700 bg-amber-950/30 text-amber-200" : "border-amber-500 bg-amber-50 text-amber-800"
+                }`}
+              >
+                <span className="font-bold">⚠ JACK re-assessment:</span> now <b>{liveVerdict}</b> (was {frozenVerdict} when you
+                marked)
+                {d.currentPrice != null && (
+                  <>
+                    {" — "}${d.currentPrice.toFixed(2)}
+                    {belowEntry && d.entry != null ? ` · below entry $${d.entry.toFixed(2)}` : ""}
+                  </>
+                )}
+              </div>
+            )}
+
             {priceLadder(d)}
 
-            {/* Position size — shares + notional ($ = shares × entry), so size vs the
-                individual/session caps in the header is visible at decision time. */}
-            {(d.shares != null || notional != null) && (
-              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px]">
-                <span className={subFg}>
-                  <span className={`${fg} font-bold`}>Shares</span> {d.shares != null ? d.shares.toLocaleString() : "—"}
-                </span>
-                <span className={subFg}>
-                  <span className={`${fg} font-bold`}>Notional</span>{" "}
-                  {notional != null ? `$${notional.toLocaleString("en-US", { maximumFractionDigits: 0 })}` : "—"}
-                  <span className="opacity-60"> (shares × entry)</span>
-                </span>
+            {/* Position size (frozen share size on marked rows). Hidden when 0/unknown. */}
+            {notional != null && effShares != null && effShares > 0 && (
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-x-4 text-[11px]">
+                  <span className={subFg}>
+                    <span className={`${fg} font-bold`}>Shares</span> {effShares.toLocaleString()}
+                    {marked && <span className="opacity-60"> (at mark)</span>}
+                  </span>
+                  <span className={subFg}>
+                    <span className={`${fg} font-bold`}>Notional</span> $
+                    {notional.toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                    <span className="opacity-60"> (× entry)</span>
+                  </span>
+                </div>
+                {capPct != null && individualCap != null && (
+                  <div>
+                    <div className="flex justify-between text-[10px] mb-0.5">
+                      <span className={subFg}>vs individual cap (${individualCap.toLocaleString()})</span>
+                      <span className={capPct >= 90 ? "text-red-400 font-bold" : capPct >= 50 ? "text-amber-400" : subFg}>
+                        {capPct.toFixed(0)}%
+                      </span>
+                    </div>
+                    <div className={`h-1.5 rounded ${track} overflow-hidden`}>
+                      <div
+                        className={`h-full rounded ${capPct >= 90 ? "bg-red-500" : capPct >= 50 ? "bg-amber-500" : "bg-green-500"}`}
+                        style={{ width: `${Math.min(100, capPct)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

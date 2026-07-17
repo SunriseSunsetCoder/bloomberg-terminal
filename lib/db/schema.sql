@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS decisions (
     user_action           TEXT,
     user_action_at        TEXT,
     user_notes            TEXT,
+    -- JACK's verdict FROZEN at the moment the user marked this decision. JACK
+    -- re-validates fresh each run, so its live `decision` can flip after a mark;
+    -- this preserves the decision-time context Session C needs (additive; NULL
+    -- until the row is marked).
+    jack_decision_at_mark TEXT,
     CHECK (section IN ('live', 'pending')),
     CHECK (user_action IS NULL OR user_action IN ('TRADED', 'PASSED', 'WATCHED'))
 );

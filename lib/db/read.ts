@@ -131,6 +131,10 @@ export interface UserMark {
   userEntryDate: string | null;
   userExitPrice: number | null;
   userExitDate: string | null;
+  // Frozen decision-time context (from the marked decision row) — JACK's verdict
+  // and share size AS THEY WERE when the user marked, independent of later re-runs.
+  jackDecisionAtMark: string | null;
+  sharesAtMark: number | null;
 }
 
 /**
@@ -148,10 +152,12 @@ export function getUserMarksForSetups(setupIds: number[]): Map<number, UserMark>
   const db = getDb();
   const placeholders = setupIds.map(() => "?").join(",");
 
-  // Latest non-null user_action per setup (highest decision id wins).
+  // Latest non-null user_action per setup (highest decision id wins). Also pull
+  // the frozen decision-time context (jack_decision_at_mark, shares) from that row.
   const actionRows = db
     .prepare(
-      `SELECT d.setup_id AS setup_id, d.user_action AS user_action
+      `SELECT d.setup_id AS setup_id, d.user_action AS user_action,
+              d.jack_decision_at_mark AS jack_decision_at_mark, d.shares AS shares
          FROM decisions d
          JOIN (
                 SELECT setup_id, MAX(id) AS max_id
@@ -161,7 +167,12 @@ export function getUserMarksForSetups(setupIds: number[]): Map<number, UserMark>
               ) latest
            ON d.id = latest.max_id`
     )
-    .all(...setupIds) as Array<{ setup_id: number; user_action: UserMark["userAction"] }>;
+    .all(...setupIds) as Array<{
+    setup_id: number;
+    user_action: UserMark["userAction"];
+    jack_decision_at_mark: string | null;
+    shares: number | null;
+  }>;
 
   for (const r of actionRows) {
     marks.set(r.setup_id, {
@@ -170,6 +181,8 @@ export function getUserMarksForSetups(setupIds: number[]): Map<number, UserMark>
       userEntryDate: null,
       userExitPrice: null,
       userExitDate: null,
+      jackDecisionAtMark: r.jack_decision_at_mark,
+      sharesAtMark: r.shares,
     });
   }
 
@@ -195,6 +208,8 @@ export function getUserMarksForSetups(setupIds: number[]): Map<number, UserMark>
       userEntryDate: null,
       userExitPrice: null,
       userExitDate: null,
+      jackDecisionAtMark: null,
+      sharesAtMark: null,
     };
     marks.set(r.setup_id, {
       ...existing,
@@ -232,8 +247,14 @@ export function markDecisionUserAction(
            WHERE setup_id = ? AND id != ? AND user_action IS NOT NULL`
       ).run(row.setup_id, decisionId);
     }
+    // Freeze JACK's verdict as it was at mark time (this row's live `decision`),
+    // so a later re-VALIDATE flipping the verdict doesn't rewrite the decision-time
+    // context. Session C reads jack_decision_at_mark.
     db.prepare(
-      `UPDATE decisions SET user_action = ?, user_action_at = ?, user_notes = ? WHERE id = ?`
+      `UPDATE decisions
+          SET user_action = ?, user_action_at = ?, user_notes = ?,
+              jack_decision_at_mark = decision
+        WHERE id = ?`
     ).run(action, now, userNotes ?? null, decisionId);
   });
   apply();
