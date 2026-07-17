@@ -149,6 +149,11 @@ interface JackDecisionClient {
   userEntryDate: string | null;
   userExitPrice: number | null;
   userExitDate: string | null;
+  // Frozen decision-time context (present only on marked rows): JACK's verdict +
+  // shares as they were when the user marked. `decision`/`shares` above stay LIVE
+  // (current re-assessment); these hold the mark-time snapshot.
+  jackDecisionAtMark: string | null;
+  sharesAtMark: number | null;
 }
 
 interface JackValidationResponse {
@@ -665,6 +670,8 @@ export function buildClientDecisions(
       userEntryDate: mark?.userEntryDate ?? null,
       userExitPrice: mark?.userExitPrice ?? null,
       userExitDate: mark?.userExitDate ?? null,
+      jackDecisionAtMark: mark?.jackDecisionAtMark ?? null,
+      sharesAtMark: mark?.sharesAtMark ?? null,
     });
   };
   for (const ed of extracted?.live_decisions ?? []) push(ed, "live");
