@@ -33,6 +33,7 @@ type TerminalHeaderProps = {
   onFleetClick: () => void;
   onIVClick: () => void;
   onJackClick: () => void;
+  onJackAnalyticsClick: () => void;
   onHelpClick: () => void;
   onThemeToggle: () => void;
 };
@@ -78,6 +79,7 @@ export function TerminalHeader({
   onFleetClick,
   onIVClick,
   onJackClick,
+  onJackAnalyticsClick,
   onHelpClick,
   onThemeToggle,
 }: TerminalHeaderProps) {
@@ -162,6 +164,10 @@ export function TerminalHeader({
         <BloombergButton color="green" onClick={onJackClick}>
           <Briefcase className="h-3 w-3 mr-1" />
           JACK
+        </BloombergButton>
+        <BloombergButton color="green" onClick={onJackAnalyticsClick}>
+          <BarChart2 className="h-3 w-3 mr-1" />
+          JANLY
         </BloombergButton>
         <BloombergButton color="accent" onClick={onHelpClick}>
           <HelpCircle className="h-3 w-3 mr-1" />

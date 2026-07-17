@@ -26,6 +26,7 @@ import type { FilterState, MarketItem } from "../types";
 import { FleetView } from "../views/fleet-view";
 import { IVView } from "../views/iv-view";
 import { JackView } from "../views/jack-view";
+import { JackAnalyticsView } from "../views/jack-analytics-view";
 import MarketMoversView from "../views/market-movers-view";
 import { MarketView } from "../views/market-view";
 import NewsView from "../views/news-view";
@@ -50,6 +51,7 @@ export default function BloombergTerminal() {
     handleFleetView,
     handleIVView,
 	handleJackView,
+    handleJackAnalyticsView,
     handleCancelClick,
     handleNewClick,
     handleBlancClick,
@@ -208,6 +210,14 @@ export default function BloombergTerminal() {
     );
   }
 
+  if (currentView === "jackAnalytics") {
+    return (
+      <TerminalLayout shortcuts={shortcuts}>
+        <JackAnalyticsView isDarkMode={isDarkMode} onBack={handleBackFromView} />
+      </TerminalLayout>
+    );
+  }
+
   return (
     <TerminalLayout shortcuts={shortcuts}>
       <TerminalHeader
@@ -222,6 +232,7 @@ export default function BloombergTerminal() {
         onFleetClick={handleFleetView}
         onIVClick={handleIVView}
 		onJackClick={handleJackView}
+        onJackAnalyticsClick={handleJackAnalyticsView}
         onHelpClick={handleHelpClick}
         onThemeToggle={handleThemeToggle}
       />

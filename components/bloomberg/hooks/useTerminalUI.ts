@@ -42,6 +42,8 @@ export function useTerminalUI() {
   
   const handleJackView = useCallback(() => setCurrentView("jack"), [setCurrentView]);
 
+  const handleJackAnalyticsView = useCallback(() => setCurrentView("jackAnalytics"), [setCurrentView]);
+
   const handleCancelClick = useCallback(() => {
     console.log("Cancel clicked");
   }, []);
@@ -80,6 +82,7 @@ export function useTerminalUI() {
     handleFleetView,
     handleIVView,
 	handleJackView,
+    handleJackAnalyticsView,
     handleCancelClick,
     handleNewClick,
     handleBlancClick,
