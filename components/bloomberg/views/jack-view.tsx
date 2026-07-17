@@ -1,8 +1,6 @@
 "use client";
 
 import { useState, useCallback, useMemo } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database, RefreshCw, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useJackValidation } from "@/components/bloomberg/hooks/useJackValidation";
 import { JackDecisionsTable } from "@/components/bloomberg/views/jack-decisions-table";
@@ -134,15 +132,6 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
   const btnSecondary = isDarkMode
     ? "bg-gray-900 hover:bg-gray-800 text-orange-300 border border-gray-800"
     : "bg-white hover:bg-gray-100 text-gray-800 border border-gray-300";
-  // `break-words` + anywhere-wrap stop long tokens from running off the right edge;
-  // wide markdown tables get their OWN horizontal scroll (block + overflow-x) rather
-  // than pushing the whole page sideways; <pre> wraps instead of overflowing.
-  const proseWrap =
-    "max-w-none break-words [overflow-wrap:anywhere] [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:overflow-x-auto [&_pre]:whitespace-pre-wrap [&_pre]:break-words";
-  const proseClass = isDarkMode
-    ? `prose prose-invert prose-sm ${proseWrap} prose-table:text-orange-200 prose-th:text-orange-400 prose-th:border-orange-900 prose-td:border-orange-900 prose-strong:text-orange-300 prose-blockquote:border-orange-900 prose-blockquote:text-orange-300`
-    : `prose prose-sm ${proseWrap}`;
-
   return (
     <div className={`flex flex-col w-full ${bg} ${fg} font-mono text-sm overflow-hidden`} style={{ height: "calc(100vh - 4rem)" }}>
       {/* Header bar */}
@@ -415,9 +404,12 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
               />
             )}
 
-            {/* Raw markdown analysis — collapsed fallback. The expandable rows above
-                are the primary surface; this keeps the full text for copy/reference
-                (the wide Table 1/2 that used to overflow lives here, behind a toggle). */}
+            {/* Raw analysis — collapsed by default, behind this toggle only. The
+                expandable rows above are the sole default surface. Rendered as
+                PLAIN monospace text (NOT ReactMarkdown), so the old wide Table 1/2
+                can never render as an HTML <table> and character-wrap — there is
+                no <table> in this view at all anymore. Copy button gives the raw
+                text either way. */}
             {!isPending && data?.markdown && (
               <div className="mt-4 border-t pt-3 border-orange-900/40">
                 <button
@@ -425,12 +417,14 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
                   onClick={() => setShowRaw((v) => !v)}
                   className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${btnSecondary}`}
                 >
-                  {showRaw ? "▾ Hide raw analysis" : "▸ Raw analysis (markdown)"}
+                  {showRaw ? "▾ Hide raw analysis" : "▸ Raw analysis (text)"}
                 </button>
                 {showRaw && (
-                  <div className={`${proseClass} mt-3`}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.markdown}</ReactMarkdown>
-                  </div>
+                  <pre
+                    className={`mt-3 p-3 rounded text-[11px] leading-relaxed whitespace-pre-wrap break-words max-h-[60vh] overflow-y-auto ${inputBg} ${inputBorder} border ${subFg}`}
+                  >
+                    {data.markdown}
+                  </pre>
                 )}
               </div>
             )}
