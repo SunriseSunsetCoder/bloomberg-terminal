@@ -1286,6 +1286,38 @@ export async function POST(req: NextRequest) {
       riskPerTrade
     );
 
+    // ===== TEMP HS-DIAG (remove after diagnosis) =====================
+    // Traces handle_score/size_bucket at three server boundaries so one VALIDATE
+    // shows exactly where (if anywhere) the field is lost: CSV header → parsed
+    // setup → built client decision.
+    try {
+      const hdrCols = headerLine.split(/[\t,]|\s{2,}/).map((c) => c.trim());
+      console.log("[HS-DIAG] CSV header cols:", JSON.stringify(hdrCols));
+      console.log(
+        "[HS-DIAG] has handle_score col:", hdrCols.includes("handle_score"),
+        "| has size_bucket col:", hdrCols.includes("size_bucket")
+      );
+      console.log(
+        "[HS-DIAG] parsed setups:",
+        JSON.stringify(
+          [...enrichedLive, ...enrichedPending].slice(0, 5).map((s) => ({
+            t: s.ticker, hs: s.handleScore, sb: s.sizeBucket, entry: s.entry,
+          }))
+        )
+      );
+      console.log(
+        "[HS-DIAG] built clientDecisions:",
+        JSON.stringify(
+          clientDecisions.slice(0, 5).map((d) => ({
+            t: d.ticker, section: d.section, hs: d.handleScore, sb: d.sizeBucket, entry: d.entry,
+          }))
+        )
+      );
+    } catch (e) {
+      console.log("[HS-DIAG] trace error:", String(e));
+    }
+    // ===== END TEMP HS-DIAG ==========================================
+
     return NextResponse.json<JackValidationResponse>({
       schemaVersion: "1.2", timestamp,
       strategy: "Cup with Handle t05", riskPerTrade,

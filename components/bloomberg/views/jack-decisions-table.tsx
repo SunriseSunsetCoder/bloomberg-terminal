@@ -186,6 +186,31 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   const [rows, setRows] = useState<Record<string, RowState>>(() => seedRows(decisions));
   const [expanded, setExpanded] = useState<Record<string, boolean>>({}); // all collapsed by default
 
+  // ===== TEMP HS-DIAG (remove after diagnosis) =====================
+  // Dumps the EXACT decision objects the row component receives, so we can see
+  // whether handleScore/sizeBucket survived into the client prop or arrived
+  // undefined/missing. Also prints the object's own keys to catch any rename.
+  useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.log(
+      "[HS-DIAG] table received decisions:",
+      decisions.slice(0, 5).map((d) => ({
+        t: d.ticker,
+        section: d.section,
+        hs: d.handleScore,
+        sb: d.sizeBucket,
+        entry: d.entry,
+        hasHsKey: Object.prototype.hasOwnProperty.call(d, "handleScore"),
+        hasSbKey: Object.prototype.hasOwnProperty.call(d, "sizeBucket"),
+      }))
+    );
+    if (decisions[0]) {
+      // eslint-disable-next-line no-console
+      console.log("[HS-DIAG] first decision keys:", Object.keys(decisions[0]).join(","));
+    }
+  }, [decisions]);
+  // ===== END TEMP HS-DIAG ==========================================
+
   useEffect(() => {
     setRows(seedRows(decisions));
   }, [decisions]);
