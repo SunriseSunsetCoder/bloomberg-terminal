@@ -178,6 +178,7 @@ After both tables:
 6. **`notes` should mirror the markdown Notes column but be concise** (~1-3 sentences).
 7. **All rows from the markdown tables must appear in the JSON.** Row count in markdown Live table = row count in `live_decisions`. Same for pending.
 8. **The JSON block is the FIRST thing in your response** — emit nothing before it (no preamble, no commentary, no markdown header). The human-readable markdown follows immediately after the closing fence. Do NOT emit a second JSON block later.
+9. **Do NOT restate the handle score in prose.** The scanner row may include a `handle_score` / `size_bucket` (a.k.a. "GF Score") — the app renders that structured value as its own pill, so it is the single source of truth. Your `notes` and markdown reasoning must NOT quote, paraphrase, or re-derive that number (no "GF Score 84", "handle score 0.72", "B5/B4 bucket", etc.). Reason about the setup's news/sector/risk context for the analysis verdict; leave the handle-quality number to the pill. (This does not change your `decision` — you still call TRADE / SIZE DOWN 50% / SKIP on the merits.)
 
 ## What's locked
 

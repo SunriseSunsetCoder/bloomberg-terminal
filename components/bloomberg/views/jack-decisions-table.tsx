@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, Loader2, Save, ChevronRight } from "lucide-react";
+import { Check, Loader2, Save, ChevronRight, AlertTriangle } from "lucide-react";
 import type { JackDecisionClient } from "@/components/bloomberg/hooks/useJackValidation";
 
 // ============================================================================
@@ -147,6 +147,39 @@ function classifyVerdict(decision: string): Verdict {
   if (s.includes("WATCH")) return "watch";
   if (s.includes("FIRED") || s.includes("EXTENDED")) return "fired";
   return "other";
+}
+
+// ---- Disagreement flag (two independent sizing signals) ----------------------
+// The ANALYSIS verdict (news/sector/risk context) and the HANDLE bucket (handle
+// quality) answer different questions. When they point in OPPOSITE directions we
+// surface a quiet flag; the user reconciles. Directional mapping is explicit so
+// the flag is deterministic:
+//   analysis: TRADE = positive · SIZE DOWN/REDUCE = caution · SKIP/AVOID/PASS = negative
+//   handle:   FULL  = positive · HALF             = caution · SKIP            = negative
+// We flag ONLY the hard positive/negative contradiction (TRADE+SKIP, SKIP+FULL).
+// caution-vs-anything is a nuance, not a conflict, and would make the ⚠ noise.
+type SignalDir = "pos" | "caution" | "neg";
+export function analysisDirection(decision: string | null | undefined): SignalDir | null {
+  const s = (decision ?? "").toUpperCase();
+  // "SIZE DOWN"/"REDUCE" is caution even when the word TRADE also appears
+  // (e.g. "TRADE — SIZE DOWN 50%"), so test it first.
+  if (/SIZE\s*DOWN|REDUCE|TRIM/.test(s)) return "caution";
+  if (/TRADE/.test(s)) return "pos";
+  if (/SKIP|AVOID|PASS/.test(s)) return "neg";
+  return null; // WATCH / FIRED / INCOMPLETE / UNKNOWN — no directional stance
+}
+export function handleDirection(bucket: string | null | undefined): SignalDir | null {
+  const b = (bucket ?? "").toLowerCase().trim();
+  if (b === "full") return "pos";
+  if (b === "half") return "caution";
+  if (b === "skip") return "neg";
+  return null;
+}
+export function signalsDisagree(decision: string | null | undefined, bucket: string | null | undefined): boolean {
+  const a = analysisDirection(decision);
+  const h = handleDirection(bucket);
+  if (a == null || h == null) return false;
+  return (a === "pos" && h === "neg") || (a === "neg" && h === "pos");
 }
 
 export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable, individualCap }: JackDecisionsTableProps) {
@@ -322,77 +355,89 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   // ---- handle_score sizing directive (recommendation — the user decides) ----
   const fmtUsd0 = (n: number) => `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 
-  // Headline FULL / HALF / SKIP pill + the handle_score. SKIP is still shown (a
-  // skip is information; near-line scores like 0.452 deserve an eyeball).
+  // STRUCTURED handle-score pill — read from the ingested size_bucket + handle_score
+  // columns (NOT LLM prose). Renders on EVERY scored row. Format "handle score:
+  // FULL · 0.72": bucket in caps for the action, 2-decimal score for the nuance.
+  // Weight encodes the directive — FULL emphasized (filled), HALF neutral (outline),
+  // SKIP de-emphasized (muted outline) — but SKIP stays fully legible (a low score
+  // is information; borderline ones like 0.452 just under the 0.456 line get an eye).
   const bucketPill = (d: JackDecisionClient) => {
     const bucket = d.sizeBucket ?? null;
     if (bucket == null && d.handleScore == null) return null;
+    const label = bucket ? bucket.toUpperCase() : "—";
+    const score = d.handleScore != null ? d.handleScore.toFixed(2) : "—";
     const cls = isDarkMode
       ? bucket === "full"
-        ? "bg-green-600 text-black border-green-400"
+        ? "bg-green-600 text-black border-green-400 font-bold"
         : bucket === "half"
-          ? "bg-amber-500 text-black border-amber-300"
-          : "bg-gray-600 text-gray-200 border-gray-500"
+          ? "bg-transparent text-amber-300 border-amber-500/70 font-semibold"
+          : "bg-transparent text-gray-500 border-gray-700 font-medium"
       : bucket === "full"
-        ? "bg-green-700 text-white border-green-800"
+        ? "bg-green-700 text-white border-green-800 font-bold"
         : bucket === "half"
-          ? "bg-amber-400 text-black border-amber-600"
-          : "bg-gray-500 text-white border-gray-600";
-    const label = bucket ? bucket.toUpperCase() : "—";
-    // Recommended-bucket share count inline on the pill for FULL/HALF.
-    const recSh = d.recShares != null && d.recShares > 0 ? ` ${d.recShares.toLocaleString()}sh` : "";
+          ? "bg-transparent text-amber-700 border-amber-500 font-semibold"
+          : "bg-transparent text-gray-500 border-gray-400 font-medium";
     return (
-      <span className="inline-flex items-center gap-1 shrink-0">
-        <span
-          className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide border whitespace-nowrap ${cls}`}
-          title="handle_score sizing directive — recommendation, you decide + size"
-        >
-          {label}{recSh}
-        </span>
-        {d.handleScore != null && (
-          <span className={`text-[10px] font-mono ${subFg} whitespace-nowrap`} title="handle_score (0–1) — higher = better handle">
-            {d.handleScore.toFixed(3)}
-          </span>
-        )}
+      <span
+        className={`px-1.5 py-0.5 rounded text-[10px] tracking-wide border whitespace-nowrap shrink-0 ${cls}`}
+        title="Handle-quality sizing from the scanner's handle_score — a SEPARATE signal from the analysis verdict. Recommendation; you reconcile + size."
+      >
+        <span className="opacity-60 font-normal">handle score:</span> {label} · {score}
       </span>
     );
   };
 
-  // Expanded sizing block — concrete shares + notional the user would trade at the
-  // recommended size, from risk/trade ÷ stop distance. Recommendation, not applied.
+  // Quiet disagreement cue — the analysis verdict and the handle bucket point in
+  // HARD-OPPOSITE directions (TRADE+SKIP or SKIP+FULL). Visual only; changes no data.
+  const disagreeFlag = (analysisVerdict: string | null, d: JackDecisionClient) => {
+    if (!signalsDisagree(analysisVerdict, d.sizeBucket)) return null;
+    return (
+      <span
+        className="inline-flex items-center gap-0.5 text-[9px] text-amber-500/80 whitespace-nowrap shrink-0"
+        title={`Signals disagree — analysis says ${analysisVerdict}, handle says ${(d.sizeBucket ?? "").toUpperCase()}. Reconcile before sizing.`}
+      >
+        <AlertTriangle size={9} /> signals disagree
+      </span>
+    );
+  };
+
+  // Expanded sizing — the existing FULL-RISK share count (risk/trade ÷ stop
+  // distance) shown ALONGSIDE the handle-recommended size:
+  //   FULL → handle-recommended = full-risk shares (same)
+  //   HALF → full-risk × 0.5
+  //   SKIP → shares shown but greyed + "handle SKIP" (override possible, discouraged)
+  // Display, not auto-applied — the user still makes the sizing call.
   const sizingBlock = (d: JackDecisionClient) => {
     if (d.sizeBucket == null && d.handleScore == null) return null;
     const bucket = d.sizeBucket ?? null;
-    const headline =
-      bucket === "full" && d.fullShares != null && d.fullNotional != null
-        ? `FULL — ${d.fullShares.toLocaleString()} sh / ${fmtUsd0(d.fullNotional)}`
-        : bucket === "half" && d.halfShares != null && d.halfNotional != null
-          ? `HALF — ${d.halfShares.toLocaleString()} sh / ${fmtUsd0(d.halfNotional)}`
+    const fullRiskTxt =
+      d.fullShares != null && d.fullNotional != null
+        ? `full-risk ${d.fullShares.toLocaleString()} sh / ${fmtUsd0(d.fullNotional)}`
+        : "full-risk — (missing entry/stop)";
+    // handle-recommended: rec for full/half; for skip show full-risk shares greyed.
+    const handle =
+      bucket === "full"
+        ? { text: `handle FULL → ${d.recShares?.toLocaleString() ?? "—"} sh`, muted: false }
+        : bucket === "half"
+          ? { text: `handle HALF → ${d.recShares?.toLocaleString() ?? "—"} sh`, muted: false }
           : bucket === "skip"
-            ? "SKIP — no position recommended (score below the Q3 line)"
-            : bucket
-              ? `${bucket.toUpperCase()} — share count unavailable (missing entry/stop)`
-              : "unscored";
+            ? { text: `handle SKIP → ${d.fullShares?.toLocaleString() ?? "—"} sh (discouraged)`, muted: true }
+            : { text: "handle —", muted: true };
     return (
       <div className={`rounded border ${border} px-2.5 py-1.5 ${isDarkMode ? "bg-gray-950/60" : "bg-white"}`}>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span className={`text-[9px] uppercase tracking-widest ${subFg}`}>handle_score sizing</span>
           {bucketPill(d)}
-          <span className={`text-[11px] font-bold ${bucket === "skip" ? subFg : fg}`}>{headline}</span>
         </div>
-        {/* full/half reference line so the trader can see both sizes at a glance */}
-        {(d.fullShares != null || d.halfShares != null) && (
-          <div className={`flex flex-wrap gap-x-4 mt-1 text-[10px] ${subFg}`}>
-            {d.fullShares != null && d.fullNotional != null && (
-              <span>full {d.fullShares.toLocaleString()} sh · {fmtUsd0(d.fullNotional)}</span>
-            )}
-            {d.halfShares != null && d.halfNotional != null && (
-              <span>half {d.halfShares.toLocaleString()} sh · {fmtUsd0(d.halfNotional)}</span>
-            )}
-          </div>
-        )}
+        <div className="flex flex-wrap items-center gap-x-2 mt-1 text-[11px]">
+          <span className={fg + " font-bold"}>{fullRiskTxt}</span>
+          <span className="opacity-50">·</span>
+          <span className={handle.muted ? `${subFg} line-through decoration-1` : "text-green-400 font-bold"}>
+            {handle.text}
+          </span>
+        </div>
         <div className={`text-[9px] ${subFg} mt-1 italic`}>
-          Recommendation from the validated handle-score edge — you decide and size. Shares = risk/trade ÷ (entry − stop).
+          Recommendation from the validated handle-score edge — you decide and size. Full-risk shares = risk/trade ÷ (entry − stop).
         </div>
       </div>
     );
@@ -726,6 +771,9 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     const reassessed =
       marked && frozenVerdict != null && classifyVerdict(liveVerdict) !== classifyVerdict(frozenVerdict);
     const belowEntry = d.currentPrice != null && d.entry != null && d.currentPrice < d.entry;
+    // The analysis verdict actually SHOWN beside the handle pill (frozen when
+    // marked, live otherwise) — that's the one the disagreement flag reconciles.
+    const shownAnalysisVerdict = marked ? frozenVerdict ?? liveVerdict : liveVerdict;
 
     return (
       <div key={key} className={`border rounded ${border} ${isOpen ? openBg : rowBg}`}>
@@ -744,6 +792,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
               not JACK's call). Unmarked → live verdict, prominent. */}
           {marked ? verdictPill(frozenVerdict ?? liveVerdict, true) : verdictPill(liveVerdict)}
           {bucketPill(d)}
+          {disagreeFlag(shownAnalysisVerdict, d)}
           <span className={`text-[11px] ${subFg} whitespace-nowrap shrink-0`}>
             {d.stop != null ? d.stop.toFixed(2) : "—"} <span className="opacity-60">→</span>{" "}
             {d.target != null ? d.target.toFixed(2) : "—"}
