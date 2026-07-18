@@ -234,6 +234,7 @@ export interface OpenPositionRow {
   breakout: number | null;
   shares: number | null;
   jackDecisionAtMark: string | null;
+  jackAnalysisAtMark: string | null;
   userEntryPrice: number | null;
   userEntryDate: string | null;
   userExitPrice: number | null;
@@ -264,6 +265,7 @@ export function getOpenPositions(): OpenPositionRow[] {
          s.breakout_level        AS breakout,
          dm.shares               AS shares,
          dm.jack_decision_at_mark AS jackDecisionAtMark,
+         dm.jack_analysis_at_mark AS jackAnalysisAtMark,
          o.user_entry_price      AS userEntryPrice,
          o.user_entry_date       AS userEntryDate,
          o.user_exit_price       AS userExitPrice,
@@ -307,13 +309,17 @@ export function markDecisionUserAction(
            WHERE setup_id = ? AND id != ? AND user_action IS NOT NULL`
       ).run(row.setup_id, decisionId);
     }
-    // Freeze JACK's verdict as it was at mark time (this row's live `decision`),
-    // so a later re-VALIDATE flipping the verdict doesn't rewrite the decision-time
-    // context. Session C reads jack_decision_at_mark.
+    // Freeze JACK's verdict AND its analysis text as they were at mark time (this
+    // row's live `decision` + `notes`), so a later re-VALIDATE flipping the verdict
+    // or reasoning doesn't rewrite the decision-time context. jack_analysis_at_mark
+    // is the immutable "why I entered" thesis shown on the Current Positions row;
+    // the live position-management re-read is computed separately and never touches
+    // it. Session C reads jack_decision_at_mark.
     db.prepare(
       `UPDATE decisions
           SET user_action = ?, user_action_at = ?, user_notes = ?,
-              jack_decision_at_mark = decision
+              jack_decision_at_mark = decision,
+              jack_analysis_at_mark = notes
         WHERE id = ?`
     ).run(action, now, userNotes ?? null, decisionId);
   });

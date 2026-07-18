@@ -62,6 +62,10 @@ function runMigrations(database: Database.Database): void {
   ]);
   ensureColumns(database, "decisions", [
     { name: "jack_decision_at_mark", def: "TEXT" },
+    // Frozen entry THESIS — JACK's analysis text as it was when the user marked
+    // TRADED. The "why I entered" note, immutable across later re-VALIDATEs. The
+    // live re-read (position management) is computed fresh and never overwrites this.
+    { name: "jack_analysis_at_mark", def: "TEXT" },
   ]);
 }
 
