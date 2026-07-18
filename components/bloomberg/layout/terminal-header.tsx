@@ -16,6 +16,7 @@ import {
   Wifi,
   Zap,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { BloombergButton } from "../core/bloomberg-button";
 import { useMarketDataQuery } from "../hooks";
 import { useRegimeData, regimeColor, regimeBg } from "../hooks";
@@ -94,6 +95,18 @@ export function TerminalHeader({
   } = useMarketDataQuery();
 
   const { data: regimeData, isError: regimeError } = useRegimeData();
+
+  // Hydration-safe gate. `isLoading` (React Query) is FALSE during SSR (the query
+  // never fetches on the server) but flips TRUE on the client the moment the fetch
+  // starts — so `disabled={isLoading}` renders no attribute server-side and
+  // disabled={true} client-side, a hydration mismatch. React 19 recovers a
+  // mismatch by DISCARDING the server tree and re-rendering the whole root, which
+  // in dev throws the error overlay and can leave the client render stale. Gate the
+  // dynamic value on mount so SSR and the first client render agree (both `false`),
+  // then reflect isLoading after mount. No attribute-level mismatch, no discard.
+  const [hasMounted, setHasMounted] = useState(false);
+  useEffect(() => setHasMounted(true), []);
+  const busy = hasMounted && isLoading;
 
   const colors = isDarkMode ? bloombergColors.dark : bloombergColors.light;
 
@@ -186,20 +199,20 @@ export function TerminalHeader({
           <BloombergButton
             color="accent"
             onClick={refreshData}
-            disabled={isLoading}
+            disabled={busy}
           >
             REFR
           </BloombergButton>
           <BloombergButton
             color={isRealTimeEnabled ? "red" : "green"}
             onClick={toggleRealTimeUpdates}
-            disabled={isLoading}
+            disabled={busy}
           >
             {isRealTimeEnabled ? "STOP" : "LIVE"}
           </BloombergButton>
 
           <div className="flex items-center gap-2 text-xs">
-            {isLoading ? (
+            {busy ? (
               <RefreshCw className="h-3 w-3 animate-spin" />
             ) : isRealTimeEnabled ? (
               <Wifi className="h-3 w-3 text-green-500" />
