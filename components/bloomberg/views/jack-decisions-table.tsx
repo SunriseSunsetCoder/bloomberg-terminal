@@ -422,13 +422,218 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   const priceCls = `w-20 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500`;
   const dateCls = `w-32 px-1 py-0.5 rounded ${inputBg} border ${inputBorder} ${inputFg} text-[11px] focus:outline-none focus:border-orange-500`;
 
+  // Fill panel (entry/exit prices + dates + user R + Save) — shared by TRADED scan
+  // rows and open-position rows so the exit-fill write path is identical everywhere.
+  const fillPanel = (d: JackDecisionClient, key: string) => {
+    const row = getRow(key);
+    const rPreview = row.serverUserR ?? previewR(d, row);
+    return (
+      <div className={`rounded border ${border} px-3 py-2 ${isDarkMode ? "bg-orange-950/20" : "bg-orange-50"}`}>
+        <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+          <span className={`self-center text-[10px] font-bold tracking-widest ${fg}`}>FILLS</span>
+          {(
+            [
+              { lbl: "Entry price", val: row.entry, kind: "price", set: (v: string) => patch(key, { entry: sanitizePrice(v), fillsSave: "idle" }) },
+              { lbl: "Entry date", val: row.entryDate, kind: "date", set: (v: string) => patch(key, { entryDate: v, fillsSave: "idle" }) },
+              { lbl: "Exit price", val: row.exit, kind: "price", set: (v: string) => patch(key, { exit: sanitizePrice(v), fillsSave: "idle" }) },
+              { lbl: "Exit date", val: row.exitDate, kind: "date", set: (v: string) => patch(key, { exitDate: v, fillsSave: "idle" }) },
+            ] as const
+          ).map((f) => (
+            <label key={f.lbl} className="flex flex-col gap-0.5">
+              <span className={`text-[9px] uppercase tracking-wide ${subFg}`}>{f.lbl}</span>
+              <input
+                type={f.kind === "date" ? "date" : "text"}
+                inputMode={f.kind === "price" ? "decimal" : undefined}
+                value={f.val}
+                onChange={(e) => f.set(e.target.value)}
+                onKeyDown={stopKeys}
+                className={f.kind === "date" ? dateCls : priceCls}
+                placeholder={f.kind === "price" ? "0.00" : undefined}
+              />
+            </label>
+          ))}
+          <div className={`self-stretch w-px ${isDarkMode ? "bg-orange-900" : "bg-orange-200"}`} />
+          <div className="flex flex-col gap-0.5">
+            <span className={`text-[9px] uppercase tracking-wide ${subFg}`}>user R</span>
+            <span
+              className={`text-[13px] font-bold leading-6 ${
+                rPreview != null ? (rPreview >= 0 ? "text-green-400" : "text-red-400") : subFg
+              }`}
+            >
+              {rPreview != null ? `${rPreview >= 0 ? "+" : ""}${rPreview.toFixed(2)}R` : "—"}
+            </span>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            {row.error && row.fillsSave === "error" && (
+              <span className="text-red-400 text-[10px] max-w-40">{row.error}</span>
+            )}
+            {renderSaveButton(d, key, row.fillsSave)}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ---- Open-position live re-read (Part C) → colour + label ----
+  type ReadTone = { badge: string; banner: string; label: string };
+  const liveReadTone = (verdict: string | null | undefined): ReadTone => {
+    const v = (verdict ?? "").toUpperCase();
+    if (v === "HOLD")
+      return {
+        badge: isDarkMode ? "bg-green-600 text-black border-green-400" : "bg-green-700 text-white border-green-800",
+        banner: isDarkMode ? "border-green-700 bg-green-950/30 text-green-200" : "border-green-500 bg-green-50 text-green-800",
+        label: "HOLD",
+      };
+    if (v === "EXIT")
+      return {
+        badge: isDarkMode ? "bg-red-600 text-white border-red-400" : "bg-red-700 text-white border-red-800",
+        banner: isDarkMode ? "border-red-700 bg-red-950/30 text-red-200" : "border-red-500 bg-red-50 text-red-800",
+        label: "EXIT",
+      };
+    if (v === "REDUCE")
+      return {
+        badge: isDarkMode ? "bg-amber-500 text-black border-amber-300" : "bg-amber-400 text-black border-amber-600",
+        banner: isDarkMode ? "border-amber-700 bg-amber-950/30 text-amber-200" : "border-amber-500 bg-amber-50 text-amber-800",
+        label: "REDUCE",
+      };
+    return {
+      badge: isDarkMode ? "bg-gray-600 text-white border-gray-400" : "bg-gray-500 text-white border-gray-600",
+      banner: isDarkMode ? "border-gray-700 bg-gray-900/40 text-gray-300" : "border-gray-300 bg-gray-50 text-gray-600",
+      label: verdict ? "…" : "re-read pending",
+    };
+  };
+
+  const rulesChip = (label: string | null | undefined, tone: string | null | undefined) => {
+    if (!label) return null;
+    const cls =
+      tone === "danger"
+        ? isDarkMode ? "border-red-500 text-red-300" : "border-red-600 text-red-700"
+        : tone === "good"
+          ? isDarkMode ? "border-green-500 text-green-300" : "border-green-600 text-green-700"
+          : tone === "warn"
+            ? isDarkMode ? "border-amber-500 text-amber-300" : "border-amber-600 text-amber-700"
+            : isDarkMode ? "border-gray-600 text-gray-400" : "border-gray-400 text-gray-600";
+    return <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold whitespace-nowrap shrink-0 ${cls}`}>{label}</span>;
+  };
+
+  const unrealChip = (pct: number | null | undefined) => {
+    if (pct == null) return null;
+    const good = pct >= 0;
+    const cls = good ? (isDarkMode ? "text-green-400" : "text-green-700") : isDarkMode ? "text-red-400" : "text-red-600";
+    return <span className={`text-[11px] font-bold ${cls} whitespace-nowrap shrink-0`}>{good ? "+" : ""}{pct.toFixed(1)}%</span>;
+  };
+
+  // Open-position row (section "open"). THREE clearly-distinct layers so the frozen
+  // entry thesis is never conflated with the live re-read:
+  //   1. LIVE RE-READ (LLM, prominent) — has it broken? HOLD/EXIT/REDUCE + why.
+  //   2. PRICE LADDER + NOW + unrealized % + days held — where it is.
+  //   3. FROZEN THESIS (immutable, de-emphasized) — why I entered.
+  const renderOpenRow = (d: JackDecisionClient, i: number) => {
+    const key = rowKey(d, i);
+    const isOpen = !!expanded[key];
+    const tone = liveReadTone(d.liveReadVerdict);
+    const frozenVerdict = d.jackDecisionAtMark ?? d.decision;
+    return (
+      <div key={key} className={`border rounded ${border} ${isOpen ? openBg : rowBg}`}>
+        {/* Collapsed header — live re-read verdict is the dominant signal */}
+        <button
+          type="button"
+          onClick={() => toggle(key)}
+          className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left rounded ${rowHover}`}
+        >
+          <ChevronRight size={13} className={`${subFg} shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`} />
+          <span className={`font-bold ${fg} w-14 shrink-0`}>{d.ticker}</span>
+          <span
+            className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide border ${tone.badge} whitespace-nowrap shrink-0`}
+            title="Live position re-read (LLM, updates each run)"
+          >
+            {tone.label}
+          </span>
+          {d.currentPrice != null && (
+            <span className={`text-[11px] ${subFg} whitespace-nowrap shrink-0`}>
+              NOW {d.currentPrice.toFixed(2)}
+            </span>
+          )}
+          {unrealChip(d.unrealizedPct)}
+          {rulesChip(d.rulesFlag, d.rulesTone)}
+          <span className="shrink-0 flex items-center gap-1 ml-auto">
+            {verdictPill(frozenVerdict, true)}
+            <span className="text-[10px] font-bold text-green-400">✓ TRADED</span>
+          </span>
+        </button>
+
+        {isOpen && (
+          <div className={`px-3 pb-3 pt-2 space-y-3 border-t ${border}`}>
+            {/* LAYER 1 — LIVE RE-READ (prominent) */}
+            <div className={`rounded border px-2.5 py-2 ${tone.banner}`}>
+              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                <span className="text-[9px] uppercase tracking-widest opacity-80">Live re-read</span>
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide border ${tone.badge}`}>{tone.label}</span>
+                {d.liveReadThesisStatus && d.liveReadThesisStatus !== "unknown" && (
+                  <span className="text-[10px] font-semibold opacity-80">thesis: {d.liveReadThesisStatus}</span>
+                )}
+                <span className="text-[9px] opacity-70 ml-auto">updates each run</span>
+              </div>
+              {d.liveReadReasoning && d.liveReadReasoning.trim().length > 0 ? (
+                <p className="text-xs leading-relaxed break-words">{d.liveReadReasoning}</p>
+              ) : (
+                <p className="text-[11px] opacity-80 italic">
+                  No live re-read yet — run JACK (or check that the position-management LLM is reachable). Frozen thesis + rules below still apply.
+                </p>
+              )}
+              <p className="text-[9px] opacity-60 mt-1.5 italic">
+                No live news feed — context in this read is the model&apos;s own inference from price action and general context, not sourced headlines.
+              </p>
+            </div>
+
+            {/* LAYER 2 — PRICE LADDER + where it is now */}
+            {priceLadder(d)}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+              {d.currentPrice != null && (
+                <span className={subFg}><span className={`${fg} font-bold`}>NOW</span> {d.currentPrice.toFixed(2)}</span>
+              )}
+              {d.unrealizedPct != null && (
+                <span className={subFg}>
+                  <span className={`${fg} font-bold`}>Unrealized</span>{" "}
+                  <span className={d.unrealizedPct >= 0 ? "text-green-400 font-bold" : "text-red-400 font-bold"}>
+                    {d.unrealizedPct >= 0 ? "+" : ""}{d.unrealizedPct.toFixed(1)}%
+                  </span>
+                </span>
+              )}
+              {d.daysHeld != null && (
+                <span className={subFg}><span className={`${fg} font-bold`}>Held</span> {d.daysHeld}d / 120d</span>
+              )}
+              {rulesChip(d.rulesFlag, d.rulesTone)}
+            </div>
+
+            {/* LAYER 3 — FROZEN ENTRY THESIS (immutable, de-emphasized) */}
+            <div className={`rounded border ${isDarkMode ? "border-gray-800" : "border-gray-300"} px-2.5 py-1.5`}>
+              <div className="flex items-center gap-2 mb-1">
+                <span className={`text-[9px] uppercase tracking-widest ${subFg}`}>Entry thesis (frozen — why I entered)</span>
+                {verdictPill(frozenVerdict, true)}
+              </div>
+              <p className={`text-[11px] leading-relaxed break-words ${subFg}`}>
+                {d.jackAnalysisAtMark && d.jackAnalysisAtMark.trim().length > 0
+                  ? d.jackAnalysisAtMark
+                  : "No entry thesis was frozen for this position (marked before thesis-freeze shipped)."}
+              </p>
+            </div>
+
+            {/* Exit fills — same write path as any TRADED row (updateUserFills) */}
+            {fillPanel(d, key)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderRow = (d: JackDecisionClient, i: number) => {
+    if (d.section === "open") return renderOpenRow(d, i);
     const key = rowKey(d, i);
     const row = getRow(key);
     const isOpen = !!expanded[key];
     const isTraded = row.userAction === "TRADED";
     const rr = rewardRisk(d);
-    const rPreview = row.serverUserR ?? previewR(d, row);
     const marked = row.userAction != null;
     const liveVerdict = d.decision;
     const frozenVerdict = d.jackDecisionAtMark ?? null;
@@ -561,51 +766,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
             </div>
 
             {/* Fill panel — ONLY on TRADED rows (any section) */}
-            {isTraded && (
-              <div className={`rounded border ${border} px-3 py-2 ${isDarkMode ? "bg-orange-950/20" : "bg-orange-50"}`}>
-                <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
-                  <span className={`self-center text-[10px] font-bold tracking-widest ${fg}`}>FILLS</span>
-                  {(
-                    [
-                      { lbl: "Entry price", val: row.entry, kind: "price", set: (v: string) => patch(key, { entry: sanitizePrice(v), fillsSave: "idle" }) },
-                      { lbl: "Entry date", val: row.entryDate, kind: "date", set: (v: string) => patch(key, { entryDate: v, fillsSave: "idle" }) },
-                      { lbl: "Exit price", val: row.exit, kind: "price", set: (v: string) => patch(key, { exit: sanitizePrice(v), fillsSave: "idle" }) },
-                      { lbl: "Exit date", val: row.exitDate, kind: "date", set: (v: string) => patch(key, { exitDate: v, fillsSave: "idle" }) },
-                    ] as const
-                  ).map((f) => (
-                    <label key={f.lbl} className="flex flex-col gap-0.5">
-                      <span className={`text-[9px] uppercase tracking-wide ${subFg}`}>{f.lbl}</span>
-                      <input
-                        type={f.kind === "date" ? "date" : "text"}
-                        inputMode={f.kind === "price" ? "decimal" : undefined}
-                        value={f.val}
-                        onChange={(e) => f.set(e.target.value)}
-                        onKeyDown={stopKeys}
-                        className={f.kind === "date" ? dateCls : priceCls}
-                        placeholder={f.kind === "price" ? "0.00" : undefined}
-                      />
-                    </label>
-                  ))}
-                  <div className={`self-stretch w-px ${isDarkMode ? "bg-orange-900" : "bg-orange-200"}`} />
-                  <div className="flex flex-col gap-0.5">
-                    <span className={`text-[9px] uppercase tracking-wide ${subFg}`}>user R</span>
-                    <span
-                      className={`text-[13px] font-bold leading-6 ${
-                        rPreview != null ? (rPreview >= 0 ? "text-green-400" : "text-red-400") : subFg
-                      }`}
-                    >
-                      {rPreview != null ? `${rPreview >= 0 ? "+" : ""}${rPreview.toFixed(2)}R` : "—"}
-                    </span>
-                  </div>
-                  <div className="ml-auto flex items-center gap-2">
-                    {row.error && row.fillsSave === "error" && (
-                      <span className="text-red-400 text-[10px] max-w-40">{row.error}</span>
-                    )}
-                    {renderSaveButton(d, key, row.fillsSave)}
-                  </div>
-                </div>
-              </div>
-            )}
+            {isTraded && fillPanel(d, key)}
           </div>
         )}
       </div>
@@ -631,8 +792,9 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
       {openDecisions.length > 0 && (
         <div className={`rounded border ${border} ${isDarkMode ? "bg-amber-950/15" : "bg-amber-50"} p-2`}>
           <div className={`text-[10px] ${subFg} mb-1 px-1`}>
-            Open trades from any prior run — reachable here until you record the exit, even if the ticker
-            isn&apos;t in this week&apos;s scan. Expand a row and Save the exit price/date to close it.
+            Open trades from any prior run — reachable until you record the exit, even if the ticker isn&apos;t in
+            this week&apos;s scan. Each row shows the frozen entry thesis, live price (NOW / unrealized / days held),
+            and a fresh HOLD/EXIT/REDUCE re-read. Expand and Save the exit price/date to close it.
           </div>
           {renderGroup("CURRENT POSITIONS", openDecisions, "text-amber-400")}
         </div>

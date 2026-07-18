@@ -49,6 +49,19 @@ export interface JackDecisionClient {
   // Frozen decision-time context (marked rows only).
   jackDecisionAtMark: string | null;
   sharesAtMark: number | null;
+  // ---- Open-position management (section "open" only; undefined elsewhere) ----
+  // PART A: frozen entry THESIS text ("why I entered"), immutable.
+  jackAnalysisAtMark?: string | null;
+  // PART B: fast rules-based numbers + at-a-glance marker (from current price).
+  unrealizedPct?: number | null;
+  daysHeld?: number | null;
+  rulesFlag?: string | null;
+  rulesTone?: "danger" | "warn" | "good" | "neutral" | null;
+  // PART C: live LLM position re-read — updates each run, prominent. NOT a
+  // trade/skip verdict; a HOLD/EXIT/REDUCE call on the open position.
+  liveReadVerdict?: "HOLD" | "EXIT" | "REDUCE" | "UNKNOWN" | null;
+  liveReadThesisStatus?: string | null;
+  liveReadReasoning?: string | null;
 }
 
 export interface JackValidationResponse {
