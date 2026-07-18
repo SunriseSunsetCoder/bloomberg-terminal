@@ -223,6 +223,66 @@ export function getUserMarksForSetups(setupIds: number[]): Map<number, UserMark>
   return marks;
 }
 
+export interface OpenPositionRow {
+  setupId: number;
+  decisionId: number;
+  ticker: string;
+  handleLowDate: string;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+  breakout: number | null;
+  shares: number | null;
+  jackDecisionAtMark: string | null;
+  userEntryPrice: number | null;
+  userEntryDate: string | null;
+  userExitPrice: number | null;
+  userExitDate: string | null;
+}
+
+/**
+ * Every open position — a setup marked TRADED with an entry logged but NO exit yet
+ * — REGARDLESS of whether it appears in the current validation run. Lets an open
+ * trade (e.g. GLNG marked TRADED weeks ago, not firing this week) stay reachable so
+ * the user can still record its exit. Read-only. Fill writes reuse updateUserFills.
+ *
+ * Uses the setup's LATEST TRADED decision (frozen verdict + shares) + its outcomes
+ * user-fill columns. Open = user_entry_price present AND user_exit_price NULL.
+ */
+export function getOpenPositions(): OpenPositionRow[] {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT
+         s.id                    AS setupId,
+         dm.id                   AS decisionId,
+         s.ticker                AS ticker,
+         s.handle_low_date       AS handleLowDate,
+         s.entry                 AS entry,
+         s.stop                  AS stop,
+         s.t05_target            AS target,
+         s.breakout_level        AS breakout,
+         dm.shares               AS shares,
+         dm.jack_decision_at_mark AS jackDecisionAtMark,
+         o.user_entry_price      AS userEntryPrice,
+         o.user_entry_date       AS userEntryDate,
+         o.user_exit_price       AS userExitPrice,
+         o.user_exit_date        AS userExitDate
+       FROM setups s
+       JOIN outcomes o ON o.setup_id = s.id
+       JOIN (
+              SELECT setup_id, MAX(id) AS max_id
+                FROM decisions
+               WHERE user_action = 'TRADED'
+               GROUP BY setup_id
+            ) latest ON latest.setup_id = s.id
+       JOIN decisions dm ON dm.id = latest.max_id
+       WHERE o.user_entry_price IS NOT NULL AND o.user_exit_price IS NULL
+       ORDER BY o.user_entry_date ASC, s.ticker ASC`
+    )
+    .all() as OpenPositionRow[];
+}
+
 export function markDecisionUserAction(
   decisionId: number,
   action: "TRADED" | "PASSED" | "WATCHED",
