@@ -13,9 +13,13 @@
 // =============================================================================
 
 import type { AnalyticsRow } from "@/lib/db/analytics";
+import { normalizeSizeBucket, type SizeBucket } from "@/lib/jack/handle-score";
 
 // n>=30 mirrors the futures-book discipline (PROJECT_STATE §4). Named, not magic.
 export const LOW_SAMPLE_THRESHOLD = 30;
+
+// Bucket display order for the forward test — best directive first.
+const BUCKET_ORDER: SizeBucket[] = ["full", "half", "skip"];
 
 const RESOLVED_REASONS = new Set(["target", "stop", "timeout"]);
 
@@ -115,11 +119,35 @@ export interface OpenPosition {
   maxAdversePct: number | null;
 }
 
+// ---- handle_score forward test (spec Part D) ----
+// Quintile/bucket PF on REAL RESOLVED setups, grouped by the FROZEN sizing
+// directive, so JACK confirms on its OWN accumulated trades whether full > half >
+// skip in realized PF — closing the backtest→live loop. Primary metric is
+// theoretical R (rRealized), the exact analog of the validated quintile-PF table;
+// `actual` re-cuts it on user-fill R for setups actually TRADED.
+export interface HandleBucketStat extends RStat {
+  bucket: SizeBucket;
+  actual: RStat; // user-fill R over TRADED+resolved rows in this bucket
+}
+export interface HandleScoreForwardTest {
+  buckets: HandleBucketStat[]; // ordered full, half, skip (always all three present)
+  unbucketed: RStat; // resolved setups with no handle_score (pre-signal history)
+  // Backtest reference (FROZEN) the live numbers are being checked against.
+  backtestReference: Array<{ bucket: SizeBucket; quintile: string; isPf: number; oosPf: number }>;
+  // Verdict is SUPPRESSED until EACH of full/half/skip clears n>=30 resolved — do
+  // NOT show a confident "full beats skip" on a handful of trades.
+  verdict: string | null;
+  verdictSuppressed: boolean;
+  insufficientBuckets: SizeBucket[]; // buckets still under the threshold
+  minBucketN: number; // smallest per-bucket resolved n (drives the guard)
+}
+
 export interface JackAnalytics {
   generatedAt: string;
   lowSampleThreshold: number;
   totals: { withOutcome: number; resolved: number; neverFired: number; open: number };
   edgeOverTime: Bucket[];
+  handleScoreForwardTest: HandleScoreForwardTest;
   universeVsSelected: {
     universe: RStat;
     selectedTheoretical: RStat;
@@ -170,6 +198,58 @@ export function computeAnalytics(rows: AnalyticsRow[], asOf?: string): JackAnaly
   const edgeOverTime: Bucket[] = [...byQuarter.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([bucket, rs]) => ({ bucket, ...computeStat(rs) }));
+
+  // ---- Handle-score forward test (Part D): bucket PF on resolved setups ----
+  // Group every RESOLVED setup by its frozen sizing directive and compute PF on
+  // theoretical R (the quintile-PF analog). Also re-cut each bucket on ACTUAL
+  // user-fill R (TRADED rows with a logged fill) — the "on real trades" view.
+  const buckets: HandleBucketStat[] = BUCKET_ORDER.map((bucket) => {
+    const inBucket = resolved.filter((r) => normalizeSizeBucket(r.sizeBucket) === bucket);
+    const theo = computeStat(inBucket.map((r) => r.rRealized as number));
+    const actualRows = inBucket.filter((r) => r.userAction === "TRADED" && r.userRRealized != null);
+    const actual = computeStat(actualRows.map((r) => r.userRRealized as number));
+    return { bucket, ...theo, actual };
+  });
+  const unbucketed = computeStat(
+    resolved.filter((r) => normalizeSizeBucket(r.sizeBucket) == null).map((r) => r.rRealized as number)
+  );
+
+  // Guard: the verdict is SUPPRESSED until EVERY bucket has n>=30 resolved. Below
+  // that we scream "insufficient data" and show only the raw bucket numbers.
+  const insufficientBuckets = buckets.filter((b) => b.n < LOW_SAMPLE_THRESHOLD).map((b) => b.bucket);
+  const minBucketN = Math.min(...buckets.map((b) => b.n));
+  const bucketsClear = insufficientBuckets.length === 0;
+
+  let hsVerdict: string | null = null;
+  if (bucketsClear) {
+    const full = buckets.find((b) => b.bucket === "full")!;
+    const half = buckets.find((b) => b.bucket === "half")!;
+    const skip = buckets.find((b) => b.bucket === "skip")!;
+    // PF can be null (no losers → ∞); treat null as +Infinity for the ordering.
+    const pf = (b: HandleBucketStat) => (b.pf == null ? Number.POSITIVE_INFINITY : b.pf);
+    const monotonic = pf(full) > pf(half) && pf(half) > pf(skip);
+    hsVerdict = monotonic
+      ? "CONFIRMED on live trades — realized PF is monotonic full > half > skip; the handle-score sizing edge holds forward."
+      : pf(full) > pf(skip)
+        ? "PARTIAL — full outperforms skip on realized PF, but the full > half > skip ordering isn't clean. Directionally consistent with the backtest."
+        : "NOT CONFIRMED — realized PF does NOT rank full > skip. The live sample contradicts the backtest; investigate before trusting score-sizing.";
+  }
+
+  const forwardTest: HandleScoreForwardTest = {
+    buckets,
+    unbucketed,
+    backtestReference: [
+      { bucket: "full", quintile: "Q5", isPf: 4.2, oosPf: 4.36 },
+      { bucket: "full", quintile: "Q4", isPf: 2.13, oosPf: 3.03 },
+      { bucket: "half", quintile: "Q3", isPf: 1.38, oosPf: 1.65 },
+      { bucket: "skip", quintile: "Q2", isPf: 1.79, oosPf: 0.87 },
+      { bucket: "skip", quintile: "Q1", isPf: 1.2, oosPf: 1.1 },
+    ],
+    verdict: hsVerdict,
+    verdictSuppressed: !bucketsClear,
+    insufficientBuckets,
+    minBucketN: Number.isFinite(minBucketN) ? minBucketN : 0,
+  };
 
   // ---- View 2: universe vs selected ----
   const universe = computeStat(resolved.map((r) => r.rRealized as number));
@@ -261,6 +341,7 @@ export function computeAnalytics(rows: AnalyticsRow[], asOf?: string): JackAnaly
     lowSampleThreshold: LOW_SAMPLE_THRESHOLD,
     totals: { withOutcome: rows.length, resolved: resolved.length, neverFired: neverFired.length, open: open.length },
     edgeOverTime,
+    handleScoreForwardTest: forwardTest,
     universeVsSelected: {
       universe,
       selectedTheoretical,

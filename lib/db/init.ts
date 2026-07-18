@@ -1,6 +1,10 @@
 import Database from "better-sqlite3";
 import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import {
+  HANDLE_SCORE_REFERENCE_KIND,
+  handleScoreReferenceJson,
+} from "@/lib/jack/handle-score";
 
 let db: Database.Database | null = null;
 
@@ -66,7 +70,71 @@ function runMigrations(database: Database.Database): void {
     // TRADED. The "why I entered" note, immutable across later re-VALIDATEs. The
     // live re-read (position management) is computed fresh and never overwrites this.
     { name: "jack_analysis_at_mark", def: "TEXT" },
+    // handle_score forward-validation: the setup's handle_score + size_bucket
+    // FROZEN at the moment the user marked this decision (mirrors
+    // jack_decision_at_mark). Lets the forward-test analytics join a REALIZED
+    // outcome to the sizing directive that was live when the trade was decided —
+    // even if the setup is later re-ingested with a refreshed score.
+    { name: "handle_score_at_mark", def: "REAL" },
+    { name: "size_bucket_at_mark", def: "TEXT" },
   ]);
+  // handle_score signal (additive): the validated CwH handle-quality score + its
+  // sizing directive, carried on every setup. Read from the weekly watchlist CSV
+  // (primary) or recomputed from frozen thresholds (fallback).
+  ensureColumns(database, "setups", [
+    { name: "handle_score", def: "REAL" },
+    { name: "size_bucket", def: "TEXT" },
+  ]);
+  // Reference-row support on validation_runs: a non-run bookkeeping row that stores
+  // the FROZEN hscore_edges + size map as auditable JSON, so the thresholds behind
+  // any sizing decision can be recovered from the DB alone. reference_kind is NULL
+  // on real validation runs and set on reference rows.
+  ensureColumns(database, "validation_runs", [
+    { name: "reference_kind", def: "TEXT" },
+    { name: "reference_json", def: "TEXT" },
+  ]);
+  ensureHandleScoreReferenceRow(database);
+}
+
+// Idempotently insert the frozen handle_score reference row. All the run-metric
+// NOT NULL columns get 0 (this is not a real run); reference_kind marks it so
+// getLatestRunSummary and analytics can exclude it. Re-issued only by a fresh
+// re-validation freeze — here we just guarantee the current frozen edges exist.
+function ensureHandleScoreReferenceRow(database: Database.Database): void {
+  const existing = database
+    .prepare(`SELECT id, reference_json FROM validation_runs WHERE reference_kind = ? LIMIT 1`)
+    .get(HANDLE_SCORE_REFERENCE_KIND) as { id: number; reference_json: string | null } | undefined;
+
+  const json = handleScoreReferenceJson();
+  if (existing) {
+    // Keep the stored edges in sync if the frozen constants ever change (a freeze
+    // re-issue). Additive, single reference row — never accumulates duplicates.
+    if (existing.reference_json !== json) {
+      database
+        .prepare(`UPDATE validation_runs SET reference_json = ? WHERE id = ?`)
+        .run(json, existing.id);
+    }
+    return;
+  }
+
+  database
+    .prepare(
+      `INSERT INTO validation_runs (
+         timestamp, input_row_count, total_final_count,
+         live_final_count, pending_final_count,
+         live_dropped_stale, pending_dropped_stale,
+         live_dropped_over_cap, pending_dropped_over_cap,
+         tiingo_attempted, tiingo_succeeded,
+         risk_per_trade, parse_success,
+         model, reference_kind, reference_json
+       ) VALUES (?, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, ?, ?, ?)`
+    )
+    .run(
+      "handle_score_freeze",
+      "handle_score_freeze",
+      HANDLE_SCORE_REFERENCE_KIND,
+      json
+    );
 }
 
 /** ALTER TABLE ADD COLUMN for any of `columns` not already present on `table`. */

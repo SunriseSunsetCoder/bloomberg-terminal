@@ -27,7 +27,13 @@ export function getLatestRunSummary(): {
 } | null {
   const db = getDb();
   const run = db
-    .prepare(`SELECT id, timestamp, parse_success FROM validation_runs ORDER BY id DESC LIMIT 1`)
+    .prepare(
+      // Exclude bookkeeping reference rows (frozen handle_score edges) — those are
+      // not real validation runs and must never surface as "the latest run".
+      `SELECT id, timestamp, parse_success FROM validation_runs
+         WHERE reference_kind IS NULL
+         ORDER BY id DESC LIMIT 1`
+    )
     .get() as { id: number; timestamp: string; parse_success: number } | undefined;
   if (!run) return null;
 
@@ -235,6 +241,8 @@ export interface OpenPositionRow {
   shares: number | null;
   jackDecisionAtMark: string | null;
   jackAnalysisAtMark: string | null;
+  handleScore: number | null;
+  sizeBucket: string | null;
   userEntryPrice: number | null;
   userEntryDate: string | null;
   userExitPrice: number | null;
@@ -266,6 +274,8 @@ export function getOpenPositions(): OpenPositionRow[] {
          dm.shares               AS shares,
          dm.jack_decision_at_mark AS jackDecisionAtMark,
          dm.jack_analysis_at_mark AS jackAnalysisAtMark,
+         s.handle_score          AS handleScore,
+         s.size_bucket           AS sizeBucket,
          o.user_entry_price      AS userEntryPrice,
          o.user_entry_date       AS userEntryDate,
          o.user_exit_price       AS userExitPrice,
@@ -319,7 +329,14 @@ export function markDecisionUserAction(
       `UPDATE decisions
           SET user_action = ?, user_action_at = ?, user_notes = ?,
               jack_decision_at_mark = decision,
-              jack_analysis_at_mark = notes
+              jack_analysis_at_mark = notes,
+              -- Freeze the setup's handle_score + size_bucket AS THEY ARE at mark
+              -- time. Unlike jack_decision_at_mark (frozen from this row's own live
+              -- decision column), the score lives on the setup, so freeze from there.
+              -- This is the forward-test anchor: the sizing directive that was live
+              -- when the trade was decided, immune to later re-ingest re-scoring.
+              handle_score_at_mark = (SELECT handle_score FROM setups WHERE id = decisions.setup_id),
+              size_bucket_at_mark  = (SELECT size_bucket  FROM setups WHERE id = decisions.setup_id)
         WHERE id = ?`
     ).run(action, now, userNotes ?? null, decisionId);
   });

@@ -186,8 +186,97 @@ export function JackAnalyticsView({ isDarkMode = true, onBack }: Props) {
               </>
             )}
 
-            {/* View 2 — Universe vs Selected */}
-            <SectionTitle n={2} title="UNIVERSE vs SELECTED" sub="is my picking beating trading the whole universe?" />
+            {/* View 2 — Handle-score forward test (spec Part D) */}
+            <SectionTitle
+              n={2}
+              title="HANDLE-SCORE FORWARD TEST"
+              sub="does full > half > skip hold on REAL resolved trades? (closing the backtest→live loop)"
+            />
+            {(() => {
+              const ft = a.handleScoreForwardTest;
+              const bucketColor = (b: string) =>
+                b === "full" ? "text-green-400" : b === "half" ? "text-amber-400" : "text-gray-400";
+              return (
+                <>
+                  <div className="overflow-x-auto">
+                    <table className="text-[11px] w-full">
+                      <thead>
+                        <tr className={subFg}>
+                          <th className="text-left px-1.5 py-0.5 font-normal">Bucket</th>
+                          <th className="text-right px-1.5 py-0.5 font-normal">n (resolved)</th>
+                          <th className="text-right px-1.5 py-0.5 font-normal">win</th>
+                          <th className="text-right px-1.5 py-0.5 font-normal">avg R</th>
+                          <th className="text-right px-1.5 py-0.5 font-normal">PF (theo)</th>
+                          <th className="text-right px-1.5 py-0.5 font-normal">n traded</th>
+                          <th className="text-right px-1.5 py-0.5 font-normal">PF (actual)</th>
+                          <th className="text-right px-1.5 py-0.5 font-normal">backtest PF (IS/OOS)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ft.buckets.map((b) => {
+                          const ref = ft.backtestReference.filter((r) => r.bucket === b.bucket);
+                          const refStr =
+                            ref.length > 0
+                              ? ref.map((r) => `${r.quintile} ${r.isPf.toFixed(1)}/${r.oosPf.toFixed(1)}`).join(" · ")
+                              : "—";
+                          return (
+                            <tr key={b.bucket} className={`border-t ${border}`}>
+                              <td className={`px-1.5 py-0.5 font-bold uppercase ${bucketColor(b.bucket)}`}>{b.bucket}</td>
+                              <td className="px-1.5 py-0.5 text-right">
+                                <span className={b.n < LOW_SAMPLE_THRESHOLD ? "text-red-400 font-bold" : ""}>{b.n}</span>
+                                {b.n < LOW_SAMPLE_THRESHOLD && <span className="text-red-400 text-[9px]"> ⚠</span>}
+                              </td>
+                              <td className="px-1.5 py-0.5 text-right">{fmtPct(b.winRate)}</td>
+                              <td className={`px-1.5 py-0.5 text-right font-bold ${rColor(b.avgR)}`}>{fmtR(b.avgR)}</td>
+                              <td className={`px-1.5 py-0.5 text-right font-bold ${fg}`}>{fmtPf(b.pf)}</td>
+                              <td className="px-1.5 py-0.5 text-right">{b.actual.n}</td>
+                              <td className="px-1.5 py-0.5 text-right">{b.actual.n > 0 ? fmtPf(b.actual.pf) : "—"}</td>
+                              <td className={`px-1.5 py-0.5 text-right ${subFg}`}>{refStr}</td>
+                            </tr>
+                          );
+                        })}
+                        {ft.unbucketed.n > 0 && (
+                          <tr className={`border-t ${border} opacity-70`}>
+                            <td className={`px-1.5 py-0.5 ${subFg}`}>unscored</td>
+                            <td className="px-1.5 py-0.5 text-right">{ft.unbucketed.n}</td>
+                            <td className="px-1.5 py-0.5 text-right">{fmtPct(ft.unbucketed.winRate)}</td>
+                            <td className={`px-1.5 py-0.5 text-right ${rColor(ft.unbucketed.avgR)}`}>{fmtR(ft.unbucketed.avgR)}</td>
+                            <td className={`px-1.5 py-0.5 text-right ${fg}`}>{fmtPf(ft.unbucketed.pf)}</td>
+                            <td className="px-1.5 py-0.5 text-right">—</td>
+                            <td className="px-1.5 py-0.5 text-right">—</td>
+                            <td className={`px-1.5 py-0.5 text-right ${subFg}`}>pre-signal history</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  {ft.verdictSuppressed ? (
+                    <div className="mt-2 text-[11px] text-red-300 border border-red-700 bg-red-950/30 rounded px-2.5 py-1.5">
+                      <AlertTriangle size={11} className="inline mr-1" />
+                      <b>INSUFFICIENT DATA — verdict suppressed.</b> Need n≥{LOW_SAMPLE_THRESHOLD} resolved trades in EVERY
+                      bucket before confirming full &gt; half &gt; skip on live fills
+                      {ft.insufficientBuckets.length > 0 && (
+                        <> (still short: <b>{ft.insufficientBuckets.map((b) => b.toUpperCase()).join(", ")}</b>; smallest bucket n={ft.minBucketN})</>
+                      )}
+                      . Raw bucket numbers shown above; no conclusion drawn. The frozen backtest (Q5 PF 4.20 IS / 4.36 OOS,
+                      Q1 breakeven) is the prior being tested — it is NOT live confirmation.
+                    </div>
+                  ) : (
+                    <div className="mt-2 text-[11px] text-green-300 border border-green-800 bg-green-950/20 rounded px-2.5 py-1.5">
+                      <b>Verdict (n≥{LOW_SAMPLE_THRESHOLD} per bucket):</b> {ft.verdict}
+                    </div>
+                  )}
+                  <div className={`text-[10px] ${subFg} mt-1`}>
+                    PF (theo) groups every resolved setup by its frozen sizing directive on theoretical R — the direct analog
+                    of the validated quintile-PF table. PF (actual) re-cuts each bucket on your realized fills (TRADED rows).
+                    A SKIP bucket only gets fills when you overrode it.
+                  </div>
+                </>
+              );
+            })()}
+
+            {/* View 3 — Universe vs Selected */}
+            <SectionTitle n={3} title="UNIVERSE vs SELECTED" sub="is my picking beating trading the whole universe?" />
             <div className="flex flex-wrap gap-2">
               <StatCard label="Universe (all resolved)" s={a.universeVsSelected.universe} />
               <StatCard label="Selected — theoretical" s={a.universeVsSelected.selectedTheoretical} accent={fg} />
@@ -212,8 +301,8 @@ export function JackAnalyticsView({ isDarkMode = true, onBack }: Props) {
               </div>
             )}
 
-            {/* View 3 — Execution quality */}
-            <SectionTitle n={3} title="EXECUTION QUALITY" sub="actual fill R vs theoretical R (the EXPD divergence, generalized)" />
+            {/* View 4 — Execution quality */}
+            <SectionTitle n={4} title="EXECUTION QUALITY" sub="actual fill R vs theoretical R (the EXPD divergence, generalized)" />
             <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px]">
               <span>
                 <span className={subFg}>mean Δ </span>
@@ -257,8 +346,8 @@ export function JackAnalyticsView({ isDarkMode = true, onBack }: Props) {
               </div>
             )}
 
-            {/* View 4 — Decision-type breakdown */}
-            <SectionTitle n={4} title="DECISION-TYPE BREAKDOWN" sub="is my discrimination real signal? did overriding JACK help?" />
+            {/* View 5 — Decision-type breakdown */}
+            <SectionTitle n={5} title="DECISION-TYPE BREAKDOWN" sub="is my discrimination real signal? did overriding JACK help?" />
             <div className="flex flex-wrap gap-2">
               <StatCard label="TRADED (theoretical R)" s={a.decisionBreakdown.traded} accent="text-green-400" />
               <StatCard label="PASSED (theoretical R)" s={a.decisionBreakdown.passed} accent="text-gray-300" />
@@ -308,7 +397,7 @@ export function JackAnalyticsView({ isDarkMode = true, onBack }: Props) {
             )}
 
             {/* Open exposure strip */}
-            <SectionTitle n={5} title="OPEN EXPOSURE" sub="live positions — excluded from resolved stats above" />
+            <SectionTitle n={6} title="OPEN EXPOSURE" sub="live positions — excluded from resolved stats above" />
             {a.openExposure.length === 0 ? (
               <div className={`text-[11px] ${subFg}`}>No open positions.</div>
             ) : (

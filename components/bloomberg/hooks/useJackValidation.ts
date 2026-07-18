@@ -49,6 +49,15 @@ export interface JackDecisionClient {
   // Frozen decision-time context (marked rows only).
   jackDecisionAtMark: string | null;
   sharesAtMark: number | null;
+  // ---- handle_score signal (recommendation; the user decides + sizes) ----
+  handleScore?: number | null;
+  sizeBucket?: "full" | "half" | "skip" | null;
+  fullShares?: number | null;
+  fullNotional?: number | null;
+  halfShares?: number | null;
+  halfNotional?: number | null;
+  recShares?: number | null;
+  recNotional?: number | null;
   // ---- Open-position management (section "open" only; undefined elsewhere) ----
   // PART A: frozen entry THESIS text ("why I entered"), immutable.
   jackAnalysisAtMark?: string | null;

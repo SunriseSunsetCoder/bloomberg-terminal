@@ -14,6 +14,11 @@ import {
   type PositionInput,
   type PositionReadResult,
 } from "@/lib/jack/position-mgmt";
+import { computeSizing, recommendedSizing, normalizeSizeBucket } from "@/lib/jack/handle-score";
+
+// Risk/trade for turning an open position's directive into concrete share counts.
+// Matches the validation route default; open positions carry no per-run override.
+const OPEN_RISK_PER_TRADE = 2000;
 
 export const maxDuration = 60; // Tiingo price fetches + one Claude position-mgmt call
 export const dynamic = "force-dynamic";
@@ -190,6 +195,9 @@ export async function GET(req: NextRequest) {
       const unrealizedPct = computeUnrealizedPct(entryPrice, current);
       const flag = computeRulesFlag({ entryPrice, stop: r.stop, target: r.target, current, daysHeld });
       const read = reads.get(key);
+      const sizeBucket = normalizeSizeBucket(r.sizeBucket);
+      const sizing = computeSizing(OPEN_RISK_PER_TRADE, r.entry, r.stop);
+      const rec = recommendedSizing(sizeBucket, sizing);
       return {
         decisionId: r.decisionId,
         setupId: r.setupId,
@@ -216,6 +224,15 @@ export async function GET(req: NextRequest) {
         userExitDate: r.userExitDate,
         jackDecisionAtMark: r.jackDecisionAtMark,
         sharesAtMark: r.shares,
+        // handle_score signal — informational on an already-held position.
+        handleScore: r.handleScore,
+        sizeBucket,
+        fullShares: sizing.fullShares,
+        fullNotional: sizing.fullNotional,
+        halfShares: sizing.halfShares,
+        halfNotional: sizing.halfNotional,
+        recShares: rec.shares,
+        recNotional: rec.notional,
         // Part A — frozen entry thesis (immutable).
         jackAnalysisAtMark: r.jackAnalysisAtMark,
         // Part B — fast rules layer.

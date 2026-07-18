@@ -23,6 +23,12 @@ export interface AnalyticsRow {
   rRealized: number | null; // THEORETICAL R
   maxFavorablePct: number | null;
   maxAdversePct: number | null;
+  // handle_score signal — the setup's handle-quality score + sizing directive.
+  // Prefer the value FROZEN on the marked decision (the directive live when the
+  // trade was decided); fall back to the setup's current value for unmarked
+  // resolved setups (so the bucket quintile check still sees every resolved setup).
+  handleScore: number | null;
+  sizeBucket: string | null; // 'full' | 'half' | 'skip' | null
   // actual user execution
   userAction: "TRADED" | "PASSED" | "WATCHED" | null; // the MARKED action (latest non-null)
   jackDecisionAtMark: string | null; // JACK's verdict frozen at mark time
@@ -63,11 +69,14 @@ export function getAnalyticsRows(): AnalyticsRow[] {
          o.user_exit_price       AS userExitPrice,
          o.user_exit_date        AS userExitDate,
          m.user_action           AS userAction,
-         m.jack_decision_at_mark AS jackDecisionAtMark
+         m.jack_decision_at_mark AS jackDecisionAtMark,
+         COALESCE(m.handle_score_at_mark, s.handle_score) AS handleScore,
+         COALESCE(m.size_bucket_at_mark,  s.size_bucket)  AS sizeBucket
        FROM setups s
        JOIN outcomes o ON o.setup_id = s.id
        LEFT JOIN (
-         SELECT d.setup_id, d.user_action, d.jack_decision_at_mark
+         SELECT d.setup_id, d.user_action, d.jack_decision_at_mark,
+                d.handle_score_at_mark, d.size_bucket_at_mark
            FROM decisions d
            JOIN (
                   SELECT setup_id, MAX(id) AS max_id
