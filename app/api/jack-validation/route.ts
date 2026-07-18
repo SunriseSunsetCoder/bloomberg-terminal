@@ -876,14 +876,24 @@ the JSON schema, and the cluster/cap sections apply to the LIVE setups.`;
 const PENDING_PASS_DIRECTIVE = `
 
 ---
-## THIS PASS: PENDING ONLY — COMPACT
+## THIS PASS: PENDING ONLY — COMPACT (but keep the "why watch" signal)
 Analyze and output ONLY the PENDING section. These are watchlist items, not
-actionable today — keep it TERSE: at most one short line of reasoning per setup,
-and \`notes\` <= 1 sentence each. Emit \`pending_decisions\` (one row per pending
-setup) and a compact Table 2. Set \`live_decisions\` to \`[]\` and omit Table 1 and
-the live-only cluster/cap/notional sections. Still apply the pending decision rules
-(WATCH / WATCH-CAUTION / SKIP / ALREADY FIRED) and the ALREADY-FIRED reclassification
-check (Tiingo close already above breakout_level).`;
+actionable today, so be TERSE — but "compact" means short PROSE, NOT
+context-stripped. A pending row must still tell the trader WHY it is worth
+preparing for.
+
+- Emit \`pending_decisions\` (one row per pending setup) and a compact Table 2.
+- Keep \`notes\` to ~1 sentence, but it MUST carry the contextual read — the
+  news/catalyst classification and any sector context and the specific breakout
+  trigger to watch — not just the R/R geometry.
+- Still populate \`news_class\`, \`sector_rs\`, and \`cross_asset\` (when relevant)
+  exactly as usual — those fields are cheap and are the signal Session C reads.
+- What you DROP in compact mode is only the long multi-paragraph narrative and
+  the per-setup restatement of the five checks — the classifications stay.
+- Set \`live_decisions\` to \`[]\`; omit Table 1 and the live-only cluster/cap/notional
+  sections. Still apply the pending decision rules (WATCH / WATCH-CAUTION / SKIP /
+  ALREADY FIRED) and the ALREADY-FIRED reclassification check (Tiingo close already
+  above breakout_level).`;
 
 /**
  * Build the validation prompt. `mode` selects which section is analyzed:
@@ -1042,31 +1052,32 @@ export async function POST(req: NextRequest) {
   const client = new Anthropic({ apiKey });
   const model = "claude-sonnet-4-5";
 
-  // Output-truncation fix: analyze LIVE (full reasoning) and PENDING (compact) in
-  // SEPARATE Claude calls, sized independently and run in PARALLEL. A large week
-  // (75+ setups) overran a single call's output-token cap and truncated
-  // mid-response; per-section budgets remove that ceiling. Both calls use temp 0
-  // + the day-stable session context, so runs stay deterministic. This is
-  // status-priority sectioning ONLY — no setup-feature ranking (the winner/loser
-  // and ranking research both returned NULL; only the upstream staleness filter
-  // + live-before-pending ordering apply).
+  // Output-truncation handling, GATED ON SETUP COUNT. A single combined "both"
+  // call produces ~FULL_TOKENS_PER_SETUP output tokens per setup. A normal week
+  // (~42 setups) fits comfortably under an ~8k budget and keeps FULL analysis for
+  // BOTH live and pending — so it stays a single call. Only when the week is large
+  // enough that one call would approach the ceiling do we SPLIT into a full LIVE
+  // pass + a compact PENDING pass (in parallel), confining the pending-compactness
+  // tradeoff to the big weeks that force it. Determinism (temp 0 + day-stable
+  // session context) holds in both modes. Status-priority sectioning ONLY — no
+  // setup-feature ranking (winner/loser + ranking research both returned NULL).
+  const FULL_TOKENS_PER_SETUP = 160;
+  const SINGLE_CALL_OUTPUT_BUDGET = 8000; // comfortable single-call output ceiling
+  const SPLIT_THRESHOLD = Math.floor((SINGLE_CALL_OUTPUT_BUDGET - 1000) / FULL_TOKENS_PER_SETUP); // ≈ 43 setups
+  const shouldSplit = stats.totalFinal > SPLIT_THRESHOLD;
+
   const runSection = async (
-    setups: EnrichedSetup[],
-    mode: "live" | "pending",
+    liveS: EnrichedSetup[],
+    pendingS: EnrichedSetup[],
+    mode: "both" | "live" | "pending",
     maxTokens: number
   ): Promise<{ text: string; inTok: number; outTok: number; truncated: boolean } | null> => {
-    if (setups.length === 0) return null;
-    const prompt = buildSectionedPrompt(
-      headerLine,
-      mode === "live" ? setups : [],
-      mode === "pending" ? setups : [],
-      riskPerTrade,
-      mode
-    );
+    if (liveS.length === 0 && pendingS.length === 0) return null;
+    const prompt = buildSectionedPrompt(headerLine, liveS, pendingS, riskPerTrade, mode);
     const c = await client.messages.create({
       model,
       max_tokens: maxTokens,
-      temperature: 0, // reproducible validations (Bug B) — preserved across the split
+      temperature: 0, // reproducible validations (Bug B) — preserved in both modes
       messages: [{ role: "user", content: prompt }],
     });
     const text = c.content
@@ -1076,38 +1087,43 @@ export async function POST(req: NextRequest) {
     return { text, inTok: c.usage.input_tokens, outTok: c.usage.output_tokens, truncated: c.stop_reason === "max_tokens" };
   };
 
-  // Live = full reasoning (~160 out-tok/setup); pending = compact (~70/setup).
-  const liveMax = Math.min(20000, Math.max(4000, enrichedLive.length * 160 + 1500));
-  const pendingMax = Math.min(16000, Math.max(3000, enrichedPending.length * 70 + 1000));
-
   try {
-    const [liveRes, pendingRes] = await Promise.all([
-      runSection(enrichedLive, "live", liveMax),
-      runSection(enrichedPending, "pending", pendingMax),
-    ]);
+    let sectionResults: Array<{ text: string; inTok: number; outTok: number; truncated: boolean } | null>;
+    if (shouldSplit) {
+      // Big week: full LIVE pass + compact PENDING pass, in parallel.
+      const liveMax = Math.min(20000, Math.max(4000, enrichedLive.length * FULL_TOKENS_PER_SETUP + 1500));
+      const pendingMax = Math.min(16000, Math.max(3000, enrichedPending.length * 70 + 1000));
+      sectionResults = await Promise.all([
+        runSection(enrichedLive, [], "live", liveMax),
+        runSection([], enrichedPending, "pending", pendingMax),
+      ]);
+    } else {
+      // Normal week: ONE call, FULL analysis for live AND pending (no downgrade).
+      const bothMax = Math.min(20000, Math.max(8000, stats.totalFinal * FULL_TOKENS_PER_SETUP + 1500));
+      sectionResults = [await runSection(enrichedLive, enrichedPending, "both", bothMax)];
+    }
 
-    // Merge the two passes into the SAME extracted shape the persistence + client
-    // layers already consume (schema_version, live_decisions[], pending_decisions[]).
+    // Merge whatever passes ran into the SAME extracted shape the persistence +
+    // client layers already consume (schema_version, live_decisions[],
+    // pending_decisions[]). Works for one "both" payload (both arrays populated) or
+    // two split payloads (each one array) — flatMap combines them either way.
     // JSON CONTRACT UNCHANGED — Session C reads the identical decision columns.
-    const extractedLive = liveRes ? extractJsonBlock(liveRes.text) : null;
-    const extractedPending = pendingRes ? extractJsonBlock(pendingRes.text) : null;
-    const extracted: ExtractedPayload | null =
-      extractedLive || extractedPending
-        ? {
-            schema_version: extractedLive?.schema_version ?? extractedPending?.schema_version ?? "1.3",
-            live_decisions: extractedLive?.live_decisions ?? [],
-            pending_decisions: extractedPending?.pending_decisions ?? [],
-          }
-        : null;
+    const present = sectionResults.filter((r): r is NonNullable<typeof r> => !!r);
+    const parsed = present.map((r) => extractJsonBlock(r.text)).filter((p): p is ExtractedPayload => !!p);
+    const extracted: ExtractedPayload | null = parsed.length
+      ? {
+          schema_version: parsed[0].schema_version ?? "1.3",
+          live_decisions: parsed.flatMap((p) => p.live_decisions ?? []),
+          pending_decisions: parsed.flatMap((p) => p.pending_decisions ?? []),
+        }
+      : null;
 
     const stripJson = (t: string) => t.replace(/```json\s*\n[\s\S]*?\n```/g, "").trim();
-    const markdownForClient = [liveRes && stripJson(liveRes.text), pendingRes && stripJson(pendingRes.text)]
-      .filter((s): s is string => !!s)
-      .join("\n\n---\n\n");
-    const fullResponse = [liveRes?.text, pendingRes?.text].filter(Boolean).join("\n\n---\n\n");
-    const truncated = !!(liveRes?.truncated || pendingRes?.truncated);
-    const tokensInput = (liveRes?.inTok ?? 0) + (pendingRes?.inTok ?? 0);
-    const tokensOutput = (liveRes?.outTok ?? 0) + (pendingRes?.outTok ?? 0);
+    const markdownForClient = present.map((r) => stripJson(r.text)).filter(Boolean).join("\n\n---\n\n");
+    const fullResponse = present.map((r) => r.text).join("\n\n---\n\n");
+    const truncated = present.some((r) => r.truncated);
+    const tokensInput = present.reduce((acc, r) => acc + r.inTok, 0);
+    const tokensOutput = present.reduce((acc, r) => acc + r.outTok, 0);
 
     // Persist to SQLite — guarded (VPS only) and non-fatal (DB errors don't fail the HTTP response).
     const persistResult = persistRun({
@@ -1121,7 +1137,7 @@ export async function POST(req: NextRequest) {
       model,
       rawMarkdown: fullResponse,
       extracted,
-      errorMsg: truncated ? `Output truncated (live cap ${liveMax} / pending cap ${pendingMax})` : undefined,
+      errorMsg: truncated ? `Output truncated (${shouldSplit ? "split live+pending" : "single both"} call hit cap)` : undefined,
     });
 
     const persistNote = !isPersistenceAvailable()
@@ -1159,7 +1175,7 @@ export async function POST(req: NextRequest) {
         output: tokensOutput,
       },
       degraded: !markdownForClient || truncated,
-      error: truncated ? `Output truncated (live cap ${liveMax} / pending cap ${pendingMax})` : null,
+      error: truncated ? `Output truncated (${shouldSplit ? "split live+pending" : "single both"} call hit cap)` : null,
       decisions: clientDecisions,
       persistenceAvailable: isPersistenceAvailable(),
     });
