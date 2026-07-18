@@ -11,6 +11,11 @@ export interface SetupSeen {
   breakoutLevel?: number;
   cupDepthPct?: number;
   handleRetrPct?: number;
+  // handle_score signal — the validated CwH handle-quality score (0..1) and its
+  // sizing directive (full/half/skip). Read from the weekly CSV or recomputed from
+  // frozen thresholds. Additive; a setup without them just isn't score-ranked.
+  handleScore?: number;
+  sizeBucket?: string;
 }
 
 export interface ValidationRunRow {
@@ -79,7 +84,9 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
          t05_target       = COALESCE(t05_target, ?),
          breakout_level   = COALESCE(breakout_level, ?),
          cup_depth_pct    = COALESCE(cup_depth_pct, ?),
-         handle_retr_pct  = COALESCE(handle_retr_pct, ?)
+         handle_retr_pct  = COALESCE(handle_retr_pct, ?),
+         handle_score     = COALESCE(?, handle_score),
+         size_bucket      = COALESCE(?, size_bucket)
        WHERE id = ?`
     ).run(
       seenAt,
@@ -90,6 +97,8 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
       setup.breakoutLevel ?? null,
       setup.cupDepthPct ?? null,
       setup.handleRetrPct ?? null,
+      setup.handleScore ?? null,
+      setup.sizeBucket ?? null,
       existing.id
     );
     return existing.id;
@@ -102,8 +111,9 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
          first_seen_at, last_seen_at,
          first_seen_status, last_seen_status,
          entry, stop, t05_target, breakout_level,
-         cup_depth_pct, handle_retr_pct
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         cup_depth_pct, handle_retr_pct,
+         handle_score, size_bucket
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       setup.ticker,
@@ -118,7 +128,9 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
       setup.t05Target ?? null,
       setup.breakoutLevel ?? null,
       setup.cupDepthPct ?? null,
-      setup.handleRetrPct ?? null
+      setup.handleRetrPct ?? null,
+      setup.handleScore ?? null,
+      setup.sizeBucket ?? null
     );
 
   return Number(result.lastInsertRowid);

@@ -7,6 +7,13 @@ import type { SetupSeen, DecisionRow, InsertedDecisionId } from "@/lib/db/write"
 // The concrete write functions are loaded lazily via require() inside persistRun()
 // so better-sqlite3 is never required on Vercel (isPersistenceAvailable() === false).
 import { isPersistenceAvailable, persistenceUnavailableReason } from "@/lib/db/env";
+import {
+  bucketForScore,
+  normalizeDepthPct,
+  computeSizing,
+  recommendedSizing,
+  type SizeBucket,
+} from "@/lib/jack/handle-score";
 
 export const maxDuration = 120; // longer for parallel Tiingo enrichment
 export const dynamic = "force-dynamic";
@@ -83,6 +90,10 @@ interface ParsedSetup {
   breakoutLevel?: number;
   cupDepthPct?: number;
   handleRetrPct?: number;
+  // handle_score signal — read straight from the weekly watchlist CSV (primary).
+  // sizeBucket falls back to bucketForScore(handleScore) if the CSV omits it.
+  handleScore?: number;
+  sizeBucket?: SizeBucket;
 }
 
 interface EnrichedSetup extends ParsedSetup {
@@ -154,6 +165,19 @@ interface JackDecisionClient {
   // (current re-assessment); these hold the mark-time snapshot.
   jackDecisionAtMark: string | null;
   sharesAtMark: number | null;
+  // handle_score signal (recommendation — the user decides and sizes).
+  handleScore: number | null;
+  sizeBucket: SizeBucket | null; // FULL / HALF / SKIP directive
+  // Concrete shares/notional at each size, from risk/trade ÷ stop distance. The
+  // user sees "FULL — 340 sh / $47,600" and makes the call. Null if geometry is
+  // missing or stop >= entry.
+  fullShares: number | null;
+  fullNotional: number | null;
+  halfShares: number | null;
+  halfNotional: number | null;
+  // The recommended-bucket cut of the above (null for SKIP) — what the headline shows.
+  recShares: number | null;
+  recNotional: number | null;
 }
 
 interface JackValidationResponse {
@@ -261,8 +285,24 @@ function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: 
   const stop = getNum("stop", "stop_price", "stop_loss");
   const t05Target = getNum("t05_target", "target", "t05");
   const breakoutLevel = getNum("breakout_level", "breakout", "cup_rim", "rim");
-  const cupDepthPct = getNum("cup_depth_pct", "cup_depth");
-  const handleRetrPct = getNum("handle_retr_pct", "handle_retracement_pct");
+  // UNIT MISMATCH FIX: cup_depth_pct / handle_retr_pct arrive as FRACTIONS (0.15)
+  // on recent_breakout rows but PERCENTS (14.5) on just_fired/pending. Normalize to
+  // percent on ingest so the stored value + any depth display is coherent. Does NOT
+  // feed handle_score, and does NOT touch the raw CSV line the LLM sees (determinism
+  // preserved) — only the parsed numeric that lands in the DB.
+  const cupDepthPct = normalizeDepthPct(getNum("cup_depth_pct", "cup_depth")) ?? undefined;
+  const handleRetrPct = normalizeDepthPct(getNum("handle_retr_pct", "handle_retracement_pct")) ?? undefined;
+
+  // handle_score signal — PRIMARY path: read score + bucket straight from the CSV
+  // (the scanner now emits them). FALLBACK: derive the bucket from the score via the
+  // frozen edges if the CSV carried a score but no bucket.
+  const handleScore = getNum("handle_score", "hscore", "handle_quality_score");
+  const bucketRaw = (get("size_bucket") ?? get("bucket") ?? "").toLowerCase().trim();
+  let sizeBucket: SizeBucket | undefined =
+    bucketRaw === "full" || bucketRaw === "half" || bucketRaw === "skip" ? bucketRaw : undefined;
+  if (sizeBucket === undefined && handleScore !== undefined) {
+    sizeBucket = bucketForScore(handleScore) ?? undefined;
+  }
 
   if (!ticker || !handleLowDateRaw) {
     return {
@@ -297,6 +337,7 @@ function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: 
     handleLowDate: handleLowDateRaw, daysSinceHandleLow: days,
     isValid: true,
     entry, stop, t05Target, breakoutLevel, cupDepthPct, handleRetrPct,
+    handleScore, sizeBucket,
   };
 }
 
@@ -622,11 +663,16 @@ export function buildClientDecisions(
   enrichedPending: EnrichedSetup[],
   decisionIds: InsertedDecisionId[],
   // Bug A: existing user marks keyed by setup_id (empty when persistence off).
-  userMarks: Map<number, import("@/lib/db/read").UserMark> = new Map()
+  userMarks: Map<number, import("@/lib/db/read").UserMark> = new Map(),
+  // Risk/trade — needed to turn the sizing directive into concrete share counts.
+  riskPerTrade: number = DEFAULT_RISK_PER_TRADE
 ): JackDecisionClient[] {
   const geo = new Map<
     string,
-    { entry: number | null; stop: number | null; target: number | null; breakout: number | null; currentPrice: number | null }
+    {
+      entry: number | null; stop: number | null; target: number | null; breakout: number | null;
+      currentPrice: number | null; handleScore: number | null; sizeBucket: SizeBucket | null;
+    }
   >();
   for (const s of [...enrichedLive, ...enrichedPending]) {
     const hld = normalizeIsoDate(s.handleLowDate);
@@ -637,6 +683,8 @@ export function buildClientDecisions(
       target: s.t05Target ?? null,
       breakout: s.breakoutLevel ?? null,
       currentPrice: s.tiingo.eodClose ?? null,
+      handleScore: s.handleScore ?? null,
+      sizeBucket: s.sizeBucket ?? null,
     });
   }
 
@@ -654,6 +702,10 @@ export function buildClientDecisions(
     const g = geo.get(key);
     const ids = idMap.get(key);
     const mark = ids ? userMarks.get(ids.setupId) : undefined;
+    const handleScore = g?.handleScore ?? null;
+    const sizeBucket = g?.sizeBucket ?? null;
+    const sizing = computeSizing(riskPerTrade, g?.entry ?? null, g?.stop ?? null);
+    const rec = recommendedSizing(sizeBucket, sizing);
     out.push({
       decisionId: ids?.decisionId ?? null,
       setupId: ids?.setupId ?? null,
@@ -680,11 +732,42 @@ export function buildClientDecisions(
       userExitDate: mark?.userExitDate ?? null,
       jackDecisionAtMark: mark?.jackDecisionAtMark ?? null,
       sharesAtMark: mark?.sharesAtMark ?? null,
+      handleScore,
+      sizeBucket,
+      fullShares: sizing.fullShares,
+      fullNotional: sizing.fullNotional,
+      halfShares: sizing.halfShares,
+      halfNotional: sizing.halfNotional,
+      recShares: rec.shares,
+      recNotional: rec.notional,
     });
   };
   for (const ed of extracted?.live_decisions ?? []) push(ed, "live");
   for (const ed of extracted?.pending_decisions ?? []) push(ed, "pending");
-  return out;
+
+  // DEFAULT SORT (spec Part C): within each section, rank by size_bucket
+  // (full → half → skip) then handle_score DESC. Rows without a score sink to the
+  // bottom. Stable — preserves the upstream status-priority order among ties. The
+  // section grouping in the UI is preserved because we only reorder WITHIN a section.
+  const bucketRank: Record<string, number> = { full: 0, half: 1, skip: 2 };
+  const sortKey = (d: JackDecisionClient) => ({
+    br: d.sizeBucket ? bucketRank[d.sizeBucket] : 3,
+    score: d.handleScore ?? -Infinity,
+  });
+  const stableByScore = (list: JackDecisionClient[]) =>
+    list
+      .map((d, i) => ({ d, i }))
+      .sort((a, b) => {
+        const ka = sortKey(a.d);
+        const kb = sortKey(b.d);
+        if (ka.br !== kb.br) return ka.br - kb.br;
+        if (ka.score !== kb.score) return kb.score - ka.score;
+        return a.i - b.i; // stable tiebreak
+      })
+      .map((x) => x.d);
+  const liveSorted = stableByScore(out.filter((d) => d.section === "live"));
+  const pendingSorted = stableByScore(out.filter((d) => d.section === "pending"));
+  return [...liveSorted, ...pendingSorted];
 }
 
 interface PersistResult {
@@ -764,6 +847,10 @@ function persistRun(args: {
         breakoutLevel: setup.breakoutLevel,
         cupDepthPct: setup.cupDepthPct,
         handleRetrPct: setup.handleRetrPct,
+        // handle_score signal — persisted on the setup so the ranking, display,
+        // and forward-test all read one canonical value.
+        handleScore: setup.handleScore,
+        sizeBucket: setup.sizeBucket,
       };
       const setupId = dbWrite.upsertSetup(seen, args.timestamp);
       setupIdMap.set(`${setup.ticker}|${handleLowDate}`, setupId);
@@ -1195,7 +1282,8 @@ export async function POST(req: NextRequest) {
       enrichedLive,
       enrichedPending,
       persistResult.decisionIds,
-      persistResult.userMarks
+      persistResult.userMarks,
+      riskPerTrade
     );
 
     return NextResponse.json<JackValidationResponse>({

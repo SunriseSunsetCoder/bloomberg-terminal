@@ -319,6 +319,85 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     );
   };
 
+  // ---- handle_score sizing directive (recommendation — the user decides) ----
+  const fmtUsd0 = (n: number) => `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+
+  // Headline FULL / HALF / SKIP pill + the handle_score. SKIP is still shown (a
+  // skip is information; near-line scores like 0.452 deserve an eyeball).
+  const bucketPill = (d: JackDecisionClient) => {
+    const bucket = d.sizeBucket ?? null;
+    if (bucket == null && d.handleScore == null) return null;
+    const cls = isDarkMode
+      ? bucket === "full"
+        ? "bg-green-600 text-black border-green-400"
+        : bucket === "half"
+          ? "bg-amber-500 text-black border-amber-300"
+          : "bg-gray-600 text-gray-200 border-gray-500"
+      : bucket === "full"
+        ? "bg-green-700 text-white border-green-800"
+        : bucket === "half"
+          ? "bg-amber-400 text-black border-amber-600"
+          : "bg-gray-500 text-white border-gray-600";
+    const label = bucket ? bucket.toUpperCase() : "—";
+    // Recommended-bucket share count inline on the pill for FULL/HALF.
+    const recSh = d.recShares != null && d.recShares > 0 ? ` ${d.recShares.toLocaleString()}sh` : "";
+    return (
+      <span className="inline-flex items-center gap-1 shrink-0">
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide border whitespace-nowrap ${cls}`}
+          title="handle_score sizing directive — recommendation, you decide + size"
+        >
+          {label}{recSh}
+        </span>
+        {d.handleScore != null && (
+          <span className={`text-[10px] font-mono ${subFg} whitespace-nowrap`} title="handle_score (0–1) — higher = better handle">
+            {d.handleScore.toFixed(3)}
+          </span>
+        )}
+      </span>
+    );
+  };
+
+  // Expanded sizing block — concrete shares + notional the user would trade at the
+  // recommended size, from risk/trade ÷ stop distance. Recommendation, not applied.
+  const sizingBlock = (d: JackDecisionClient) => {
+    if (d.sizeBucket == null && d.handleScore == null) return null;
+    const bucket = d.sizeBucket ?? null;
+    const headline =
+      bucket === "full" && d.fullShares != null && d.fullNotional != null
+        ? `FULL — ${d.fullShares.toLocaleString()} sh / ${fmtUsd0(d.fullNotional)}`
+        : bucket === "half" && d.halfShares != null && d.halfNotional != null
+          ? `HALF — ${d.halfShares.toLocaleString()} sh / ${fmtUsd0(d.halfNotional)}`
+          : bucket === "skip"
+            ? "SKIP — no position recommended (score below the Q3 line)"
+            : bucket
+              ? `${bucket.toUpperCase()} — share count unavailable (missing entry/stop)`
+              : "unscored";
+    return (
+      <div className={`rounded border ${border} px-2.5 py-1.5 ${isDarkMode ? "bg-gray-950/60" : "bg-white"}`}>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className={`text-[9px] uppercase tracking-widest ${subFg}`}>handle_score sizing</span>
+          {bucketPill(d)}
+          <span className={`text-[11px] font-bold ${bucket === "skip" ? subFg : fg}`}>{headline}</span>
+        </div>
+        {/* full/half reference line so the trader can see both sizes at a glance */}
+        {(d.fullShares != null || d.halfShares != null) && (
+          <div className={`flex flex-wrap gap-x-4 mt-1 text-[10px] ${subFg}`}>
+            {d.fullShares != null && d.fullNotional != null && (
+              <span>full {d.fullShares.toLocaleString()} sh · {fmtUsd0(d.fullNotional)}</span>
+            )}
+            {d.halfShares != null && d.halfNotional != null && (
+              <span>half {d.halfShares.toLocaleString()} sh · {fmtUsd0(d.halfNotional)}</span>
+            )}
+          </div>
+        )}
+        <div className={`text-[9px] ${subFg} mt-1 italic`}>
+          Recommendation from the validated handle-score edge — you decide and size. Shares = risk/trade ÷ (entry − stop).
+        </div>
+      </div>
+    );
+  };
+
   const actionBadge = (action: UserAction | null) => {
     if (action === "TRADED") return <span className="text-[10px] font-bold text-green-400">✓ TRADED</span>;
     if (action === "PASSED") return <span className="text-[10px] font-bold text-gray-300">✓ PASSED</span>;
@@ -556,6 +635,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
           )}
           {unrealChip(d.unrealizedPct)}
           {rulesChip(d.rulesFlag, d.rulesTone)}
+          {bucketPill(d)}
           <span className="shrink-0 flex items-center gap-1 ml-auto">
             {verdictPill(frozenVerdict, true)}
             <span className="text-[10px] font-bold text-green-400">✓ TRADED</span>
@@ -663,6 +743,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
           {/* Marked → frozen verdict, DE-EMPHASIZED (the user's action dominates,
               not JACK's call). Unmarked → live verdict, prominent. */}
           {marked ? verdictPill(frozenVerdict ?? liveVerdict, true) : verdictPill(liveVerdict)}
+          {bucketPill(d)}
           <span className={`text-[11px] ${subFg} whitespace-nowrap shrink-0`}>
             {d.stop != null ? d.stop.toFixed(2) : "—"} <span className="opacity-60">→</span>{" "}
             {d.target != null ? d.target.toFixed(2) : "—"}
@@ -706,6 +787,9 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
             )}
 
             {priceLadder(d)}
+
+            {/* handle_score sizing directive — concrete shares/notional (recommendation) */}
+            {sizingBlock(d)}
 
             {/* Position size (frozen share size on marked rows). Hidden when 0/unknown. */}
             {notional != null && effShares != null && effShares > 0 && (
