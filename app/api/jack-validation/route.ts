@@ -125,7 +125,7 @@ interface JackDecisionClient {
   setupId: number | null;
   ticker: string;
   handleLowDate: string;
-  section: "live" | "pending";
+  section: "live" | "pending" | "open";
   decision: string;
   entry: number | null;
   stop: number | null;
@@ -180,6 +180,14 @@ interface JackValidationResponse {
 
 function formatUsd(n: number): string {
   return `$${n.toLocaleString("en-US")}`;
+}
+
+// Split an array into fixed-size chunks (for sub-batching Claude calls so no
+// single call carries enough setups to hit its output-token cap).
+export function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
 // Bug B hardening: DAY-precision session context. Previously this embedded the
@@ -1052,78 +1060,104 @@ export async function POST(req: NextRequest) {
   const client = new Anthropic({ apiKey });
   const model = "claude-sonnet-4-5";
 
-  // Output-truncation handling, GATED ON SETUP COUNT. A single combined "both"
-  // call produces ~FULL_TOKENS_PER_SETUP output tokens per setup. A normal week
-  // (~42 setups) fits comfortably under an ~8k budget and keeps FULL analysis for
-  // BOTH live and pending — so it stays a single call. Only when the week is large
-  // enough that one call would approach the ceiling do we SPLIT into a full LIVE
-  // pass + a compact PENDING pass (in parallel), confining the pending-compactness
-  // tradeoff to the big weeks that force it. Determinism (temp 0 + day-stable
-  // session context) holds in both modes. Status-priority sectioning ONLY — no
-  // setup-feature ranking (winner/loser + ranking research both returned NULL).
-  const FULL_TOKENS_PER_SETUP = 160;
-  const SINGLE_CALL_OUTPUT_BUDGET = 8000; // comfortable single-call output ceiling
-  const SPLIT_THRESHOLD = Math.floor((SINGLE_CALL_OUTPUT_BUDGET - 1000) / FULL_TOKENS_PER_SETUP); // ≈ 43 setups
+  // Output-token handling. A live 75-setup run truncated a 30-setup LIVE pass at
+  // ~6.3k out-tokens (real need >210/setup — the old 160 budget was far too low),
+  // which garbles the tail of the output. Two-layer fix:
+  //  (1) budgets sized for the ACTUAL worst case with headroom, and
+  //  (2) SUB-BATCHING — each pass is chunked so no single Claude call carries
+  //      enough setups to approach its cap, making truncation effectively
+  //      impossible regardless of week size. All chunks run in parallel.
+  // A normal week (<= SPLIT_THRESHOLD) is one full "both" call (no pending-compact
+  // downgrade); larger weeks split into a full LIVE pass + compact PENDING pass,
+  // each sub-batched. Determinism (temp 0 + day-stable context) and the JSON
+  // contract are unchanged. Status-priority sectioning ONLY — no setup-feature
+  // ranking (winner/loser + ranking research both returned NULL).
+  const LIVE_TOKENS_PER_SETUP = 500; // full reasoning + JSON row + 14-col table row
+  const PENDING_TOKENS_PER_SETUP = 220; // compact but context-preserving
+  const BOTH_TOKENS_PER_SETUP = 380;
+  const LIVE_BATCH = 15; // <= 15 live/call → <= ~9.5k out-tokens: cannot truncate
+  const PENDING_BATCH = 30; // <= 30 pending/call → <= ~8k
+  const HARD_CAP = 24000; // sonnet-4-5 supports far more; generous ceiling
+  const SPLIT_THRESHOLD = 45; // <= 45 setups: single full "both" call; larger: split + sub-batch
   const shouldSplit = stats.totalFinal > SPLIT_THRESHOLD;
 
-  const runSection = async (
-    liveS: EnrichedSetup[],
-    pendingS: EnrichedSetup[],
-    mode: "both" | "live" | "pending",
-    maxTokens: number
+  type Batch = { liveS: EnrichedSetup[]; pendingS: EnrichedSetup[]; mode: "both" | "live" | "pending"; maxTokens: number };
+  const jobs: Batch[] = [];
+  if (shouldSplit) {
+    for (const g of chunk(enrichedLive, LIVE_BATCH))
+      jobs.push({ liveS: g, pendingS: [], mode: "live", maxTokens: Math.min(HARD_CAP, g.length * LIVE_TOKENS_PER_SETUP + 2000) });
+    for (const g of chunk(enrichedPending, PENDING_BATCH))
+      jobs.push({ liveS: [], pendingS: g, mode: "pending", maxTokens: Math.min(HARD_CAP, g.length * PENDING_TOKENS_PER_SETUP + 1500) });
+  } else {
+    jobs.push({
+      liveS: enrichedLive,
+      pendingS: enrichedPending,
+      mode: "both",
+      maxTokens: Math.min(HARD_CAP, Math.max(8000, stats.totalFinal * BOTH_TOKENS_PER_SETUP + 2000)),
+    });
+  }
+
+  const runBatch = async (
+    b: Batch
   ): Promise<{ text: string; inTok: number; outTok: number; truncated: boolean } | null> => {
-    if (liveS.length === 0 && pendingS.length === 0) return null;
-    const prompt = buildSectionedPrompt(headerLine, liveS, pendingS, riskPerTrade, mode);
+    if (b.liveS.length === 0 && b.pendingS.length === 0) return null;
+    const prompt = buildSectionedPrompt(headerLine, b.liveS, b.pendingS, riskPerTrade, b.mode);
     const c = await client.messages.create({
       model,
-      max_tokens: maxTokens,
-      temperature: 0, // reproducible validations (Bug B) — preserved in both modes
+      max_tokens: b.maxTokens,
+      temperature: 0, // reproducible validations (Bug B) — preserved
       messages: [{ role: "user", content: prompt }],
     });
     const text = c.content
-      .filter((b) => b.type === "text")
-      .map((b) => (b as { type: "text"; text: string }).text)
+      .filter((bl) => bl.type === "text")
+      .map((bl) => (bl as { type: "text"; text: string }).text)
       .join("\n");
     return { text, inTok: c.usage.input_tokens, outTok: c.usage.output_tokens, truncated: c.stop_reason === "max_tokens" };
   };
 
   try {
-    let sectionResults: Array<{ text: string; inTok: number; outTok: number; truncated: boolean } | null>;
-    if (shouldSplit) {
-      // Big week: full LIVE pass + compact PENDING pass, in parallel.
-      const liveMax = Math.min(20000, Math.max(4000, enrichedLive.length * FULL_TOKENS_PER_SETUP + 1500));
-      const pendingMax = Math.min(16000, Math.max(3000, enrichedPending.length * 70 + 1000));
-      sectionResults = await Promise.all([
-        runSection(enrichedLive, [], "live", liveMax),
-        runSection([], enrichedPending, "pending", pendingMax),
-      ]);
-    } else {
-      // Normal week: ONE call, FULL analysis for live AND pending (no downgrade).
-      const bothMax = Math.min(20000, Math.max(8000, stats.totalFinal * FULL_TOKENS_PER_SETUP + 1500));
-      sectionResults = [await runSection(enrichedLive, enrichedPending, "both", bothMax)];
-    }
+    const results = (await Promise.all(jobs.map(runBatch))).filter((r): r is NonNullable<typeof r> => !!r);
+    const parsed = results.map((r) => extractJsonBlock(r.text)).filter((p): p is ExtractedPayload => !!p);
+    const truncated = results.some((r) => r.truncated);
 
-    // Merge whatever passes ran into the SAME extracted shape the persistence +
-    // client layers already consume (schema_version, live_decisions[],
-    // pending_decisions[]). Works for one "both" payload (both arrays populated) or
-    // two split payloads (each one array) — flatMap combines them either way.
+    // Because the JSON block is emitted FIRST, a truncation normally cuts the
+    // trailing markdown, not the decisions. But defend against ANY dropped/cut
+    // setup: every input setup with no returned decision gets an explicit
+    // INCOMPLETE placeholder — never a silent drop, never a confident-but-wrong
+    // verdict emitted as if valid (the reported "SIZE DOWN 50% at R/R 2.83" was a
+    // legitimate check-driven verdict, not a truncation artifact — see report).
+    const liveDecisions: ExtractedDecision[] = parsed.flatMap((p) => p.live_decisions ?? []);
+    const pendingDecisions: ExtractedDecision[] = parsed.flatMap((p) => p.pending_decisions ?? []);
+    const decidedKeys = new Set(
+      [...liveDecisions, ...pendingDecisions].map((d) => `${(d.ticker ?? "").toUpperCase()}|${normalizeIsoDate(d.handle_low_date ?? "") ?? ""}`)
+    );
+    const markIncomplete = (setups: EnrichedSetup[], target: ExtractedDecision[]) => {
+      for (const s of setups) {
+        const hld = normalizeIsoDate(s.handleLowDate);
+        if (decidedKeys.has(`${s.ticker.toUpperCase()}|${hld ?? ""}`)) continue;
+        target.push({
+          ticker: s.ticker,
+          handle_low_date: hld ?? s.handleLowDate,
+          decision: "INCOMPLETE — RE-RUN",
+          notes: truncated ? "output hit the token cap before this setup — re-run" : "no decision returned — re-run",
+        });
+      }
+    };
+    markIncomplete(enrichedLive, liveDecisions);
+    markIncomplete(enrichedPending, pendingDecisions);
+
+    // Merge into the SAME extracted shape persistence + client already consume.
     // JSON CONTRACT UNCHANGED — Session C reads the identical decision columns.
-    const present = sectionResults.filter((r): r is NonNullable<typeof r> => !!r);
-    const parsed = present.map((r) => extractJsonBlock(r.text)).filter((p): p is ExtractedPayload => !!p);
-    const extracted: ExtractedPayload | null = parsed.length
-      ? {
-          schema_version: parsed[0].schema_version ?? "1.3",
-          live_decisions: parsed.flatMap((p) => p.live_decisions ?? []),
-          pending_decisions: parsed.flatMap((p) => p.pending_decisions ?? []),
-        }
-      : null;
+    const extracted: ExtractedPayload | null =
+      liveDecisions.length || pendingDecisions.length
+        ? { schema_version: parsed[0]?.schema_version ?? "1.3", live_decisions: liveDecisions, pending_decisions: pendingDecisions }
+        : null;
 
     const stripJson = (t: string) => t.replace(/```json\s*\n[\s\S]*?\n```/g, "").trim();
-    const markdownForClient = present.map((r) => stripJson(r.text)).filter(Boolean).join("\n\n---\n\n");
-    const fullResponse = present.map((r) => r.text).join("\n\n---\n\n");
-    const truncated = present.some((r) => r.truncated);
-    const tokensInput = present.reduce((acc, r) => acc + r.inTok, 0);
-    const tokensOutput = present.reduce((acc, r) => acc + r.outTok, 0);
+    const markdownForClient = results.map((r) => stripJson(r.text)).filter(Boolean).join("\n\n---\n\n");
+    const fullResponse = results.map((r) => r.text).join("\n\n---\n\n");
+    const tokensInput = results.reduce((acc, r) => acc + r.inTok, 0);
+    const tokensOutput = results.reduce((acc, r) => acc + r.outTok, 0);
 
     // Persist to SQLite — guarded (VPS only) and non-fatal (DB errors don't fail the HTTP response).
     const persistResult = persistRun({

@@ -251,6 +251,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     return (exit - entry) / (entry - d.stop);
   };
 
+  const openDecisions = useMemo(() => decisions.filter((d) => d.section === "open"), [decisions]);
   const liveDecisions = useMemo(() => decisions.filter((d) => d.section === "live"), [decisions]);
   const pendingDecisions = useMemo(() => decisions.filter((d) => d.section === "pending"), [decisions]);
 
@@ -627,6 +628,15 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
 
   return (
     <div className="mb-4 space-y-4 min-w-0">
+      {openDecisions.length > 0 && (
+        <div className={`rounded border ${border} ${isDarkMode ? "bg-amber-950/15" : "bg-amber-50"} p-2`}>
+          <div className={`text-[10px] ${subFg} mb-1 px-1`}>
+            Open trades from any prior run — reachable here until you record the exit, even if the ticker
+            isn&apos;t in this week&apos;s scan. Expand a row and Save the exit price/date to close it.
+          </div>
+          {renderGroup("CURRENT POSITIONS", openDecisions, "text-amber-400")}
+        </div>
+      )}
       {renderGroup("LIVE", liveDecisions, "text-green-400")}
       {renderGroup("PENDING", pendingDecisions, "text-sky-400")}
       <div className={`text-[10px] ${subFg}`}>

@@ -3,6 +3,7 @@
 import { useState, useCallback, useMemo } from "react";
 import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database, RefreshCw, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useJackValidation } from "@/components/bloomberg/hooks/useJackValidation";
+import { useJackOpenPositions } from "@/components/bloomberg/hooks/useJackOpenPositions";
 import { JackDecisionsTable } from "@/components/bloomberg/views/jack-decisions-table";
 
 interface OutcomesToast {
@@ -41,6 +42,16 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
   // is a collapsed fallback for copy/reference. Default hidden.
   const [showRaw, setShowRaw] = useState(false);
   const { mutate, data, isPending, reset } = useJackValidation();
+  // Open positions across ALL runs, so an open trade stays reachable even when it
+  // isn't in this week's scan. Deduped against the current run (a setup that fired
+  // again shows in its LIVE/PENDING section, not twice).
+  const { data: openData } = useJackOpenPositions();
+  const combinedDecisions = useMemo(() => {
+    const runDecisions = data?.decisions ?? [];
+    const runSetupIds = new Set(runDecisions.map((d) => d.setupId).filter((x): x is number => x != null));
+    const openOnly = (openData?.positions ?? []).filter((p) => p.setupId == null || !runSetupIds.has(p.setupId));
+    return [...openOnly, ...runDecisions];
+  }, [data?.decisions, openData?.positions]);
 
   // "Update Outcomes" trigger (Session B, Deliverable 3) — POST the tracker,
   // toast the summary. React state only, no storage.
@@ -394,12 +405,14 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
             )}
 
             {/* Interactive decision table — source of truth for user writes.
-                Renders from the JSON decisions block, above the markdown summary. */}
-            {!isPending && data?.decisions && data.decisions.length > 0 && (
+                Renders CURRENT POSITIONS (open trades from any run) + this run's
+                LIVE/PENDING from the JSON decisions block. Shows even before a run
+                so open positions stay reachable. */}
+            {!isPending && combinedDecisions.length > 0 && (
               <JackDecisionsTable
-                decisions={data.decisions}
+                decisions={combinedDecisions}
                 isDarkMode={isDarkMode}
-                persistenceAvailable={data.persistenceAvailable ?? false}
+                persistenceAvailable={data?.persistenceAvailable ?? openData?.persistenceAvailable ?? false}
                 individualCap={individualCap}
               />
             )}

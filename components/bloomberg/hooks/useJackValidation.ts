@@ -24,7 +24,7 @@ export interface JackDecisionClient {
   setupId: number | null;
   ticker: string;
   handleLowDate: string;
-  section: "live" | "pending";
+  section: "live" | "pending" | "open";
   decision: string;
   entry: number | null;
   stop: number | null;
