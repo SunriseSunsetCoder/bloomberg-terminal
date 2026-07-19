@@ -260,9 +260,24 @@ function splitByDelimiter(line: string, delim: string): string[] {
 
 function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: string): ParsedSetup {
   const cols = splitByDelimiter(rowLine, delim);
+  // Match columns by a NORMALIZED header name, not exact indexOf. The scanner's
+  // size_bucket / handle_score weren't being read even though they're in the CSV —
+  // an exact-string match is brittle to a UTF-8 BOM on the first field, surrounding
+  // quotes ("handle_score"), header casing, or space/hyphen instead of underscore.
+  // Normalizing both sides makes the by-name lookup resilient. This does NOT touch
+  // the raw CSV line handed to the LLM (s.raw) — determinism unchanged.
+  const normKey = (s: string) => {
+    const t = s.charCodeAt(0) === 0xfeff ? s.slice(1) : s; // strip a leading UTF-8 BOM
+    return t.replace(/["']/g, "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  };
+  const headerIndex = new Map<string, number>();
+  headerCols.forEach((h, i) => {
+    const k = normKey(h);
+    if (k && !headerIndex.has(k)) headerIndex.set(k, i);
+  });
   const get = (name: string): string | undefined => {
-    const idx = headerCols.indexOf(name);
-    if (idx === -1 || idx >= cols.length) return undefined;
+    const idx = headerIndex.get(normKey(name));
+    if (idx === undefined || idx >= cols.length) return undefined;
     return cols[idx];
   };
 
@@ -351,7 +366,7 @@ interface SectionedSetups {
   stats: FilterStats;
 }
 
-function applyFilters(rawCsv: string): { headerLine: string; sectioned: SectionedSetups } {
+export function applyFilters(rawCsv: string): { headerLine: string; sectioned: SectionedSetups } {
   const lines = rawCsv.split(/\r?\n/).filter((l) => l.trim().length > 0);
   const emptyStats: SectionStats = { inputCount: 0, droppedHandleStale: 0, droppedOverCap: 0, finalCount: 0 };
 
@@ -380,6 +395,16 @@ function applyFilters(rawCsv: string): { headerLine: string; sectioned: Sectione
   // Parse all rows
   const parsed = lines.slice(1).map((line) => parseCsvRow(headerCols, line, today, delim));
   const inputRowCount = parsed.length;
+
+  // TEMP HS-DIAG (strip after VPS confirms the pill): one line proving the two
+  // scanner columns now parse. Shows the detected delimiter, the header tokens, and
+  // a sample row's post-parse handle_score/size_bucket (KRC if present, else first).
+  const hsSample = parsed.find((p) => p.ticker === "KRC") ?? parsed[0];
+  console.log(
+    "[HS-DIAG] delim=", JSON.stringify(delim),
+    "headerCols=", JSON.stringify(headerCols),
+    "sample=", hsSample ? JSON.stringify({ t: hsSample.ticker, hs: hsSample.handleScore, sb: hsSample.sizeBucket }) : "none"
+  );
 
   // Filter 1: validated handle-staleness — applied to all setups before sectioning
   const afterStaleness = parsed.filter((p) => !p.isValid || p.daysSinceHandleLow <= MAX_HANDLE_DAYS);
@@ -1285,38 +1310,6 @@ export async function POST(req: NextRequest) {
       persistResult.userMarks,
       riskPerTrade
     );
-
-    // ===== TEMP HS-DIAG (remove after diagnosis) =====================
-    // Traces handle_score/size_bucket at three server boundaries so one VALIDATE
-    // shows exactly where (if anywhere) the field is lost: CSV header → parsed
-    // setup → built client decision.
-    try {
-      const hdrCols = headerLine.split(/[\t,]|\s{2,}/).map((c) => c.trim());
-      console.log("[HS-DIAG] CSV header cols:", JSON.stringify(hdrCols));
-      console.log(
-        "[HS-DIAG] has handle_score col:", hdrCols.includes("handle_score"),
-        "| has size_bucket col:", hdrCols.includes("size_bucket")
-      );
-      console.log(
-        "[HS-DIAG] parsed setups:",
-        JSON.stringify(
-          [...enrichedLive, ...enrichedPending].slice(0, 5).map((s) => ({
-            t: s.ticker, hs: s.handleScore, sb: s.sizeBucket, entry: s.entry,
-          }))
-        )
-      );
-      console.log(
-        "[HS-DIAG] built clientDecisions:",
-        JSON.stringify(
-          clientDecisions.slice(0, 5).map((d) => ({
-            t: d.ticker, section: d.section, hs: d.handleScore, sb: d.sizeBucket, entry: d.entry,
-          }))
-        )
-      );
-    } catch (e) {
-      console.log("[HS-DIAG] trace error:", String(e));
-    }
-    // ===== END TEMP HS-DIAG ==========================================
 
     return NextResponse.json<JackValidationResponse>({
       schemaVersion: "1.2", timestamp,
