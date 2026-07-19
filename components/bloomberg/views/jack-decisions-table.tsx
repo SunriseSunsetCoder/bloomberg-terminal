@@ -182,6 +182,30 @@ export function signalsDisagree(decision: string | null | undefined, bucket: str
   return (a === "pos" && h === "neg") || (a === "neg" && h === "pos");
 }
 
+// The MAIN "Shares" number (handoff decision 3): tied to the HANDLE BUCKET, not the
+// LLM's verdict-driven count. Marked rows keep their frozen mark-time size. Unmarked:
+// FULL → full-risk · HALF → ×0.5 (both via recShares) · SKIP → the would-be number
+// STRUCK (vetoed). The SKIP veto fires on a SKIP analysis verdict OR a skip bucket;
+// it shows recShares, or full-risk (fullShares) when the bucket itself is skip and
+// recShares is null — never a bare 0. Pure + exported for the self-test.
+export function mainSharesForRow(d: {
+  userAction: "TRADED" | "PASSED" | "WATCHED" | null;
+  decision: string;
+  sizeBucket?: "full" | "half" | "skip" | null;
+  sharesAtMark: number | null;
+  recShares?: number | null;
+  fullShares?: number | null;
+}): { shares: number | null; vetoed: boolean } {
+  const marked = d.userAction != null;
+  const vetoed = !marked && (classifyVerdict(d.decision) === "skip" || d.sizeBucket === "skip");
+  const shares = marked
+    ? d.sharesAtMark
+    : vetoed
+      ? d.recShares ?? d.fullShares ?? null
+      : d.recShares ?? null;
+  return { shares, vetoed };
+}
+
 export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable, individualCap }: JackDecisionsTableProps) {
   const [rows, setRows] = useState<Record<string, RowState>>(() => seedRows(decisions));
   const [expanded, setExpanded] = useState<Record<string, boolean>>({}); // all collapsed by default
@@ -200,21 +224,24 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     for (const d of decisions) {
       if (!watch.has(d.ticker)) continue;
       const marked = d.userAction != null;
-      const finalMainShares = marked ? d.sharesAtMark : d.shares;
+      const { shares: finalMainShares, vetoed: skipVeto } = mainSharesForRow(d);
       // eslint-disable-next-line no-console
       console.log("[HS-SIZE]", d.ticker, {
-        analysisVerdict: d.decision, // if "SIZE DOWN 50%", the LLM already halved d.shares
+        analysisVerdict: d.decision,
         sizeBucket_pillReads: d.sizeBucket, // the field the pill + sizing box use
         fullRiskShares: d.fullShares, // computeSizing: risk/trade ÷ (entry−stop)
         halfShares: d.halfShares,
         recShares_bucketSized: d.recShares, // full→full, half→×0.5, skip→null
-        llmShares: d.shares, // LLM ed.shares (prompt line 99)
+        llmShares: d.shares, // LLM ed.shares (prompt line 99) — no longer used for main
         sharesAtMark: d.sharesAtMark,
         marked,
-        finalMainShares, // what the "Shares" line renders
+        skipVeto,
+        finalMainShares, // what the "Shares" line now renders (bucket-driven)
         mainSharesSource: marked
-          ? "d.sharesAtMark (frozen LLM shares) — NO client bucket multiplier"
-          : "d.shares (LLM ed.shares) — NO client bucket multiplier",
+          ? "d.sharesAtMark (frozen)"
+          : skipVeto
+            ? "SKIP veto → would-be (d.recShares ?? d.fullShares), struck"
+            : "d.recShares (bucket-driven)",
       });
     }
   }, [decisions]);
@@ -792,9 +819,14 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     const marked = row.userAction != null;
     const liveVerdict = d.decision;
     const frozenVerdict = d.jackDecisionAtMark ?? null;
-    // Frozen share size on marked rows (mark-time context); current re-assessment's
-    // shares otherwise. Notional = effective shares × entry.
-    const effShares = marked ? d.sharesAtMark : d.shares;
+    // Main position size follows the HANDLE BUCKET (handoff decision 3), NOT the
+    // LLM's verdict-driven share count: FULL → full-risk · HALF → ×0.5 (both via
+    // d.recShares) · SKIP → discouraged. Marked rows keep the frozen mark-time size.
+    // SKIP VETO: a SKIP analysis verdict OR a skip bucket greys/strikes the size (an
+    // override is possible but discouraged) — we still show the would-be number
+    // (recShares, or full-risk when the bucket itself is skip and recShares is null)
+    // struck, not a bare 0.
+    const { shares: effShares, vetoed: skipVeto } = mainSharesForRow(d);
     const notional = effShares != null && effShares > 0 && d.entry != null ? effShares * d.entry : null;
     const capPct = notional != null && individualCap ? (notional / individualCap) * 100 : null;
     // JACK's LIVE verdict differs from what it said when the user marked → re-assessed.
@@ -870,12 +902,17 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
             {/* handle_score sizing directive — concrete shares/notional (recommendation) */}
             {sizingBlock(d)}
 
-            {/* Position size (frozen share size on marked rows). Hidden when 0/unknown. */}
+            {/* Position size — bucket-driven (handoff decision 3). SKIP veto strikes
+                the would-be number. Hidden when unknown. */}
             {notional != null && effShares != null && effShares > 0 && (
               <div className="space-y-1">
                 <div className="flex flex-wrap items-center gap-x-4 text-[11px]">
                   <span className={subFg}>
-                    <span className={`${fg} font-bold`}>Shares</span> {effShares.toLocaleString()}
+                    <span className={`${fg} font-bold`}>Shares</span>{" "}
+                    <span className={skipVeto ? "line-through decoration-1 opacity-60" : ""}>
+                      {effShares.toLocaleString()}
+                    </span>
+                    {skipVeto && <span className="opacity-70 italic"> handle SKIP — discouraged</span>}
                     {marked && <span className="opacity-60"> (at mark)</span>}
                   </span>
                   <span className={subFg}>
