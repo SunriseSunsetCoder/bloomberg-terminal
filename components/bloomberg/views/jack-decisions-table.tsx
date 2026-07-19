@@ -214,39 +214,6 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     setRows(seedRows(decisions));
   }, [decisions]);
 
-  // ===== TEMP HS-SIZE (remove after diagnosis) =====================
-  // Traces the MAIN "Shares" line vs the handle-bucket sizing for a few tickers,
-  // to prove where the ×0.5 comes from. The main Shares reads d.shares (the LLM's
-  // verdict-driven count: full-risk for TRADE, halved for SIZE DOWN 50%), NOT the
-  // handle bucket — while the pill + sizing box read d.sizeBucket / d.recShares.
-  useEffect(() => {
-    const watch = new Set(["DORM", "CBU", "SPG"]);
-    for (const d of decisions) {
-      if (!watch.has(d.ticker)) continue;
-      const marked = d.userAction != null;
-      const { shares: finalMainShares, vetoed: skipVeto } = mainSharesForRow(d);
-      // eslint-disable-next-line no-console
-      console.log("[HS-SIZE]", d.ticker, {
-        analysisVerdict: d.decision,
-        sizeBucket_pillReads: d.sizeBucket, // the field the pill + sizing box use
-        fullRiskShares: d.fullShares, // computeSizing: risk/trade ÷ (entry−stop)
-        halfShares: d.halfShares,
-        recShares_bucketSized: d.recShares, // full→full, half→×0.5, skip→null
-        llmShares: d.shares, // LLM ed.shares (prompt line 99) — no longer used for main
-        sharesAtMark: d.sharesAtMark,
-        marked,
-        skipVeto,
-        finalMainShares, // what the "Shares" line now renders (bucket-driven)
-        mainSharesSource: marked
-          ? "d.sharesAtMark (frozen)"
-          : skipVeto
-            ? "SKIP veto → would-be (d.recShares ?? d.fullShares), struck"
-            : "d.recShares (bucket-driven)",
-      });
-    }
-  }, [decisions]);
-  // ===== END TEMP HS-SIZE ==========================================
-
   // Re-hydration on mount / return-to-JACK: saving fills writes the DB but NOT the
   // cached validation response, so navigating away and back (without re-VALIDATE)
   // would show stale/blank rows. Fetch the latest marks + fills and overlay them.

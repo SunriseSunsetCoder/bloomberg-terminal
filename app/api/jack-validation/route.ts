@@ -396,16 +396,6 @@ export function applyFilters(rawCsv: string): { headerLine: string; sectioned: S
   const parsed = lines.slice(1).map((line) => parseCsvRow(headerCols, line, today, delim));
   const inputRowCount = parsed.length;
 
-  // TEMP HS-DIAG (strip after VPS confirms the pill): one line proving the two
-  // scanner columns now parse. Shows the detected delimiter, the header tokens, and
-  // a sample row's post-parse handle_score/size_bucket (KRC if present, else first).
-  const hsSample = parsed.find((p) => p.ticker === "KRC") ?? parsed[0];
-  console.log(
-    "[HS-DIAG] delim=", JSON.stringify(delim),
-    "headerCols=", JSON.stringify(headerCols),
-    "sample=", hsSample ? JSON.stringify({ t: hsSample.ticker, hs: hsSample.handleScore, sb: hsSample.sizeBucket }) : "none"
-  );
-
   // Filter 1: validated handle-staleness — applied to all setups before sectioning
   const afterStaleness = parsed.filter((p) => !p.isValid || p.daysSinceHandleLow <= MAX_HANDLE_DAYS);
   const totalDroppedStale = parsed.length - afterStaleness.length;
