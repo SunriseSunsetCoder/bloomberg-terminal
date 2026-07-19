@@ -11,6 +11,7 @@ import {
   analysisDirection,
   handleDirection,
   signalsDisagree,
+  mainSharesForRow,
 } from "../components/bloomberg/views/jack-decisions-table";
 
 let passed = 0;
@@ -54,6 +55,40 @@ check("TRADE + full → agree (quiet)", signalsDisagree("TRADE", "full") === fal
 check("SKIP + skip → agree (quiet)", signalsDisagree("SKIP", "skip") === false);
 check("WATCH + full → quiet (no analysis stance)", signalsDisagree("WATCH", "full") === false);
 check("TRADE + null bucket → quiet (no handle stance)", signalsDisagree("TRADE", null) === false);
+
+// ---- Main "Shares" — bucket-driven with SKIP veto (handoff decision 3) ----
+console.log("\n[4] Main Shares tied to handle bucket (+ SKIP veto)");
+type Row = Parameters<typeof mainSharesForRow>[0];
+const row = (o: Partial<Row>): Row => ({
+  userAction: null, decision: "TRADE", sizeBucket: null,
+  sharesAtMark: null, recShares: null, fullShares: null, ...o,
+});
+// DORM: FULL bucket → full-risk 236 (even if the analysis verdict is SIZE DOWN 50%,
+// which is NOT a skip so it must not veto).
+{
+  const r = mainSharesForRow(row({ decision: "SIZE DOWN 50%", sizeBucket: "full", recShares: 236, fullShares: 236 }));
+  check("DORM FULL → 236, not vetoed", r.shares === 236 && r.vetoed === false, JSON.stringify(r));
+}
+// CBU: HALF bucket → ×0.5 = 202 (recShares already halved).
+{
+  const r = mainSharesForRow(row({ decision: "TRADE", sizeBucket: "half", recShares: 202, fullShares: 405 }));
+  check("CBU HALF → 202, not vetoed", r.shares === 202 && r.vetoed === false, JSON.stringify(r));
+}
+// ROKU: SKIP analysis verdict + FULL bucket → vetoed; shows the would-be (recShares) struck.
+{
+  const r = mainSharesForRow(row({ decision: "SKIP", sizeBucket: "full", recShares: 300, fullShares: 300 }));
+  check("ROKU SKIP+FULL → vetoed, would-be 300 struck", r.vetoed === true && r.shares === 300, JSON.stringify(r));
+}
+// Skip-bucket row → vetoed; recShares is null for skip, so falls back to full-risk, struck.
+{
+  const r = mainSharesForRow(row({ decision: "TRADE", sizeBucket: "skip", recShares: null, fullShares: 280 }));
+  check("skip-bucket → vetoed, would-be full-risk 280 struck", r.vetoed === true && r.shares === 280, JSON.stringify(r));
+}
+// Marked row keeps its frozen mark-time size and is never vetoed (already decided).
+{
+  const r = mainSharesForRow(row({ userAction: "TRADED", decision: "SKIP", sizeBucket: "skip", sharesAtMark: 150 }));
+  check("marked TRADED skip → frozen 150, not vetoed", r.shares === 150 && r.vetoed === false, JSON.stringify(r));
+}
 
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
