@@ -39,7 +39,7 @@ function check(name: string, cond: boolean, detail?: string): void {
 // ---- 1. Bucketing vs frozen edges ----
 console.log("\n[1] Bucketing against frozen edges", JSON.stringify([...HSCORE_EDGES]));
 check("HOMB 0.452 → skip (just under 0.456 Q3 line)", bucketForScore(0.452) === "skip", bucketForScore(0.452) ?? "null");
-check("0.456 exactly → half (Q3 line)", bucketForScore(0.456) === "half", bucketForScore(0.456) ?? "null");
+check("0.456 exactly → full (Q3 now full-size)", bucketForScore(0.456) === "full", bucketForScore(0.456) ?? "null");
 check("AHR 0.658 → full (just over 0.657 line)", bucketForScore(0.658) === "full", bucketForScore(0.658) ?? "null");
 check("0.548 → full (Q4 line)", bucketForScore(0.548) === "full", bucketForScore(0.548) ?? "null");
 check("0.20 → skip (Q1/Q2 low)", bucketForScore(0.2) === "skip", bucketForScore(0.2) ?? "null");
@@ -159,7 +159,7 @@ check("one bucket short → only skip flagged", mixedFt.insufficientBuckets.leng
 console.log("\n[5] Frozen reference payload");
 const ref = handleScoreReference();
 check("reference edges match frozen constants", JSON.stringify(ref.hscore_edges) === JSON.stringify([...HSCORE_EDGES]));
-check("reference size map Q5/Q4 full, Q3 half, Q1/Q2 skip", ref.size_map.Q5 === "full" && ref.size_map.Q4 === "full" && ref.size_map.Q3 === "half" && ref.size_map.Q2 === "skip" && ref.size_map.Q1 === "skip");
+check("reference size map Q5/Q4/Q3 full, Q1/Q2 skip", ref.size_map.Q5 === "full" && ref.size_map.Q4 === "full" && ref.size_map.Q3 === "full" && ref.size_map.Q2 === "skip" && ref.size_map.Q1 === "skip");
 
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
