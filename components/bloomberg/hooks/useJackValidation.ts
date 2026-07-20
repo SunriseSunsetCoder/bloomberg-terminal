@@ -52,6 +52,10 @@ export interface JackDecisionClient {
   // ---- handle_score signal (recommendation; the user decides + sizes) ----
   handleScore?: number | null;
   sizeBucket?: "full" | "half" | "skip" | null;
+  // ---- scanner classification columns (setup-level, from the weekly CSV) ----
+  sector?: string | null; // GICS sector name
+  tier?: string | null; // handle quintile Q3/Q4/Q5
+  priority?: number | null; // rank, higher = take first (drives the LIVE sort)
   fullShares?: number | null;
   fullNotional?: number | null;
   halfShares?: number | null;
