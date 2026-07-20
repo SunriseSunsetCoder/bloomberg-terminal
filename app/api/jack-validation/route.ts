@@ -14,6 +14,12 @@ import {
   recommendedSizing,
   type SizeBucket,
 } from "@/lib/jack/handle-score";
+import {
+  normalizeIsoDate,
+  buildDecidedKeys,
+  incompleteForSetups,
+  isDegraded,
+} from "@/lib/jack/reconcile";
 
 export const maxDuration = 120; // longer for parallel Tiingo enrichment
 export const dynamic = "force-dynamic";
@@ -620,22 +626,7 @@ export function extractJsonBlock(text: string): ExtractedPayload | null {
   }
 }
 
-/**
- * Normalize a date from Claude's JSON to ISO YYYY-MM-DD.
- * Accepts YYYY-MM-DD or M/D/YYYY. Returns null on unrecognized format.
- */
-function normalizeIsoDate(input: string | undefined): string | null {
-  if (!input) return null;
-  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(input);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-  const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(input);
-  if (us) {
-    const mm = us[1].padStart(2, "0");
-    const dd = us[2].padStart(2, "0");
-    return `${us[3]}-${mm}-${dd}`;
-  }
-  return null;
-}
+// normalizeIsoDate moved to @/lib/jack/reconcile (single source of truth, imported above).
 
 /**
  * Convert an extracted decision to a DecisionRow ready for DB insert.
@@ -1174,28 +1165,34 @@ export async function POST(req: NextRequest) {
   // each sub-batched. Determinism (temp 0 + day-stable context) and the JSON
   // contract are unchanged. Status-priority sectioning ONLY — no setup-feature
   // ranking (winner/loser + ranking research both returned NULL).
-  const LIVE_TOKENS_PER_SETUP = 500; // full reasoning + JSON row + 14-col table row
-  const PENDING_TOKENS_PER_SETUP = 220; // compact but context-preserving
-  const BOTH_TOKENS_PER_SETUP = 380;
-  const LIVE_BATCH = 15; // <= 15 live/call → <= ~9.5k out-tokens: cannot truncate
-  const PENDING_BATCH = 30; // <= 30 pending/call → <= ~8k
-  const HARD_CAP = 24000; // sonnet-4-5 supports far more; generous ceiling
-  const SPLIT_THRESHOLD = 45; // <= 45 setups: single full "both" call; larger: split + sub-batch
+  // Cap-harden (2026-07-20): budgets sized for the WORST case (verbose news →
+  // long notes), batches shrunk, and every ceiling kept UNDER the ~16k
+  // non-streaming line (Anthropic guidance: stream above ~16k or risk SDK HTTP
+  // timeouts — this path is deliberately non-streaming). sonnet-4-5's own output
+  // ceiling (~64k) is NOT the constraint; the per-batch max_tokens WE set is.
+  const LIVE_TOKENS_PER_SETUP = 700; // full reasoning + JSON row + 14-col table row (worst case)
+  const PENDING_TOKENS_PER_SETUP = 260; // compact but context-preserving
+  const BOTH_TOKENS_PER_SETUP = 480;
+  const LIVE_BATCH = 10; // <= 10 live/call → budget ~10k, realistic ~7-8k: deep headroom
+  const PENDING_BATCH = 24; // <= 24 pending/call → budget ~8k
+  const HARD_CAP = 15000; // initial-budget ceiling — stays under the ~16k non-streaming line
+  const RETRY_MAX_TOKENS = 16000; // absolute retry ceiling — still non-streaming-safe
+  const SPLIT_THRESHOLD = 24; // <= 24 setups: single "both" call (also stays small); larger: split + sub-batch
   const shouldSplit = stats.totalFinal > SPLIT_THRESHOLD;
 
   type Batch = { liveS: EnrichedSetup[]; pendingS: EnrichedSetup[]; mode: "both" | "live" | "pending"; maxTokens: number };
   const jobs: Batch[] = [];
   if (shouldSplit) {
     for (const g of chunk(enrichedLive, LIVE_BATCH))
-      jobs.push({ liveS: g, pendingS: [], mode: "live", maxTokens: Math.min(HARD_CAP, g.length * LIVE_TOKENS_PER_SETUP + 2000) });
+      jobs.push({ liveS: g, pendingS: [], mode: "live", maxTokens: Math.min(HARD_CAP, g.length * LIVE_TOKENS_PER_SETUP + 3000) });
     for (const g of chunk(enrichedPending, PENDING_BATCH))
-      jobs.push({ liveS: [], pendingS: g, mode: "pending", maxTokens: Math.min(HARD_CAP, g.length * PENDING_TOKENS_PER_SETUP + 1500) });
+      jobs.push({ liveS: [], pendingS: g, mode: "pending", maxTokens: Math.min(HARD_CAP, g.length * PENDING_TOKENS_PER_SETUP + 2000) });
   } else {
     jobs.push({
       liveS: enrichedLive,
       pendingS: enrichedPending,
       mode: "both",
-      maxTokens: Math.min(HARD_CAP, Math.max(8000, stats.totalFinal * BOTH_TOKENS_PER_SETUP + 2000)),
+      maxTokens: Math.min(HARD_CAP, Math.max(8000, stats.totalFinal * BOTH_TOKENS_PER_SETUP + 3000)),
     });
   }
 
@@ -1204,17 +1201,34 @@ export async function POST(req: NextRequest) {
   ): Promise<{ text: string; inTok: number; outTok: number; truncated: boolean } | null> => {
     if (b.liveS.length === 0 && b.pendingS.length === 0) return null;
     const prompt = buildSectionedPrompt(headerLine, b.liveS, b.pendingS, riskPerTrade, b.mode);
-    const c = await client.messages.create({
-      model,
-      max_tokens: b.maxTokens,
-      temperature: 0, // reproducible validations (Bug B) — preserved
-      messages: [{ role: "user", content: prompt }],
-    });
-    const text = c.content
-      .filter((bl) => bl.type === "text")
-      .map((bl) => (bl as { type: "text"; text: string }).text)
-      .join("\n");
-    return { text, inTok: c.usage.input_tokens, outTok: c.usage.output_tokens, truncated: c.stop_reason === "max_tokens" };
+    const callOnce = async (maxTokens: number) => {
+      const c = await client.messages.create({
+        model,
+        max_tokens: maxTokens,
+        temperature: 0, // reproducible validations (Bug B) — preserved
+        messages: [{ role: "user", content: prompt }],
+      });
+      const text = c.content
+        .filter((bl) => bl.type === "text")
+        .map((bl) => (bl as { type: "text"; text: string }).text)
+        .join("\n");
+      return { text, inTok: c.usage.input_tokens, outTok: c.usage.output_tokens, truncated: c.stop_reason === "max_tokens" };
+    };
+    let res = await callOnce(b.maxTokens);
+    // SINGLE generous retry-on-truncation (handoff decision 2). temp 0 makes the
+    // retry reproduce the same prefix; only the cap grows. Accumulate BOTH attempts'
+    // tokens so cost accounting is honest (the prompt is re-sent, so input bills twice).
+    // TODO(cap-harden): if the RETRY still truncates, split this batch in half and
+    // re-run each half — NOT built. A single retry to ~16k suffices given the
+    // per-batch headroom (LIVE_BATCH=10 → ~7-8k realistic vs 16k retry ceiling).
+    if (res.truncated) {
+      const retryTokens = Math.min(RETRY_MAX_TOKENS, b.maxTokens * 2);
+      if (retryTokens > b.maxTokens) {
+        const retry = await callOnce(retryTokens);
+        res = { ...retry, inTok: res.inTok + retry.inTok, outTok: res.outTok + retry.outTok };
+      }
+    }
+    return res;
   };
 
   try {
@@ -1230,23 +1244,22 @@ export async function POST(req: NextRequest) {
     // legitimate check-driven verdict, not a truncation artifact — see report).
     const liveDecisions: ExtractedDecision[] = parsed.flatMap((p) => p.live_decisions ?? []);
     const pendingDecisions: ExtractedDecision[] = parsed.flatMap((p) => p.pending_decisions ?? []);
-    const decidedKeys = new Set(
-      [...liveDecisions, ...pendingDecisions].map((d) => `${(d.ticker ?? "").toUpperCase()}|${normalizeIsoDate(d.handle_low_date ?? "") ?? ""}`)
-    );
-    const markIncomplete = (setups: EnrichedSetup[], target: ExtractedDecision[]) => {
-      for (const s of setups) {
-        const hld = normalizeIsoDate(s.handleLowDate);
-        if (decidedKeys.has(`${s.ticker.toUpperCase()}|${hld ?? ""}`)) continue;
-        target.push({
-          ticker: s.ticker,
-          handle_low_date: hld ?? s.handleLowDate,
-          decision: "INCOMPLETE — RE-RUN",
-          notes: truncated ? "output hit the token cap before this setup — re-run" : "no decision returned — re-run",
-        });
-      }
-    };
-    markIncomplete(enrichedLive, liveDecisions);
-    markIncomplete(enrichedPending, pendingDecisions);
+    // Reconcile via the pure helper (unit-tested in jack-analysis-cap-selftest):
+    // every input setup with no returned decision gets an explicit INCOMPLETE
+    // placeholder. incompleteCount = REAL decision loss (drives degraded, below).
+    const decidedKeys = buildDecidedKeys([...liveDecisions, ...pendingDecisions]);
+    const liveIncomplete = incompleteForSetups(enrichedLive, decidedKeys, truncated);
+    const pendingIncomplete = incompleteForSetups(enrichedPending, decidedKeys, truncated);
+    liveDecisions.push(...liveIncomplete);
+    pendingDecisions.push(...pendingIncomplete);
+    const incompleteCount = liveIncomplete.length + pendingIncomplete.length;
+    // Error/degrade fire on REAL loss (INCOMPLETE setups), not raw stop_reason.
+    // A truncation that cut only trailing markdown (all decisions parsed) →
+    // incompleteCount 0 → NOT degraded. Kills the false-degrade churn.
+    const incompleteError =
+      incompleteCount > 0
+        ? `${incompleteCount} setup${incompleteCount === 1 ? "" : "s"} INCOMPLETE — re-run${truncated ? " (output hit the token cap)" : ""}`
+        : null;
 
     // Merge into the SAME extracted shape persistence + client already consume.
     // JSON CONTRACT UNCHANGED — Session C reads the identical decision columns.
@@ -1273,7 +1286,7 @@ export async function POST(req: NextRequest) {
       model,
       rawMarkdown: fullResponse,
       extracted,
-      errorMsg: truncated ? `Output truncated (${shouldSplit ? "split live+pending" : "single both"} call hit cap)` : undefined,
+      errorMsg: incompleteError ?? undefined,
     });
 
     const persistNote = !isPersistenceAvailable()
@@ -1311,8 +1324,8 @@ export async function POST(req: NextRequest) {
         input: tokensInput,
         output: tokensOutput,
       },
-      degraded: !markdownForClient || truncated,
-      error: truncated ? `Output truncated (${shouldSplit ? "split live+pending" : "single both"} call hit cap)` : null,
+      degraded: isDegraded(!!markdownForClient, incompleteCount),
+      error: incompleteError,
       decisions: clientDecisions,
       persistenceAvailable: isPersistenceAvailable(),
     });
