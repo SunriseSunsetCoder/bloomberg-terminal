@@ -87,7 +87,6 @@ check("renders sector 'Financials'", htmlFull.includes("Financials"));
 check("renders sector 'Industrials'", htmlFull.includes("Industrials"));
 check("renders tier 'Q4'", htmlFull.includes("Q4"));
 check("renders tier 'Q5'", htmlFull.includes("Q5"));
-check("renders priority 'P' label + 3.20", htmlFull.includes(">P</span> 3.20") || htmlFull.includes("3.20"));
 
 // ---- 3. LIVE sort by priority DESC (higher = take first) ----
 console.log("\n[3] LIVE sort by priority DESC");
@@ -98,6 +97,19 @@ console.log("\n[3] LIVE sort by priority DESC");
     live[0]?.ticker === "DORM" && live[1]?.ticker === "KRC",
     live.map((d) => d.ticker).join(",")
   );
+}
+
+// ---- 3b. Priority renders as an ORDINAL rank (P1 = best), not the raw float ----
+console.log("\n[3b] Priority → ordinal rank P1/P2 (float untouched)");
+{
+  const iDorm = htmlFull.indexOf("DORM");
+  const iKrc = htmlFull.indexOf("KRC");
+  const iP1 = htmlFull.indexOf(">P1</span>");
+  const iP2 = htmlFull.indexOf(">P2</span>");
+  check("top-priority row (DORM, P 5.10) renders P1", iP1 !== -1 && iDorm < iP1 && iP1 < iKrc, `iDorm=${iDorm} iP1=${iP1} iKrc=${iKrc}`);
+  check("next row (KRC, P 3.20) renders P2", iP2 !== -1 && iKrc < iP2, `iKrc=${iKrc} iP2=${iP2}`);
+  check("raw priority floats no longer rendered (5.10 / 3.20 gone)", !htmlFull.includes("5.10") && !htmlFull.includes("3.20"));
+  check("client-side priority FLOAT preserved (sort/persist key intact)", approx(find(full.out, "DORM")?.priority, 5.1) && approx(find(full.out, "KRC")?.priority, 3.2));
 }
 
 // ---- 4. Header casing / spacing variant still parses ----
