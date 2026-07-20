@@ -312,6 +312,24 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   const liveDecisions = useMemo(() => decisions.filter((d) => d.section === "live"), [decisions]);
   const pendingDecisions = useMemo(() => decisions.filter((d) => d.section === "pending"), [decisions]);
 
+  // Ordinal priority rank shown on the row as "P1", "P2", … (P1 = the single best
+  // pick this week). Derived purely from POSITION: liveDecisions is already sorted
+  // by priority DESC (buildClientDecisions), so we number the LIVE rows that carry
+  // a non-null priority 1..N in that order. The underlying priority FLOAT is
+  // untouched (still the sort + persistence key) — this is display only. Keyed by
+  // section|ticker|date so ONLY live priority-bearing rows resolve a rank; nulls,
+  // pending, and open rows get no entry (→ no P-label), matching prior behavior.
+  const priorityRank = useMemo(() => {
+    const m = new Map<string, number>();
+    let n = 0;
+    for (const d of liveDecisions) {
+      if (d.priority == null) continue;
+      n += 1; // ties increment normally in the stable sorted order
+      m.set(`${d.section}|${d.ticker}|${d.handleLowDate}`, n);
+    }
+    return m;
+  }, [liveDecisions]);
+
   if (decisions.length === 0) return null;
 
   // ================= small presentational helpers =================
@@ -417,7 +435,8 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   //  · tier   — handle quintile Q3/Q4/Q5. The KEY tell: Q3/Q4/Q5 all size FULL now,
   //             so without the tier the score is the only way to decode the quintile.
   //  · sector — GICS sector name (Financials / Industrials / Unknown).
-  //  · P n    — scanner priority (higher = take first); also drives the LIVE sort.
+  //  · P{n}   — LIVE priority RANK (P1 = best pick this week); ordinal derived from
+  //             the priority-desc sort. The float itself stays the sort/persist key.
   const tierLabel = (d: JackDecisionClient) =>
     d.tier ? (
       <span
@@ -437,14 +456,18 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
       </span>
     ) : null;
   const priorityLabel = (d: JackDecisionClient) =>
-    d.priority != null ? (
-      <span
-        className={`text-[10px] ${subFg} whitespace-nowrap shrink-0`}
-        title="Scanner priority — higher = take first; drives the LIVE sort order."
-      >
-        <span className="opacity-60">P</span> {d.priority.toFixed(2)}
-      </span>
-    ) : null;
+    (() => {
+      const rank = priorityRank.get(`${d.section}|${d.ticker}|${d.handleLowDate}`);
+      if (rank == null) return null;
+      return (
+        <span
+          className={`text-[10px] ${subFg} whitespace-nowrap shrink-0`}
+          title="LIVE priority rank — 1 is the highest-priority (best) setup this week. Ranks the priority-bearing LIVE rows in sorted order."
+        >
+          {`P${rank}`}
+        </span>
+      );
+    })();
 
   // Quiet disagreement cue — the analysis verdict and the handle bucket point in
   // HARD-OPPOSITE directions (TRADE+SKIP or SKIP+FULL). Visual only; changes no data.
