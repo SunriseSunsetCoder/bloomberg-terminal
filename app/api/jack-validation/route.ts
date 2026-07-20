@@ -100,6 +100,10 @@ interface ParsedSetup {
   // sizeBucket falls back to bucketForScore(handleScore) if the CSV omits it.
   handleScore?: number;
   sizeBucket?: SizeBucket;
+  // Scanner classification columns (additive; parsed by-name, position-agnostic).
+  sector?: string; // GICS sector name ("Financials" / "Industrials" / "Unknown")
+  tier?: string; // handle quintile "Q3" / "Q4" / "Q5" (the only quintile tell now Q3/Q4/Q5 all size FULL)
+  priority?: number; // scanner rank, higher = take first (drives the LIVE sort)
 }
 
 interface EnrichedSetup extends ParsedSetup {
@@ -174,6 +178,10 @@ interface JackDecisionClient {
   // handle_score signal (recommendation — the user decides and sizes).
   handleScore: number | null;
   sizeBucket: SizeBucket | null; // FULL / HALF / SKIP directive
+  // Scanner classification columns (setup-level facts, joined like sizeBucket).
+  sector: string | null; // GICS sector name
+  tier: string | null; // handle quintile Q3/Q4/Q5
+  priority: number | null; // scanner rank, higher = take first
   // Concrete shares/notional at each size, from risk/trade ÷ stop distance. The
   // user sees "FULL — 340 sh / $47,600" and makes the call. Null if geometry is
   // missing or stop >= entry.
@@ -325,6 +333,13 @@ function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: 
     sizeBucket = bucketForScore(handleScore) ?? undefined;
   }
 
+  // Scanner classification columns (by-name lookup — order-agnostic; a missing
+  // column just yields undefined, never an error). sector/tier are pass-through
+  // strings; priority is a float rank.
+  const sector = (get("sector") ?? "").trim() || undefined;
+  const tier = (get("tier") ?? "").trim() || undefined;
+  const priority = getNum("priority", "prio");
+
   if (!ticker || !handleLowDateRaw) {
     return {
       raw: rowLine, rowCols: cols, ticker, status,
@@ -359,6 +374,7 @@ function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: 
     isValid: true,
     entry, stop, t05Target, breakoutLevel, cupDepthPct, handleRetrPct,
     handleScore, sizeBucket,
+    sector, tier, priority,
   };
 }
 
@@ -678,6 +694,7 @@ export function buildClientDecisions(
     {
       entry: number | null; stop: number | null; target: number | null; breakout: number | null;
       currentPrice: number | null; handleScore: number | null; sizeBucket: SizeBucket | null;
+      sector: string | null; tier: string | null; priority: number | null;
     }
   >();
   for (const s of [...enrichedLive, ...enrichedPending]) {
@@ -691,6 +708,9 @@ export function buildClientDecisions(
       currentPrice: s.tiingo.eodClose ?? null,
       handleScore: s.handleScore ?? null,
       sizeBucket: s.sizeBucket ?? null,
+      sector: s.sector ?? null,
+      tier: s.tier ?? null,
+      priority: s.priority ?? null,
     });
   }
 
@@ -740,6 +760,9 @@ export function buildClientDecisions(
       sharesAtMark: mark?.sharesAtMark ?? null,
       handleScore,
       sizeBucket,
+      sector: g?.sector ?? null,
+      tier: g?.tier ?? null,
+      priority: g?.priority ?? null,
       fullShares: sizing.fullShares,
       fullNotional: sizing.fullNotional,
       halfShares: sizing.halfShares,
@@ -755,24 +778,36 @@ export function buildClientDecisions(
   // (full → half → skip) then handle_score DESC. Rows without a score sink to the
   // bottom. Stable — preserves the upstream status-priority order among ties. The
   // section grouping in the UI is preserved because we only reorder WITHIN a section.
+  //
+  // LIVE additionally sorts by scanner `priority` DESC as the PRIMARY key when
+  // present (higher = take first), NULLS LAST. When no row carries a priority (the
+  // scanner hasn't emitted the column yet), the priority key is constant and the
+  // sort falls through to the exact bucketRank→score→stable order as before — so
+  // this is a no-op until the data arrives, and never disturbs the existing order.
   const bucketRank: Record<string, number> = { full: 0, half: 1, skip: 2 };
   const sortKey = (d: JackDecisionClient) => ({
+    priority: d.priority ?? null,
     br: d.sizeBucket ? bucketRank[d.sizeBucket] : 3,
     score: d.handleScore ?? -Infinity,
   });
-  const stableByScore = (list: JackDecisionClient[]) =>
+  const stableSort = (list: JackDecisionClient[], usePriority: boolean) =>
     list
       .map((d, i) => ({ d, i }))
       .sort((a, b) => {
         const ka = sortKey(a.d);
         const kb = sortKey(b.d);
+        if (usePriority && ka.priority !== kb.priority) {
+          if (ka.priority == null) return 1; // nulls last
+          if (kb.priority == null) return -1;
+          return kb.priority - ka.priority; // higher priority first
+        }
         if (ka.br !== kb.br) return ka.br - kb.br;
         if (ka.score !== kb.score) return kb.score - ka.score;
         return a.i - b.i; // stable tiebreak
       })
       .map((x) => x.d);
-  const liveSorted = stableByScore(out.filter((d) => d.section === "live"));
-  const pendingSorted = stableByScore(out.filter((d) => d.section === "pending"));
+  const liveSorted = stableSort(out.filter((d) => d.section === "live"), true);
+  const pendingSorted = stableSort(out.filter((d) => d.section === "pending"), false);
   return [...liveSorted, ...pendingSorted];
 }
 
@@ -857,6 +892,10 @@ function persistRun(args: {
         // and forward-test all read one canonical value.
         handleScore: setup.handleScore,
         sizeBucket: setup.sizeBucket,
+        // Scanner classification columns (persisted like size_bucket).
+        sector: setup.sector,
+        tier: setup.tier,
+        priority: setup.priority,
       };
       const setupId = dbWrite.upsertSetup(seen, args.timestamp);
       setupIdMap.set(`${setup.ticker}|${handleLowDate}`, setupId);

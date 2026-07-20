@@ -16,6 +16,10 @@ export interface SetupSeen {
   // frozen thresholds. Additive; a setup without them just isn't score-ranked.
   handleScore?: number;
   sizeBucket?: string;
+  // Scanner classification columns — additive, persisted on the setup row.
+  sector?: string; // GICS sector name
+  tier?: string; // handle quintile Q3/Q4/Q5
+  priority?: number; // scanner rank, higher = take first
 }
 
 export interface ValidationRunRow {
@@ -86,7 +90,10 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
          cup_depth_pct    = COALESCE(cup_depth_pct, ?),
          handle_retr_pct  = COALESCE(handle_retr_pct, ?),
          handle_score     = COALESCE(?, handle_score),
-         size_bucket      = COALESCE(?, size_bucket)
+         size_bucket      = COALESCE(?, size_bucket),
+         sector           = COALESCE(?, sector),
+         tier             = COALESCE(?, tier),
+         priority         = COALESCE(?, priority)
        WHERE id = ?`
     ).run(
       seenAt,
@@ -99,6 +106,9 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
       setup.handleRetrPct ?? null,
       setup.handleScore ?? null,
       setup.sizeBucket ?? null,
+      setup.sector ?? null,
+      setup.tier ?? null,
+      setup.priority ?? null,
       existing.id
     );
     return existing.id;
@@ -112,8 +122,9 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
          first_seen_status, last_seen_status,
          entry, stop, t05_target, breakout_level,
          cup_depth_pct, handle_retr_pct,
-         handle_score, size_bucket
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         handle_score, size_bucket,
+         sector, tier, priority
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       setup.ticker,
@@ -130,7 +141,10 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
       setup.cupDepthPct ?? null,
       setup.handleRetrPct ?? null,
       setup.handleScore ?? null,
-      setup.sizeBucket ?? null
+      setup.sizeBucket ?? null,
+      setup.sector ?? null,
+      setup.tier ?? null,
+      setup.priority ?? null
     );
 
   return Number(result.lastInsertRowid);

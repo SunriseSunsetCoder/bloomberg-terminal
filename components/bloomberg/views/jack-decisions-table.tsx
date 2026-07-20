@@ -411,6 +411,41 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     );
   };
 
+  // Scanner classification tags — shown on the COLLAPSED row (always visible, so no
+  // setup reads "no sector") right beside the handle-score pill. Each degrades to
+  // nothing when the scanner omitted that column.
+  //  · tier   — handle quintile Q3/Q4/Q5. The KEY tell: Q3/Q4/Q5 all size FULL now,
+  //             so without the tier the score is the only way to decode the quintile.
+  //  · sector — GICS sector name (Financials / Industrials / Unknown).
+  //  · P n    — scanner priority (higher = take first); also drives the LIVE sort.
+  const tierLabel = (d: JackDecisionClient) =>
+    d.tier ? (
+      <span
+        className={`text-[10px] px-1 py-0.5 rounded border ${border} ${subFg} whitespace-nowrap shrink-0`}
+        title="Handle quintile from the scanner (Q3/Q4/Q5). Q3/Q4/Q5 all size FULL, so the tier is the only quintile tell."
+      >
+        {d.tier}
+      </span>
+    ) : null;
+  const sectorLabel = (d: JackDecisionClient) =>
+    d.sector ? (
+      <span
+        className={`text-[10px] px-1 py-0.5 rounded border ${border} ${subFg} whitespace-nowrap shrink-0`}
+        title="GICS sector from the scanner."
+      >
+        {d.sector}
+      </span>
+    ) : null;
+  const priorityLabel = (d: JackDecisionClient) =>
+    d.priority != null ? (
+      <span
+        className={`text-[10px] ${subFg} whitespace-nowrap shrink-0`}
+        title="Scanner priority — higher = take first; drives the LIVE sort order."
+      >
+        <span className="opacity-60">P</span> {d.priority.toFixed(2)}
+      </span>
+    ) : null;
+
   // Quiet disagreement cue — the analysis verdict and the handle bucket point in
   // HARD-OPPOSITE directions (TRADE+SKIP or SKIP+FULL). Visual only; changes no data.
   const disagreeFlag = (analysisVerdict: string | null, d: JackDecisionClient) => {
@@ -821,6 +856,9 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
               not JACK's call). Unmarked → live verdict, prominent. */}
           {marked ? verdictPill(frozenVerdict ?? liveVerdict, true) : verdictPill(liveVerdict)}
           {bucketPill(d)}
+          {tierLabel(d)}
+          {sectorLabel(d)}
+          {priorityLabel(d)}
           {disagreeFlag(shownAnalysisVerdict, d)}
           <span className={`text-[11px] ${subFg} whitespace-nowrap shrink-0`}>
             {d.stop != null ? d.stop.toFixed(2) : "—"} <span className="opacity-60">→</span>{" "}
@@ -912,7 +950,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
               <div className="flex flex-wrap gap-1.5 mb-1.5">
                 {chip("earnings", d.earningsFlag)}
                 {chip("news", d.newsClass)}
-                {chip("sector", d.sectorRs)}
+                {chip("sector RS", d.sectorRs)}
                 {chip("cross", d.crossAsset)}
                 {chip("→breakout", d.pctToBreakout != null ? `${d.pctToBreakout.toFixed(1)}%` : null)}
               </div>

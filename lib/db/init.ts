@@ -84,6 +84,11 @@ function runMigrations(database: Database.Database): void {
   ensureColumns(database, "setups", [
     { name: "handle_score", def: "REAL" },
     { name: "size_bucket", def: "TEXT" },
+    // Scanner classification columns (additive): GICS sector name, handle quintile
+    // tier (Q3/Q4/Q5), and a float priority rank (higher = take first).
+    { name: "sector", def: "TEXT" },
+    { name: "tier", def: "TEXT" },
+    { name: "priority", def: "REAL" },
   ]);
   // Reference-row support on validation_runs: a non-run bookkeeping row that stores
   // the FROZEN hscore_edges + size map as auditable JSON, so the thresholds behind
