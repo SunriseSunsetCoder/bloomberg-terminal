@@ -8,6 +8,9 @@ import { NextResponse } from "next/server";
 // Initialize the market data refresh scheduler
 // This is imported here so it starts when the API route is first loaded
 import "@/lib/market-data-refresh";
+// Register the daily JACK outcome tracker too (self-imports market-data-refresh
+// first, so it always registers SECOND for load-spread ordering).
+import "@/lib/jack/outcomes-refresh";
 
 // Store year start values for YTD calculations
 const yearStartValues: Record<string, number> = {};
