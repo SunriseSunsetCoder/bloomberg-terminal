@@ -5,6 +5,7 @@ import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database, R
 import { useJackValidation } from "@/components/bloomberg/hooks/useJackValidation";
 import { useJackOpenPositions } from "@/components/bloomberg/hooks/useJackOpenPositions";
 import { JackDecisionsTable } from "@/components/bloomberg/views/jack-decisions-table";
+import { combineJackDecisions } from "@/lib/jack/combine-decisions";
 
 interface OutcomesToast {
   kind: "ok" | "error";
@@ -43,15 +44,14 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
   const [showRaw, setShowRaw] = useState(false);
   const { mutate, data, isPending, reset } = useJackValidation();
   // Open positions across ALL runs, so an open trade stays reachable even when it
-  // isn't in this week's scan. Deduped against the current run (a setup that fired
-  // again shows in its LIVE/PENDING section, not twice).
+  // isn't in this week's scan. A setup whose latest mark is TRADED routes to CURRENT
+  // POSITIONS (open-management view) and out of LIVE/PENDING — see combineJackDecisions,
+  // which also guarantees every TRADED setup appears in exactly one section.
   const { data: openData } = useJackOpenPositions();
-  const combinedDecisions = useMemo(() => {
-    const runDecisions = data?.decisions ?? [];
-    const runSetupIds = new Set(runDecisions.map((d) => d.setupId).filter((x): x is number => x != null));
-    const openOnly = (openData?.positions ?? []).filter((p) => p.setupId == null || !runSetupIds.has(p.setupId));
-    return [...openOnly, ...runDecisions];
-  }, [data?.decisions, openData?.positions]);
+  const combinedDecisions = useMemo(
+    () => combineJackDecisions(data?.decisions ?? [], openData?.positions ?? []),
+    [data?.decisions, openData?.positions]
+  );
 
   // "Update Outcomes" trigger (Session B, Deliverable 3) — POST the tracker,
   // toast the summary. React state only, no storage.

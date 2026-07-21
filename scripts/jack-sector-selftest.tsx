@@ -161,5 +161,43 @@ console.log("\n[5] Missing columns degrade gracefully");
   check("HOMB row still present (ticker rendered)", html.includes("HOMB"));
 }
 
+// ---- 6. A TRADED (owned) LIVE row consumes NO P-number ----
+console.log("\n[6] Owned (TRADED) live row excluded from P-rank numbering");
+{
+  // AAA has the HIGHEST priority but is owned (TRADED) → it must get no P-label and
+  // consume no number; P1 goes to the best UN-traded setup (DORM).
+  const csv = [
+    "ticker,status,handle_low_date,size_bucket,handle_score,entry,stop,t05_target,breakout_level,sector,tier,priority",
+    `AAA,just_fired,${recent},full,0.80,40,38,48,40.1,Financials,Q5,5.10`,
+    `DORM,just_fired,${recent},full,0.70,100,96,120,100.5,Industrials,Q4,3.20`,
+    `KRC,just_fired,${recent},full,0.66,50,47,60,50.2,Utilities,Q3,1.10`,
+  ].join("\n");
+  const b = build(csv); // sorted priority desc → [AAA(5.10), DORM(3.20), KRC(1.10)]
+  const aaa = find(b.out, "AAA");
+  if (aaa) aaa.userAction = "TRADED"; // mark the top-priority row owned
+  const html = renderToStaticMarkup(
+    React.createElement(JackDecisionsTable, {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      decisions: b.out as any,
+      isDarkMode: true,
+      persistenceAvailable: true,
+      individualCap: 200000,
+    })
+  );
+  const iAAA = html.indexOf("AAA");
+  const iDorm = html.indexOf("DORM");
+  const iKrc = html.indexOf("KRC");
+  const iP1 = html.indexOf(">P1</span>");
+  const iP2 = html.indexOf(">P2</span>");
+  check(
+    "owned AAA (highest priority) renders NO P-label",
+    iAAA !== -1 && iAAA < iDorm && !/>P\d<\/span>/.test(html.slice(iAAA, iDorm)),
+    html.slice(iAAA, iDorm).slice(0, 60)
+  );
+  check("P1 = best UN-traded (DORM), not the owned AAA", iP1 !== -1 && iDorm < iP1 && iP1 < iKrc, `iDorm=${iDorm} iP1=${iP1} iKrc=${iKrc}`);
+  check("P2 = next un-traded (KRC)", iP2 !== -1 && iKrc < iP2, `iKrc=${iKrc} iP2=${iP2}`);
+  check("no P3 — the owned row consumed no number", !html.includes(">P3</span>"));
+}
+
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
