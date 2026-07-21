@@ -11,10 +11,12 @@ export const dynamic = "force-dynamic";
 
 // ============================================================
 // Resolution window — TRADING days. Same value gates "is this setup old enough
-// to resolve?" AND bounds the forward scan. Never hardcode a different number
-// in one place than the other (the handoff draft said 60; we chose 90).
+// to resolve?" AND bounds the forward scan. Never hardcode a different number in
+// one place than the other. Set to 130 (≥120) so the strategy's full 120-trading-
+// day time stop is captured; the scheduled job imports THIS exact constant so the
+// job and the manual button always run an identical window.
 // ============================================================
-const DEFAULT_RESOLUTION_DAYS = 90;
+export const DEFAULT_RESOLUTION_DAYS = 130;
 
 // ---- Modeling assumptions (documented, surfaced in the summary) ----
 //  1. TIE (stop and target both touched on the same bar) → assume STOP first.
@@ -247,6 +249,116 @@ interface OutcomesSummary {
   error?: string;
 }
 
+// ============================================================
+// Shared replay core — the SAME work the "UPDATE OUTCOMES" button and the
+// scheduled daily job both run. Assumes persistence is available (callers guard)
+// and takes an explicit `tiingoBase` (the HTTP route derives it from req headers;
+// the scheduled job derives it from JACK_SELF_BASE_URL). Throws on fatal error —
+// callers decide how to surface it.
+// ============================================================
+export async function runOutcomeTracker({
+  resolutionDays,
+  tiingoBase,
+}: {
+  resolutionDays: number;
+  tiingoBase: string;
+}): Promise<OutcomesSummary> {
+  // Lazy-load the DB layer so better-sqlite3 stays off Vercel.
+  const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
+  const dbWrite = require("@/lib/db/write") as typeof import("@/lib/db/write");
+
+  const setups = dbRead.getSetupsNeedingOutcomes(resolutionDays);
+
+  // Fetch histories in parallel (Tiingo), then replay + write sequentially (SQLite).
+  const histories = await Promise.all(
+    setups.map((s) => fetchHistory(tiingoBase, s.ticker, s.handleLowDate))
+  );
+
+  const summary: OutcomesSummary = {
+    ok: true,
+    resolutionDays,
+    candidates: setups.length,
+    processed: 0,
+    fired: 0,
+    target: 0,
+    stop: 0,
+    timeout: 0,
+    never_fired: 0,
+    deferred: 0,
+    skipped: 0,
+    assumptions: ASSUMPTION_LABELS,
+    details: [],
+    message: "",
+  };
+
+  for (let i = 0; i < setups.length; i++) {
+    const setup = setups[i];
+    const hist = histories[i];
+
+    if (hist.error || hist.bars.length === 0) {
+      summary.skipped++;
+      summary.details.push({
+        ticker: setup.ticker,
+        handleLowDate: setup.handleLowDate,
+        result: "skipped",
+        note: hist.error ?? "no bars",
+      });
+      continue;
+    }
+
+    const result = replaySetup(setup, hist.bars, resolutionDays);
+
+    if (result.kind === "deferred") {
+      summary.deferred++;
+      summary.details.push({
+        ticker: setup.ticker,
+        handleLowDate: setup.handleLowDate,
+        result: "deferred",
+        note: result.reason,
+      });
+      continue;
+    }
+    if (result.kind === "skipped") {
+      summary.skipped++;
+      summary.details.push({
+        ticker: setup.ticker,
+        handleLowDate: setup.handleLowDate,
+        result: "skipped",
+        note: result.reason,
+      });
+      continue;
+    }
+
+    // written
+    dbWrite.insertOutcome(result.outcome);
+    summary.processed++;
+    const reason = result.outcome.exitReason;
+    if (result.outcome.fired) summary.fired++;
+    if (reason === "target") summary.target++;
+    else if (reason === "stop") summary.stop++;
+    else if (reason === "timeout") summary.timeout++;
+    else if (reason === "never_fired") summary.never_fired++;
+
+    summary.details.push({
+      ticker: setup.ticker,
+      handleLowDate: setup.handleLowDate,
+      result: reason ?? "written",
+      note:
+        result.outcome.rRealized != null ? `R=${result.outcome.rRealized.toFixed(2)}` : undefined,
+    });
+  }
+
+  summary.message =
+    `${summary.processed}/${summary.candidates} resolved · ` +
+    `${summary.target} target · ${summary.stop} stop · ${summary.timeout} timeout · ` +
+    `${summary.never_fired} never_fired` +
+    (summary.deferred > 0 ? ` · ${summary.deferred} deferred` : "") +
+    (summary.skipped > 0 ? ` · ${summary.skipped} skipped` : "") +
+    (resolutionDays !== DEFAULT_RESOLUTION_DAYS ? ` · [window=${resolutionDays}d]` : "");
+
+  return summary;
+}
+
 export async function POST(req: NextRequest) {
   // Vercel guard — never touch the DB layer when persistence is off.
   if (!isPersistenceAvailable()) {
@@ -285,100 +397,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // Lazy-load the DB layer so better-sqlite3 stays off Vercel.
-    const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
-    const dbWrite = require("@/lib/db/write") as typeof import("@/lib/db/write");
-
-    const setups = dbRead.getSetupsNeedingOutcomes(resolutionDays);
-    const base = tiingoBaseUrl(req);
-
-    // Fetch histories in parallel (Tiingo), then replay + write sequentially (SQLite).
-    const histories = await Promise.all(
-      setups.map((s) => fetchHistory(base, s.ticker, s.handleLowDate))
-    );
-
-    const summary: OutcomesSummary = {
-      ok: true,
-      resolutionDays,
-      candidates: setups.length,
-      processed: 0,
-      fired: 0,
-      target: 0,
-      stop: 0,
-      timeout: 0,
-      never_fired: 0,
-      deferred: 0,
-      skipped: 0,
-      assumptions: ASSUMPTION_LABELS,
-      details: [],
-      message: "",
-    };
-
-    for (let i = 0; i < setups.length; i++) {
-      const setup = setups[i];
-      const hist = histories[i];
-
-      if (hist.error || hist.bars.length === 0) {
-        summary.skipped++;
-        summary.details.push({
-          ticker: setup.ticker,
-          handleLowDate: setup.handleLowDate,
-          result: "skipped",
-          note: hist.error ?? "no bars",
-        });
-        continue;
-      }
-
-      const result = replaySetup(setup, hist.bars, resolutionDays);
-
-      if (result.kind === "deferred") {
-        summary.deferred++;
-        summary.details.push({
-          ticker: setup.ticker,
-          handleLowDate: setup.handleLowDate,
-          result: "deferred",
-          note: result.reason,
-        });
-        continue;
-      }
-      if (result.kind === "skipped") {
-        summary.skipped++;
-        summary.details.push({
-          ticker: setup.ticker,
-          handleLowDate: setup.handleLowDate,
-          result: "skipped",
-          note: result.reason,
-        });
-        continue;
-      }
-
-      // written
-      dbWrite.insertOutcome(result.outcome);
-      summary.processed++;
-      const reason = result.outcome.exitReason;
-      if (result.outcome.fired) summary.fired++;
-      if (reason === "target") summary.target++;
-      else if (reason === "stop") summary.stop++;
-      else if (reason === "timeout") summary.timeout++;
-      else if (reason === "never_fired") summary.never_fired++;
-
-      summary.details.push({
-        ticker: setup.ticker,
-        handleLowDate: setup.handleLowDate,
-        result: reason ?? "written",
-        note:
-          result.outcome.rRealized != null ? `R=${result.outcome.rRealized.toFixed(2)}` : undefined,
-      });
-    }
-
-    summary.message =
-      `${summary.processed}/${summary.candidates} resolved · ` +
-      `${summary.target} target · ${summary.stop} stop · ${summary.timeout} timeout · ` +
-      `${summary.never_fired} never_fired` +
-      (summary.deferred > 0 ? ` · ${summary.deferred} deferred` : "") +
-      (summary.skipped > 0 ? ` · ${summary.skipped} skipped` : "") +
-      (resolutionDays !== DEFAULT_RESOLUTION_DAYS ? ` · [window=${resolutionDays}d]` : "");
-
+    const summary = await runOutcomeTracker({ resolutionDays, tiingoBase: tiingoBaseUrl(req) });
     return NextResponse.json<OutcomesSummary>(summary, { status: 200 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

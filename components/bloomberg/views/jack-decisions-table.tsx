@@ -323,6 +323,11 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     const m = new Map<string, number>();
     let n = 0;
     for (const d of liveDecisions) {
+      // Owned setups (marked TRADED) are positions to manage, not candidates to
+      // rank — they consume no P-number (P1..N covers only setups you can still
+      // deploy into). Defensive: TRADED rows normally route to CURRENT POSITIONS
+      // (combineJackDecisions) so they aren't in liveDecisions anyway.
+      if (d.userAction === "TRADED") continue;
       if (d.priority == null) continue;
       n += 1; // ties increment normally in the stable sorted order
       m.set(`${d.section}|${d.ticker}|${d.handleLowDate}`, n);

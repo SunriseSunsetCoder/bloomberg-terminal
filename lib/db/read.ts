@@ -281,7 +281,9 @@ export function getOpenPositions(): OpenPositionRow[] {
          o.user_exit_price       AS userExitPrice,
          o.user_exit_date        AS userExitDate
        FROM setups s
-       JOIN outcomes o ON o.setup_id = s.id
+       -- LEFT JOIN: a setup marked TRADED may have NO outcomes row yet (no fill
+       -- logged, replay not run) — it's still an owned position to manage.
+       LEFT JOIN outcomes o ON o.setup_id = s.id
        JOIN (
               SELECT setup_id, MAX(id) AS max_id
                 FROM decisions
@@ -289,7 +291,10 @@ export function getOpenPositions(): OpenPositionRow[] {
                GROUP BY setup_id
             ) latest ON latest.setup_id = s.id
        JOIN decisions dm ON dm.id = latest.max_id
-       WHERE o.user_entry_price IS NOT NULL AND o.user_exit_price IS NULL
+       -- Owned = latest mark TRADED + no logged EXIT. Fill-agnostic: entry fill NOT
+       -- required (was: user_entry_price IS NOT NULL). With the LEFT JOIN, a missing
+       -- outcomes row leaves user_exit_price NULL → still surfaces as open.
+       WHERE o.user_exit_price IS NULL
        ORDER BY o.user_entry_date ASC, s.ticker ASC`
     )
     .all() as OpenPositionRow[];

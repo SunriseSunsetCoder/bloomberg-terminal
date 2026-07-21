@@ -9,6 +9,8 @@ import { NextResponse } from "next/server";
 
 // Import the scheduler to ensure it's initialized
 import "@/lib/market-data-refresh";
+// Also register the daily JACK outcome tracker (VPS-only; runs after market-data).
+import "@/lib/jack/outcomes-refresh";
 
 export async function GET() {
   try {
