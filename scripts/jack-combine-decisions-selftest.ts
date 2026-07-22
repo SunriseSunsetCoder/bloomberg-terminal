@@ -102,5 +102,38 @@ console.log("\n[4] Plain passthrough (no owned rows)");
   check("both run rows kept, sections unchanged", out.length === 2 && out.every((r) => r.section !== "open"));
 }
 
+// ---- 5. RECORDED EXIT = closed → routes to LIVE, not Current Positions ----
+console.log("\n[5] Exited-but-firing setup routes to LIVE (not owned)");
+{
+  const run = [
+    // #1: marked TRADED, but a recorded exit (userExitPrice set) + still firing this week.
+    mk({ setupId: 1, ticker: "EXITED", section: "live", userAction: "TRADED", userExitPrice: 42, userExitDate: "2026-07-20" }),
+    // #2: marked TRADED, NO exit → still owned + firing.
+    mk({ setupId: 2, ticker: "OWNED", section: "live", userAction: "TRADED", userExitPrice: null }),
+  ];
+  const open = [
+    // getOpenPositions excludes the exited one (WHERE user_exit_price IS NULL); returns only the owned one.
+    mk({ setupId: 2, ticker: "OWNED", section: "open", userAction: "TRADED", userExitPrice: null }),
+  ];
+  const out = combineJackDecisions(run, open);
+  const sec = (id: number) => bySetup(out, id).map((r) => r.section);
+  check("exited+firing (#1) → live only, NOT open", sec(1).length === 1 && sec(1)[0] === "live", sec(1).join(","));
+  check("still-owned (#2) → open only", sec(2).length === 1 && sec(2)[0] === "open", sec(2).join(","));
+  const ids = out.map((r) => r.setupId);
+  check("exactly one section each (no dupe/vanish)", ids.length === new Set(ids).size && new Set(ids).size === 2, ids.join(","));
+}
+
+// ---- 5b. Stale open fetch STILL lists the exited setup → dropped, routed to LIVE ----
+// (the instant-after-save path: open fetch hasn't refreshed, but the run row shows
+// the fresh exit; the nonOwnedIds filter drops the stale open row.)
+console.log("\n[5b] Stale open fetch lists the exited setup → still routes to LIVE");
+{
+  const run = [mk({ setupId: 1, ticker: "EXITED", section: "live", userAction: "TRADED", userExitPrice: 42 })];
+  const open = [mk({ setupId: 1, ticker: "EXITED", section: "open", userAction: "TRADED", userExitPrice: null })]; // stale (pre-exit)
+  const out = combineJackDecisions(run, open);
+  const sec = bySetup(out, 1).map((r) => r.section);
+  check("stale open row dropped; exited setup → live only", sec.length === 1 && sec[0] === "live", sec.join(","));
+}
+
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

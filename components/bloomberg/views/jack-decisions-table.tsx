@@ -49,6 +49,10 @@ interface JackDecisionsTableProps {
   // Individual position notional cap (riskPerTrade × 100) from the JACK header,
   // for the expanded-row notional fill-bar. Presentation only.
   individualCap?: number;
+  // Fired on a successful "Save fills" that recorded an EXIT — lets the parent
+  // patch the in-memory decision so the now-closed setup re-routes out of CURRENT
+  // POSITIONS immediately (no re-VALIDATE). See combineJackDecisions.
+  onExitSaved?: (setupId: number, exitPrice: number, exitDate: string | null) => void;
 }
 
 function rowKey(d: JackDecisionClient, i: number): string {
@@ -206,7 +210,7 @@ export function mainSharesForRow(d: {
   return { shares, vetoed };
 }
 
-export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable, individualCap }: JackDecisionsTableProps) {
+export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable, individualCap, onExitSaved }: JackDecisionsTableProps) {
   const [rows, setRows] = useState<Record<string, RowState>>(() => seedRows(decisions));
   const [expanded, setExpanded] = useState<Record<string, boolean>>({}); // all collapsed by default
 
@@ -294,6 +298,9 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
         key,
         r.ok ? { fillsSave: "saved", serverUserR: r.userRRealized ?? null } : { fillsSave: "error", error: r.error }
       );
+      // Recorded an EXIT → the setup is now closed. Tell the parent so it re-routes
+      // out of CURRENT POSITIONS immediately (patches the in-memory decision's exit).
+      if (r.ok && exit != null && d.setupId != null) onExitSaved?.(d.setupId, exit, exitDate);
     } catch (e) {
       patch(key, { fillsSave: "error", error: e instanceof Error ? e.message : String(e) });
     }
@@ -458,6 +465,20 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
         title="GICS sector from the scanner."
       >
         {d.sector}
+      </span>
+    ) : null;
+  // "exited" marker — a TRADED setup with a recorded exit that is firing AGAIN this
+  // week (so it routes to LIVE, not CURRENT POSITIONS). Distinguishes it from a
+  // never-traded candidate; it deliberately carries NO P-rank (re-entry is a choice).
+  const exitedLabel = (d: JackDecisionClient) =>
+    d.userAction === "TRADED" && d.userExitPrice != null ? (
+      <span
+        className={`text-[10px] px-1 py-0.5 rounded border whitespace-nowrap shrink-0 ${
+          isDarkMode ? "border-sky-800 text-sky-300" : "border-sky-300 text-sky-700"
+        }`}
+        title="Closed — you recorded an exit on this setup. It's back in LIVE because it's firing again; re-entry is a deliberate choice, so it gets no P-rank."
+      >
+        exited
       </span>
     ) : null;
   const priorityLabel = (d: JackDecisionClient) =>
@@ -887,6 +908,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
           {tierLabel(d)}
           {sectorLabel(d)}
           {priorityLabel(d)}
+          {exitedLabel(d)}
           {disagreeFlag(shownAnalysisVerdict, d)}
           <span className={`text-[11px] ${subFg} whitespace-nowrap shrink-0`}>
             {d.stop != null ? d.stop.toFixed(2) : "—"} <span className="opacity-60">→</span>{" "}
