@@ -142,6 +142,48 @@ function rewardRisk(d: JackDecisionClient): number | null {
   return (d.target - d.entry) / (d.entry - d.stop);
 }
 
+// SETUP GEOMETRY + LEVELS/RISK for the expand — PURE + exported for the self-test.
+// Builds the exact text tokens the row renders: the cup/handle shape, per-level
+// %-distances, R:R, and $-risk / $-reward. $ figures use the DEPLOYABLE size
+// (recShares) but fall back to full-risk shares when recShares is 0/nullish (SKIP)
+// so they're never blank or $0. Each token appears only when its inputs exist.
+export type SetupContextTone = "stop" | "target" | "now" | "accent" | "muted";
+export function computeSetupContext(d: {
+  cupDepthPct?: number | null;
+  handleRetrPct?: number | null;
+  daysSinceHandleLow?: number | null;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+  currentPrice: number | null;
+  recShares?: number | null;
+  fullShares?: number | null;
+}): { geometry: string[]; levels: { text: string; tone: SetupContextTone }[] } {
+  const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
+  const usd0 = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
+
+  const geometry: string[] = [];
+  if (d.cupDepthPct != null) geometry.push(`cup depth ${d.cupDepthPct.toFixed(1)}%`);
+  if (d.handleRetrPct != null) geometry.push(`handle retrace ${d.handleRetrPct.toFixed(1)}%`);
+  if (d.daysSinceHandleLow != null) geometry.push(`${d.daysSinceHandleLow}d since handle low`);
+
+  const e = d.entry;
+  const s = d.stop;
+  const t = d.target;
+  // Deployable size, with the SKIP fallback (recShares 0/nullish → full-risk shares).
+  const shares = d.recShares != null && d.recShares > 0 ? d.recShares : d.fullShares ?? null;
+  const levels: { text: string; tone: SetupContextTone }[] = [];
+  if (e != null && s != null && e !== 0) levels.push({ text: `to stop ${pct(((s - e) / e) * 100)}`, tone: "stop" });
+  if (e != null && t != null && e !== 0) levels.push({ text: `to target ${pct(((t - e) / e) * 100)}`, tone: "target" });
+  if (e != null && d.currentPrice != null && e !== 0)
+    levels.push({ text: `now ${pct(((d.currentPrice - e) / e) * 100)} from entry`, tone: "now" });
+  if (e != null && s != null && t != null && e !== s) levels.push({ text: `R:R ${((t - e) / (e - s)).toFixed(1)}`, tone: "accent" });
+  if (shares != null && e != null && s != null) levels.push({ text: `risk ${usd0(shares * (e - s))}`, tone: "muted" });
+  if (shares != null && e != null && t != null) levels.push({ text: `reward ${usd0(shares * (t - e))}`, tone: "muted" });
+
+  return { geometry, levels };
+}
+
 // JACK verdict → colour class family.
 type Verdict = "trade" | "skip" | "watch" | "fired" | "other";
 function classifyVerdict(decision: string): Verdict {
@@ -551,6 +593,44 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     );
   };
 
+  // SETUP GEOMETRY + LEVELS/RISK — renders the pure computeSetupContext tokens
+  // (cup/handle shape · %-distances · R:R · $-risk/$-reward). Maps each token's
+  // tone to a theme class; text/values are computed by the exported pure fn.
+  const setupContext = (d: JackDecisionClient) => {
+    const { geometry, levels } = computeSetupContext(d);
+    if (geometry.length === 0 && levels.length === 0) return null;
+    const toneCls: Record<SetupContextTone, string> = {
+      stop: "text-red-400",
+      target: "text-green-400",
+      now: "text-sky-400",
+      accent: fg,
+      muted: subFg,
+    };
+    return (
+      <div className="space-y-1">
+        {geometry.length > 0 && (
+          <div>
+            <div className={`text-[9px] uppercase tracking-widest ${subFg} mb-0.5`}>Setup geometry</div>
+            <div className={`text-[11px] ${textFg}`}>{geometry.join(" · ")}</div>
+          </div>
+        )}
+        {levels.length > 0 && (
+          <div>
+            <div className={`text-[9px] uppercase tracking-widest ${subFg} mb-0.5`}>Levels / risk</div>
+            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px]">
+              {levels.map((p, i) => (
+                <span key={i} className="flex items-center gap-1.5">
+                  {i > 0 && <span className="opacity-40">·</span>}
+                  <span className={toneCls[p.tone]}>{p.text}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const actionBadge = (action: UserAction | null) => {
     if (action === "TRADED") return <span className="text-[10px] font-bold text-green-400">✓ TRADED</span>;
     if (action === "PASSED") return <span className="text-[10px] font-bold text-gray-300">✓ PASSED</span>;
@@ -953,6 +1033,9 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
             )}
 
             {priceLadder(d)}
+
+            {/* SETUP GEOMETRY (cup/handle shape) + LEVELS/RISK (%-distances, R:R, $) */}
+            {setupContext(d)}
 
             {/* handle_score sizing directive — concrete shares/notional (recommendation) */}
             {sizingBlock(d)}
