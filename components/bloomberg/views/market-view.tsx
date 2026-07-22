@@ -4,6 +4,7 @@ import { useMarketDataQuery } from "../hooks";
 import { bloombergColors } from "../lib/theme-config";
 import { MarketTable } from "../ui";
 import { GeneralMarketAnalysis } from "../ui/general-market-analysis";
+import { SectorStrengthPanel } from "../ui/sector-strength-panel";
 
 type MarketViewProps = {
   isDarkMode: boolean;
@@ -36,6 +37,11 @@ export function MarketView({ isDarkMode }: MarketViewProps) {
     <div>
       <div className="overflow-x-auto">
         <MarketTable data={data} isDarkMode={isDarkMode} />
+      </div>
+
+      {/* Sector-strength board — 11 SPDR sector ETFs ranked by 3-month RS vs SPY */}
+      <div className="px-4 pt-3">
+        <SectorStrengthPanel colors={colors} />
       </div>
 
       {/* AI Market Analysis for general market data */}
