@@ -56,6 +56,10 @@ export interface JackDecisionClient {
   sector?: string | null; // GICS sector name
   tier?: string | null; // handle quintile Q3/Q4/Q5
   priority?: number | null; // rank, higher = take first (drives the LIVE sort)
+  // ---- handle/cup geometry (parsed; shown in the expand's SETUP GEOMETRY line) ----
+  cupDepthPct?: number | null;
+  handleRetrPct?: number | null;
+  daysSinceHandleLow?: number | null;
   fullShares?: number | null;
   fullNotional?: number | null;
   halfShares?: number | null;

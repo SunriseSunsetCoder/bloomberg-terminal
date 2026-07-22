@@ -182,6 +182,11 @@ interface JackDecisionClient {
   sector: string | null; // GICS sector name
   tier: string | null; // handle quintile Q3/Q4/Q5
   priority: number | null; // scanner rank, higher = take first
+  // Handle/cup geometry (parsed; fed handle_score) — surfaced for the expand's
+  // SETUP GEOMETRY line so the pattern shape is readable, not just its score.
+  cupDepthPct: number | null; // cup depth %
+  handleRetrPct: number | null; // handle retracement %
+  daysSinceHandleLow: number | null; // trading/calendar days since the handle low
   // Concrete shares/notional at each size, from risk/trade ÷ stop distance. The
   // user sees "FULL — 340 sh / $47,600" and makes the call. Null if geometry is
   // missing or stop >= entry.
@@ -695,6 +700,7 @@ export function buildClientDecisions(
       entry: number | null; stop: number | null; target: number | null; breakout: number | null;
       currentPrice: number | null; handleScore: number | null; sizeBucket: SizeBucket | null;
       sector: string | null; tier: string | null; priority: number | null;
+      cupDepthPct: number | null; handleRetrPct: number | null; daysSinceHandleLow: number | null;
     }
   >();
   for (const s of [...enrichedLive, ...enrichedPending]) {
@@ -711,6 +717,9 @@ export function buildClientDecisions(
       sector: s.sector ?? null,
       tier: s.tier ?? null,
       priority: s.priority ?? null,
+      cupDepthPct: s.cupDepthPct ?? null,
+      handleRetrPct: s.handleRetrPct ?? null,
+      daysSinceHandleLow: Number.isFinite(s.daysSinceHandleLow) ? s.daysSinceHandleLow : null,
     });
   }
 
@@ -763,6 +772,9 @@ export function buildClientDecisions(
       sector: g?.sector ?? null,
       tier: g?.tier ?? null,
       priority: g?.priority ?? null,
+      cupDepthPct: g?.cupDepthPct ?? null,
+      handleRetrPct: g?.handleRetrPct ?? null,
+      daysSinceHandleLow: g?.daysSinceHandleLow ?? null,
       fullShares: sizing.fullShares,
       fullNotional: sizing.fullNotional,
       halfShares: sizing.halfShares,

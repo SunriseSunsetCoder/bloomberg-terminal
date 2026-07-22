@@ -17,7 +17,7 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { applyFilters, buildClientDecisions } from "../app/api/jack-validation/route";
-import { JackDecisionsTable } from "../components/bloomberg/views/jack-decisions-table";
+import { JackDecisionsTable, computeSetupContext } from "../components/bloomberg/views/jack-decisions-table";
 
 let passed = 0;
 let failed = 0;
@@ -233,6 +233,62 @@ console.log("\n[7] Exited firing row shows 'exited' marker and gets no P-rank");
   );
   check("P1 goes to the un-traded DORM", html.includes(">P1</span>") && iDorm < html.indexOf(">P1</span>"));
   check("no P2 — only one un-traded row to rank", !html.includes(">P2</span>"));
+}
+
+// ---- 8. Handle/cup geometry plumbs to the client + the SETUP GEOMETRY / LEVELS
+//        tokens compute correctly (percent-normalize round-trip + rendered text) ----
+console.log("\n[8] Setup geometry round-trips + computeSetupContext tokens");
+{
+  // cup_depth_pct=32.0 (already percent → passes through), handle_retr_pct=0.45
+  // (fraction < 1 → normalizeDepthPct ×100 → 45). entry/stop/target 40/38/48.
+  const csv = [
+    "ticker,status,handle_low_date,size_bucket,handle_score,entry,stop,t05_target,breakout_level,cup_depth_pct,handle_retr_pct",
+    `KRC,just_fired,${recent},full,0.717,40,38,48,40.1,32.0,0.45`,
+  ].join("\n");
+  const b = build(csv);
+  const c = find(b.out, "KRC");
+  // Plumb: parsed geometry survives onto the client decision.
+  check("client cupDepthPct === 32.0 (percent passes through)", c?.cupDepthPct === 32.0, String(c?.cupDepthPct));
+  check("client handleRetrPct === 45 (fraction 0.45 → percent)", c?.handleRetrPct === 45, String(c?.handleRetrPct));
+  check(
+    "client daysSinceHandleLow ≈ 3 (derived from recent handle_low_date)",
+    c?.daysSinceHandleLow != null && c.daysSinceHandleLow >= 2 && c.daysSinceHandleLow <= 4,
+    String(c?.daysSinceHandleLow)
+  );
+
+  // Rendered tokens: the exact text the expand's SETUP GEOMETRY / LEVELS lines show.
+  const { geometry, levels } = computeSetupContext(c);
+  const levelText = levels.map((l) => l.text);
+  check("geometry: cup depth 32.0%", geometry.includes("cup depth 32.0%"), geometry.join(" · "));
+  check("geometry: handle retrace 45.0%", geometry.includes("handle retrace 45.0%"), geometry.join(" · "));
+  check("geometry: 'Nd since handle low' present", geometry.some((g) => /^\d+d since handle low$/.test(g)), geometry.join(" · "));
+  check("levels: to stop -5.0%", levelText.includes("to stop -5.0%"), levelText.join(" · "));
+  check("levels: to target +20.0%", levelText.includes("to target +20.0%"), levelText.join(" · "));
+  check("levels: R:R 4.0", levelText.includes("R:R 4.0"), levelText.join(" · "));
+  // recShares = fullShares = floor(2000/(40-38)) = 1000 → risk $2,000, reward $8,000.
+  check("levels: risk $2,000 (deployable size × stop distance)", levelText.includes("risk $2,000"), levelText.join(" · "));
+  check("levels: reward $8,000 (deployable size × target distance)", levelText.includes("reward $8,000"), levelText.join(" · "));
+  check("levels: no 'now … from entry' (no currentPrice in test)", !levelText.some((x) => x.startsWith("now ")), levelText.join(" · "));
+}
+
+// ---- 8b. SKIP fallback: recShares null/0 → $ figures use full-risk shares ----
+console.log("\n[8b] SKIP row → risk/reward $ fall back to full-risk shares (never blank/$0)");
+{
+  // A skip-bucket row has recShares null; the $ figures must still show at full-risk size.
+  const ctx = computeSetupContext({
+    cupDepthPct: null,
+    handleRetrPct: null,
+    daysSinceHandleLow: null,
+    entry: 40,
+    stop: 38,
+    target: 48,
+    currentPrice: null,
+    recShares: null, // SKIP — no recommended size
+    fullShares: 1000, // full-risk size
+  });
+  const txt = ctx.levels.map((l) => l.text);
+  check("SKIP: risk still shown at full-risk ($2,000)", txt.includes("risk $2,000"), txt.join(" · "));
+  check("SKIP: reward still shown at full-risk ($8,000)", txt.includes("reward $8,000"), txt.join(" · "));
 }
 
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed`);
