@@ -1,5 +1,6 @@
 export * from "./useTerminalUI";
 export * from "./useMarketDataQuery";
+export * from "./useSectorStrength";
 export * from "./useRegimeData";
 export * from "./useIVRegime";
 export * from "./useJackValidation";
