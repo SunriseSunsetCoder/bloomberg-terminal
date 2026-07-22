@@ -199,5 +199,41 @@ console.log("\n[6] Owned (TRADED) live row excluded from P-rank numbering");
   check("no P3 — the owned row consumed no number", !html.includes(">P3</span>"));
 }
 
+// ---- 7. Exited (closed) + firing LIVE row: "exited" marker + no P-rank ----
+console.log("\n[7] Exited firing row shows 'exited' marker and gets no P-rank");
+{
+  const csv = [
+    "ticker,status,handle_low_date,size_bucket,handle_score,entry,stop,t05_target,breakout_level,sector,tier,priority",
+    `EXIT,just_fired,${recent},full,0.80,40,38,48,40.1,Financials,Q5,5.10`,
+    `DORM,just_fired,${recent},full,0.70,100,96,120,100.5,Industrials,Q4,3.20`,
+  ].join("\n");
+  const b = build(csv); // sorted priority desc → [EXIT(5.10), DORM(3.20)]
+  const ex = find(b.out, "EXIT");
+  if (ex) {
+    ex.userAction = "TRADED"; // traded...
+    ex.userExitPrice = 44; // ...and exited (recorded exit) — closed, but firing again
+    ex.userExitDate = "2026-07-20";
+  }
+  const html = renderToStaticMarkup(
+    React.createElement(JackDecisionsTable, {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      decisions: b.out as any,
+      isDarkMode: true,
+      persistenceAvailable: true,
+      individualCap: 200000,
+    })
+  );
+  const iExit = html.indexOf(">EXIT<");
+  const iDorm = html.indexOf("DORM");
+  check("exited row renders the 'exited' marker", html.includes(">exited</span>"));
+  check(
+    "exited (highest priority) row has NO P-label",
+    iExit !== -1 && iExit < iDorm && !/>P\d<\/span>/.test(html.slice(iExit, iDorm)),
+    html.slice(iExit, iDorm).slice(0, 60)
+  );
+  check("P1 goes to the un-traded DORM", html.includes(">P1</span>") && iDorm < html.indexOf(">P1</span>"));
+  check("no P2 — only one un-traded row to rank", !html.includes(">P2</span>"));
+}
+
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

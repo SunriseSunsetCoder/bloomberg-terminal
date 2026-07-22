@@ -48,10 +48,21 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
   // POSITIONS (open-management view) and out of LIVE/PENDING — see combineJackDecisions,
   // which also guarantees every TRADED setup appears in exactly one section.
   const { data: openData } = useJackOpenPositions();
-  const combinedDecisions = useMemo(
-    () => combineJackDecisions(data?.decisions ?? [], openData?.positions ?? []),
-    [data?.decisions, openData?.positions]
-  );
+  // Instant-after-save: a recorded exit closes the position, but the cached
+  // validation response (data.decisions) doesn't refresh until re-VALIDATE. Keep a
+  // local map of setups exited THIS session and patch their userExitPrice into the
+  // combine input so the row re-routes out of CURRENT POSITIONS immediately. The DB
+  // is authoritative — the next VALIDATE reads the same exit, making this redundant
+  // (never contradictory), so we never need to clear it.
+  const [localExits, setLocalExits] = useState<Record<number, { price: number; date: string | null }>>({});
+  const combinedDecisions = useMemo(() => {
+    const runDecisions = (data?.decisions ?? []).map((d) =>
+      d.setupId != null && localExits[d.setupId]
+        ? { ...d, userExitPrice: localExits[d.setupId].price, userExitDate: localExits[d.setupId].date }
+        : d
+    );
+    return combineJackDecisions(runDecisions, openData?.positions ?? []);
+  }, [data?.decisions, openData?.positions, localExits]);
 
   // "Update Outcomes" trigger (Session B, Deliverable 3) — POST the tracker,
   // toast the summary. React state only, no storage.
@@ -414,6 +425,9 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
                 isDarkMode={isDarkMode}
                 persistenceAvailable={data?.persistenceAvailable ?? openData?.persistenceAvailable ?? false}
                 individualCap={individualCap}
+                onExitSaved={(setupId, price, date) =>
+                  setLocalExits((prev) => ({ ...prev, [setupId]: { price, date } }))
+                }
               />
             )}
 
