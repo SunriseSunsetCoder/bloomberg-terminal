@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, Loader2, Save, ChevronRight, AlertTriangle } from "lucide-react";
 import type { JackDecisionClient } from "@/components/bloomberg/hooks/useJackValidation";
+import { CandleThumbnail } from "@/components/bloomberg/ui/candle-thumbnail";
+import { CandleChartModal } from "@/components/bloomberg/ui/candle-chart-modal";
 
 // ============================================================================
 // JACK decision surface (UI v2). ONE expandable row per setup, in two preserved
@@ -255,6 +257,8 @@ export function mainSharesForRow(d: {
 export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable, individualCap, onExitSaved }: JackDecisionsTableProps) {
   const [rows, setRows] = useState<Record<string, RowState>>(() => seedRows(decisions));
   const [expanded, setExpanded] = useState<Record<string, boolean>>({}); // all collapsed by default
+  // The setup whose candle chart is open (one modal, one chart instance at a time).
+  const [chartFor, setChartFor] = useState<JackDecisionClient | null>(null);
 
   useEffect(() => {
     setRows(seedRows(decisions));
@@ -919,6 +923,13 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
               {rulesChip(d.rulesFlag, d.rulesTone)}
             </div>
 
+            {/* Candle-chart thumbnail — same overlays; open rows carry the frozen
+                setup geometry (entry/stop/target/breakout + handle_low_date). */}
+            <div>
+              <div className={`text-[9px] uppercase tracking-widest ${subFg} mb-1`}>Chart</div>
+              <CandleThumbnail decision={d} isDarkMode={isDarkMode} onOpen={() => setChartFor(d)} />
+            </div>
+
             {/* LAYER 3 — FROZEN ENTRY THESIS (immutable, de-emphasized) */}
             <div className={`rounded border ${isDarkMode ? "border-gray-800" : "border-gray-300"} px-2.5 py-1.5`}>
               <div className="flex items-center gap-2 mb-1">
@@ -1034,6 +1045,13 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
 
             {priceLadder(d)}
 
+            {/* Candle-chart thumbnail → opens the annotated modal (levels overlaid).
+                Cheap SVG preview; the full chart is created only when the modal opens. */}
+            <div>
+              <div className={`text-[9px] uppercase tracking-widest ${subFg} mb-1`}>Chart</div>
+              <CandleThumbnail decision={d} isDarkMode={isDarkMode} onOpen={() => setChartFor(d)} />
+            </div>
+
             {/* SETUP GEOMETRY (cup/handle shape) + LEVELS/RISK (%-distances, R:R, $) */}
             {setupContext(d)}
 
@@ -1144,6 +1162,11 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
         Fill fields appear only on <b>TRADED</b> rows — enter prices/dates then <b>Save fills</b> (must go green
         <b> Saved</b> to persist). Marks &amp; fills reload from the DB when you return to JACK.
       </div>
+
+      {/* ONE chart modal for the whole table — created on open, disposed on close. */}
+      {chartFor && (
+        <CandleChartModal decision={chartFor} isDarkMode={isDarkMode} onClose={() => setChartFor(null)} />
+      )}
     </div>
   );
 }
