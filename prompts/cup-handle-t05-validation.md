@@ -52,11 +52,14 @@ The input below is split into LIVE and PENDING sections. Each setup has been enr
   - Sector-wide news (specific sector mentioned): see check 4
 - Earnings-as-non-event override: if earnings reported in last 5 days AND headlines are routine in-line reports (no surprise commentary, no analyst-day events, no guidance changes), upgrade to "Pure technical"
 
-**4. Sector rotation context.**
-- Define cluster: ≥3 tickers from same GICS sector in the LIVE+PENDING input
-- For clusters: reason about sector strength based on training-data knowledge + any sector-relevant headlines in the news data
-- DECISION: sector appears strong → cluster confirms. Sector flat → weight individually. Sector weak → SIZE DOWN 50% across cluster
-- If genuinely uncertain about recent sector strength, mark "Unknown" and treat as neutral
+**4. Sector rotation context (NON-BINDING — never a sizing or veto driver).**
+- Define cluster: ≥3 tickers from the same GICS sector in the LIVE+PENDING input.
+- Record your read of sector strength in `sector_rs` as CONTEXT ONLY (shown as the "sector RS" chip).
+- Sector strength has no measured predictive power for this setup, so it MUST NOT
+  change the size or the decision in EITHER direction: do not SIZE DOWN on a weak
+  sector, and do not confirm/upgrade on a strong one. Leave verdict and size to the
+  other checks.
+- Mark "Unknown" when genuinely unsure.
 
 **5. Cross-asset confirmation (financials + rate-sensitives only).**
 - Skip if not bank/insurer/REIT/utility
@@ -147,7 +150,7 @@ After both tables:
       "news_class": "Pure technical",
       "sector_rs": "Financials cluster (3) — flat",
       "cross_asset": "Uncertain 2s10s",
-      "notes": "financials cluster present but sector strength unknown + cross-asset uncertain = SIZE DOWN"
+      "notes": "cross-asset uncertain (2s10s) = SIZE DOWN; financials cluster flat is noted for context only, not a sizing driver"
     }
   ],
   "pending_decisions": [
