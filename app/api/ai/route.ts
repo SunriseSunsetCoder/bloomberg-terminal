@@ -132,9 +132,6 @@ headers.set("X-RateLimit-Remaining", rateLimitResult.remaining.toString());
 headers.set("X-RateLimit-Reset", rateLimitResult.reset.toString());
 
 return new Response(response.body, { headers, status: response.status });
-
-return new Response(result.textStream, { headers });
-    return response;
   } catch (error) {
     console.error("AI API error:", error);
     return new Response(JSON.stringify({ error: "Failed to generate AI response" }), {
