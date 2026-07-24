@@ -18,7 +18,7 @@ loadEnvConfig(process.cwd());
 
 import * as write from "../lib/db/write";
 import * as read from "../lib/db/read";
-import { replaySetup } from "../app/api/jack-outcomes/route";
+import { replaySetup } from "../lib/jack/outcome-tracker";
 
 const RESOLUTION_DAYS = 90; // canonical replay window (trading days)
 

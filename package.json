@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "_build_note": "--webpack: Turbopack (Next 16 default) aborts prerendering the synthetic /_global-error page on the VPS with 'Expected workStore to be initialized'. Webpack build clears it. Drop --webpack once Next patches the Turbopack bug. Turbopack still default for `next dev`.",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "biome lint .",
     "format": "biome format --write .",

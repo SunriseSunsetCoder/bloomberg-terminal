@@ -7,7 +7,7 @@
  *
  * Run:  npx tsx scripts/jack-handle-score-ingest-selftest.ts
  */
-import { applyFilters, buildClientDecisions } from "../app/api/jack-validation/route";
+import { applyFilters, buildClientDecisions } from "../lib/jack/validation-core";
 
 let passed = 0;
 let failed = 0;

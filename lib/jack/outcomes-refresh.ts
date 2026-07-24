@@ -17,7 +17,7 @@
 import "@/lib/market-data-refresh";
 import scheduler from "@/lib/scheduler";
 import { isPersistenceAvailable } from "@/lib/db/env";
-import { runOutcomeTracker, DEFAULT_RESOLUTION_DAYS } from "@/app/api/jack-outcomes/route";
+import { runOutcomeTracker, DEFAULT_RESOLUTION_DAYS } from "@/lib/jack/outcome-tracker";
 
 // Import the button's window so job == button by construction (≥130 → covers the
 // 120-day time stop). One source of truth, no drift.
