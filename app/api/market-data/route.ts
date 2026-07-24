@@ -11,6 +11,8 @@ import "@/lib/market-data-refresh";
 // Register the daily JACK outcome tracker too (self-imports market-data-refresh
 // first, so it always registers SECOND for load-spread ordering).
 import "@/lib/jack/outcomes-refresh";
+// Register the twice-daily JACK price refresh (10:00 / 18:00 ET).
+import "@/lib/jack/price-schedule";
 
 // Store year start values for YTD calculations
 const yearStartValues: Record<string, number> = {};

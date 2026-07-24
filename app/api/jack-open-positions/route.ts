@@ -15,6 +15,14 @@ import {
   type PositionReadResult,
 } from "@/lib/jack/position-mgmt";
 import { computeSizing, recommendedSizing, normalizeSizeBucket } from "@/lib/jack/handle-score";
+import { redis } from "@/lib/redis";
+import { etDateISO } from "@/lib/jack/market-hours";
+// Type-only import (erased at runtime) so this route does NOT pull price-refresh's
+// runOutcomeTracker dependency chain into its module graph. The store key is a bare
+// string constant mirroring PRICES_KEY in lib/jack/price-refresh.ts.
+import type { StoredPrices } from "@/lib/jack/price-refresh";
+
+const PRICES_KEY = "jack:prices"; // must match lib/jack/price-refresh.ts
 
 // Risk/trade for turning an open position's directive into concrete share counts.
 // Matches the validation route default; open positions carry no per-run override.
@@ -44,6 +52,9 @@ interface OpenPositionsResponse {
   persistenceAvailable: boolean;
   positions: JackDecisionClient[];
   reReadAvailable?: boolean; // false if ANTHROPIC_API_KEY missing (frozen + rules still shown)
+  // Provenance of the NOW prices used this response: which refresh wrote them, when,
+  // and whether IEX was down (→ prices are last-close, surfaced as a UI notice).
+  priceMeta?: { mode: "intraday" | "eod"; asOf: string | null; iexUnavailable: boolean };
   reason?: string;
   error?: string;
 }
@@ -55,9 +66,10 @@ const READ_BATCH = 10; // batch the LLM re-read if the book ever exceeds this
 // within a market day, so a re-fetch the same day reuses it. In-memory per process.
 const priceCache = new Map<string, number | null>();
 
-// Position re-read cache, per (ET day + book signature). Determinism is day-stable
-// and depends on current price, so the signature captures both. Same book, same
-// prices, same day → reuse (no extra Claude call). In-memory per process.
+// Position re-read cache, per (ET day + book composition). The re-read is a
+// DAY-STABLE thesis call keyed by which positions are open — NOT by price — so a
+// price refresh (intraday or eod) never re-triggers the LLM. Same book, same day →
+// reuse (no extra Claude call). In-memory per process.
 const reReadCache = new Map<string, Map<string, PositionReadResult>>();
 
 function tiingoBaseUrl(req: NextRequest): string {
@@ -111,8 +123,10 @@ async function runReReads(
   now: Date
 ): Promise<Map<string, PositionReadResult>> {
   const day = positionEtDay(now);
+  // Book composition only (NOT price): a price refresh must not re-run the LLM. The
+  // prompt still uses the day's price for the first run; the cache key does not.
   const signature = positions
-    .map((p) => `${positionKey(p.ticker, p.handleLowDate)}:${currentPrices.get(positionKey(p.ticker, p.handleLowDate)) ?? "?"}`)
+    .map((p) => positionKey(p.ticker, p.handleLowDate))
     .sort()
     .join(",");
   const cacheKey = `${day}|${signature}`;
@@ -168,11 +182,31 @@ export async function GET(req: NextRequest) {
     const day = positionEtDay(now);
     const tiingoBase = tiingoBaseUrl(req);
 
-    // Part B — current price per open ticker (parallel, cached per day).
+    // Part B — current price per open ticker. Read the jack:prices Redis store FIRST
+    // (written by /api/jack-refresh + the 10:00/18:00 scheduled slots) so a fresh
+    // refresh is never shadowed by today's already-cached EOD value. Only trust the
+    // store when it is from TODAY (ET). Per-ticker fallback: store → EOD latestClose.
+    let store: StoredPrices | null = null;
+    try {
+      store = (await redis.get(PRICES_KEY)) as StoredPrices | null;
+    } catch {
+      store = null;
+    }
+    const storeFresh = !!store && !!store.asOf && etDateISO(new Date(store.asOf)) === day;
+
     const priceEntries = await Promise.all(
-      rows.map(async (r) => [positionKey(r.ticker, r.handleLowDate), await fetchCurrentPrice(r.ticker, tiingoBase, day)] as const)
+      rows.map(async (r) => {
+        const key = positionKey(r.ticker, r.handleLowDate);
+        const fromStore = storeFresh ? store!.prices?.[r.ticker.toUpperCase()]?.price ?? null : null;
+        const price = fromStore != null ? fromStore : await fetchCurrentPrice(r.ticker, tiingoBase, day);
+        return [key, price] as const;
+      })
     );
     const currentPrices = new Map<string, number | null>(priceEntries);
+
+    const priceMeta: OpenPositionsResponse["priceMeta"] = storeFresh
+      ? { mode: store!.mode, asOf: store!.asOf, iexUnavailable: store!.iexUnavailable }
+      : { mode: "eod", asOf: null, iexUnavailable: false };
 
     // Part C — live LLM re-read (always-on). Degrades to rules-only if no key.
     const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -247,7 +281,7 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    return NextResponse.json<OpenPositionsResponse>({ ok: true, persistenceAvailable: true, positions, reReadAvailable });
+    return NextResponse.json<OpenPositionsResponse>({ ok: true, persistenceAvailable: true, positions, reReadAvailable, priceMeta });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json<OpenPositionsResponse>(
