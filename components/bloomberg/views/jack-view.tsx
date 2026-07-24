@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useMemo } from "react";
-import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database, RefreshCw, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database, RefreshCw, DollarSign, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useJackValidation } from "@/components/bloomberg/hooks/useJackValidation";
 import { useJackOpenPositions } from "@/components/bloomberg/hooks/useJackOpenPositions";
 import { JackDecisionsTable } from "@/components/bloomberg/views/jack-decisions-table";
@@ -48,6 +49,7 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
   // POSITIONS (open-management view) and out of LIVE/PENDING — see combineJackDecisions,
   // which also guarantees every TRADED setup appears in exactly one section.
   const { data: openData } = useJackOpenPositions();
+  const queryClient = useQueryClient();
   // Instant-after-save: a recorded exit closes the position, but the cached
   // validation response (data.decisions) doesn't refresh until re-VALIDATE. Keep a
   // local map of setups exited THIS session and patch their userExitPrice into the
@@ -93,6 +95,31 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
       setOutcomesPending(false);
     }
   }, []);
+
+  // "Refresh Prices" trigger — lightweight NOW-price update (NO LLM re-read). mode=auto
+  // resolves server-side: market open → intraday (Tiingo IEX, display-only), closed →
+  // eod close + outcome tracker. Writes jack:prices; invalidating the open-positions
+  // query re-reads it (Redis-first) and recomputes unrealized. React state only.
+  const [pricesPending, setPricesPending] = useState(false);
+
+  const handleRefreshPrices = useCallback(async () => {
+    setPricesPending(true);
+    try {
+      const res = await fetch("/api/jack-refresh?mode=auto", { method: "POST" });
+      const json = (await res.json()) as { ok: boolean; mode?: string; updated?: number; iexUnavailable?: boolean; error?: string };
+      setOutcomesToast({
+        kind: json.ok ? "ok" : "error",
+        message: json.ok
+          ? `Prices refreshed (${json.mode}${json.updated != null ? `, ${json.updated} tickers` : ""})${json.iexUnavailable ? " — IEX unavailable, showing last close" : ""}`
+          : json.error ?? "Refresh failed",
+      });
+      await queryClient.invalidateQueries({ queryKey: ["jack-open-positions"] });
+    } catch (e) {
+      setOutcomesToast({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setPricesPending(false);
+    }
+  }, [queryClient]);
 
   const handleRiskChange = useCallback((next: number) => {
     setRiskPerTrade(next);
@@ -177,6 +204,18 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
         </div>
         <div className="flex items-center gap-3">
           <button
+            onClick={handleRefreshPrices}
+            disabled={pricesPending}
+            title="Lightweight NOW-price refresh (no LLM re-read). Market open → intraday IEX (display-only); closed → EOD close + outcome tracker."
+            className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${btnSecondary} disabled:opacity-50`}
+          >
+            {pricesPending ? (
+              <><RefreshCw size={12} className="animate-spin" /> REFRESHING…</>
+            ) : (
+              <><DollarSign size={12} /> REFRESH PRICES</>
+            )}
+          </button>
+          <button
             onClick={handleUpdateOutcomes}
             disabled={outcomesPending}
             title="Run the Tiingo outcome tracker: replay each resolved setup (90 trading days), write theoretical R to the outcomes table."
@@ -221,6 +260,26 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
         <span className={fg}>Caps:</span> 30 Live / 50 Pending
         {" · "}
         <span className={fg}>Data:</span> Tiingo EOD+news+earnings
+        {openData?.priceMeta?.asOf && (
+          <>
+            {" · "}
+            <span className={fg}>Prices:</span>{" "}
+            {openData.priceMeta.iexUnavailable ? (
+              <span className="text-yellow-400">IEX unavailable — showing last close</span>
+            ) : (
+              <>
+                {openData.priceMeta.mode === "intraday" ? "IEX intraday" : "EOD close"}
+                {" as of "}
+                {new Date(openData.priceMeta.asOf).toLocaleTimeString("en-US", {
+                  timeZone: "America/New_York",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}{" "}
+                ET
+              </>
+            )}
+          </>
+        )}
       </div>
 
       {/* Main body */}

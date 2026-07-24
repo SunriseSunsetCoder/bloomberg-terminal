@@ -11,6 +11,8 @@ import { NextResponse } from "next/server";
 import "@/lib/market-data-refresh";
 // Also register the daily JACK outcome tracker (VPS-only; runs after market-data).
 import "@/lib/jack/outcomes-refresh";
+// Register the twice-daily JACK price refresh (10:00 / 18:00 ET; VPS-only).
+import "@/lib/jack/price-schedule";
 
 export async function GET() {
   try {
