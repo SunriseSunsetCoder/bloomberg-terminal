@@ -16,7 +16,7 @@
  */
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { applyFilters, buildClientDecisions } from "../app/api/jack-validation/route";
+import { applyFilters, buildClientDecisions } from "../lib/jack/validation-core";
 import { JackDecisionsTable, computeSetupContext } from "../components/bloomberg/views/jack-decisions-table";
 
 let passed = 0;

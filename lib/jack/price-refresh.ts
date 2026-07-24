@@ -11,7 +11,7 @@
 // I/O (Tiingo + Redis + DB) and verified by the endpoint/scheduler + the VPS reach test.
 // =============================================================================
 import { redis } from "@/lib/redis";
-import { runOutcomeTracker, DEFAULT_RESOLUTION_DAYS } from "@/app/api/jack-outcomes/route";
+import { runOutcomeTracker, DEFAULT_RESOLUTION_DAYS } from "@/lib/jack/outcome-tracker";
 
 export const PRICES_KEY = "jack:prices";
 const TIINGO_IEX = "https://api.tiingo.com/iex";
