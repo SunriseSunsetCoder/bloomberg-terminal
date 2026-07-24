@@ -300,6 +300,53 @@ export function getOpenPositions(): OpenPositionRow[] {
     .all() as OpenPositionRow[];
 }
 
+export interface PendingSetupRow {
+  setupId: number;
+  ticker: string;
+  handleLowDate: string;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+  breakout: number | null;
+}
+
+/**
+ * Pending watchlist setups — those whose LATEST decision is section='pending' and
+ * that have never been marked TRADED (so not an open position). Used by the intraday
+ * alert monitor for entry-trigger (breakout cross) + earnings + big-move alerts.
+ * Read-only. Geometry may be null (setups from CSVs without levels) — callers that
+ * need a level just skip those.
+ */
+export function getPendingSetups(): PendingSetupRow[] {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT
+         s.id              AS setupId,
+         s.ticker          AS ticker,
+         s.handle_low_date AS handleLowDate,
+         s.entry           AS entry,
+         s.stop            AS stop,
+         s.t05_target      AS target,
+         s.breakout_level  AS breakout
+       FROM setups s
+       JOIN (
+              SELECT setup_id, MAX(id) AS max_id
+                FROM decisions
+               GROUP BY setup_id
+            ) latest ON latest.setup_id = s.id
+       JOIN decisions dm ON dm.id = latest.max_id
+       WHERE dm.section = 'pending'
+         -- exclude anything ever entered (held wins over pending)
+         AND NOT EXISTS (
+               SELECT 1 FROM decisions d2
+                WHERE d2.setup_id = s.id AND d2.user_action = 'TRADED'
+             )
+       ORDER BY s.ticker ASC`
+    )
+    .all() as PendingSetupRow[];
+}
+
 export function markDecisionUserAction(
   decisionId: number,
   action: "TRADED" | "PASSED" | "WATCHED",

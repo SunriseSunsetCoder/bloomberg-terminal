@@ -78,6 +78,44 @@ async function fetchIexBatch(tickers: string[], token: string): Promise<Record<s
   }
 }
 
+const numOrNull = (v: unknown): number | null =>
+  typeof v === "number" && Number.isFinite(v) ? v : null;
+
+// One IEX quote with tngoLast + prevClose kept SEPARATE (fetchIexBatch collapses to a
+// single price; the intraday alert monitor needs the live print AND the prior close to
+// evaluate approaching-stop/target, big moves, and same-day breakout crosses).
+export interface IexQuote {
+  ticker: string;
+  tngoLast: number | null; // live/last print (the "NOW" price for alerts)
+  last: number | null;
+  prevClose: number | null;
+  price: number | null; // pickIexPrice(q) — the board price (tngoLast→last→prevClose)
+}
+
+// Raw IEX batch (ONE request). Returns null on any permission/empty/malformed
+// condition (whole-batch failure → caller falls back / fires a health alert).
+export async function fetchIexQuotes(tickers: string[], token: string): Promise<IexQuote[] | null> {
+  if (tickers.length === 0) return [];
+  try {
+    const url = `${TIINGO_IEX}/?tickers=${tickers.join(",")}&token=${token}`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    if (!Array.isArray(data) || data.length === 0) return null;
+    return data
+      .filter((q) => q?.ticker)
+      .map((q) => ({
+        ticker: String(q.ticker).toUpperCase(),
+        tngoLast: numOrNull(q.tngoLast),
+        last: numOrNull(q.last),
+        prevClose: numOrNull(q.prevClose),
+        price: pickIexPrice(q),
+      }));
+  } catch {
+    return null;
+  }
+}
+
 // Latest finalized EOD close via the existing internal proxy (its own 8h cache).
 async function fetchEodClose(tiingoApiBase: string, ticker: string): Promise<number | null> {
   try {
@@ -150,4 +188,15 @@ export async function runPriceRefresh(opts: { mode: RefreshMode; selfBase: strin
   }
 
   return { ok: true, mode, updated: Object.keys(prices).length, iexUnavailable, ranOutcomes, outcomeSummary, asOf };
+}
+
+/**
+ * Write the shared jack:prices store (read FIRST by the open-positions route). The
+ * intraday alert monitor uses this to keep the board fresh from its own IEX fetch
+ * without re-running the whole runPriceRefresh path. 24h TTL, non-fatal on failure.
+ */
+export async function persistPrices(store: StoredPrices): Promise<void> {
+  await redis.set(PRICES_KEY, store, { ex: 24 * 60 * 60 }).catch(() => {
+    // non-fatal — a failed board write just means the next refresh/read recovers
+  });
 }
