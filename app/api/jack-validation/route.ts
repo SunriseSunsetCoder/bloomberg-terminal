@@ -303,6 +303,9 @@ interface PersistResult {
   decisionIds: InsertedDecisionId[];
   // Bug A: existing marks for the setups in this run, keyed by setup_id.
   userMarks: Map<number, import("@/lib/db/read").UserMark>;
+  // Watchlist retirement counts for this ingest (see retireSupersededSetups).
+  retired: number;
+  unretired: number;
   error?: string;
 }
 
@@ -334,6 +337,8 @@ function persistRun(args: {
     jsonParseSuccess: args.extracted !== null,
     decisionIds: [],
     userMarks: new Map(),
+    retired: 0,
+    unretired: 0,
   };
 
   // Vercel guard — never touch the DB layer when persistence is off.
@@ -424,6 +429,24 @@ function persistRun(args: {
       result.decisionsInserted = inserted;
       result.decisionsSkipped = skipped;
       result.decisionIds = ids;
+
+      // 3b. Retire prior watchlist ideas this scan no longer carries, so the pending
+      // set (and the alerts riding on it) stays equal to what the board displays
+      // instead of accumulating stale setups run after run. Only for a run that
+      // actually produced decisions — a parse-failed run is not the board (see
+      // getCurrentRunId), so it must not retire anything. Writes to `setups` only:
+      // TRADED / exited state is never touched, and an ever-TRADED setup is never
+      // retired at all. Non-fatal: wrapped by the outer try/catch like the rest of
+      // persistence.
+      if (inserted > 0) {
+        const r = dbWrite.retireSupersededSetups(
+          [...setupIdMap.values()],
+          runId,
+          args.timestamp
+        );
+        result.retired = r.retired;
+        result.unretired = r.unretired;
+      }
     }
 
     // 4. Bug A: load existing user marks for these setups so the interactive
@@ -815,7 +838,7 @@ export async function POST(req: NextRequest) {
       ? `> **Persistence:** ${persistenceUnavailableReason()}\n`
       : persistResult.error
         ? `> ⚠ Persistence error: ${persistResult.error}\n`
-        : `> **Persistence:** run #${persistResult.runId ?? "?"} · ${persistResult.setupsUpserted} setups tracked · ${persistResult.decisionsInserted} decisions recorded${persistResult.decisionsSkipped > 0 ? ` · ${persistResult.decisionsSkipped} skipped (unmatched)` : ""}${persistResult.jsonParseSuccess ? "" : " · ⚠ JSON parse failed, only run metadata stored"}\n`;
+        : `> **Persistence:** run #${persistResult.runId ?? "?"} · ${persistResult.setupsUpserted} setups tracked · ${persistResult.decisionsInserted} decisions recorded${persistResult.decisionsSkipped > 0 ? ` · ${persistResult.decisionsSkipped} skipped (unmatched)` : ""}${persistResult.retired > 0 ? ` · ${persistResult.retired} stale setups retired` : ""}${persistResult.unretired > 0 ? ` · ${persistResult.unretired} returned to the watchlist` : ""}${persistResult.jsonParseSuccess ? "" : " · ⚠ JSON parse failed, only run metadata stored"}\n`;
 
     const preface =
       `> **Filter pipeline:** ${stats.inputRowCount} input → ` +

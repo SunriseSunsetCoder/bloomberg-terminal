@@ -17,6 +17,13 @@ CREATE TABLE IF NOT EXISTS setups (
     breakout_level        REAL,
     cup_depth_pct         REAL,
     handle_retr_pct       REAL,
+    -- Watchlist retirement: set when a later weekly scan no longer carries this
+    -- setup, so a stale idea drops out of the pending set (and therefore out of
+    -- alerts). NULL = live on the watchlist. Cleared again if the setup returns in
+    -- a later scan. NEVER set on a setup that was ever marked TRADED — see
+    -- retireSupersededSetups in lib/db/write.ts.
+    retired_at            TEXT,
+    retired_reason        TEXT,
     CHECK (first_seen_status IN ('just_fired', 'pending', 'recent_breakout', 'unknown')),
     CHECK (last_seen_status  IN ('just_fired', 'pending', 'recent_breakout', 'unknown')),
     UNIQUE (ticker, handle_low_date)

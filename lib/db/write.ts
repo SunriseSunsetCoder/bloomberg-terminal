@@ -255,6 +255,90 @@ export function insertDecisions(
 }
 
 // ============================================================================
+// Watchlist retirement — keeps the pending set from accumulating stale ideas
+// ============================================================================
+
+export interface RetireResult {
+  retired: number;
+  unretired: number;
+  /** Setups NOT in this scan that were left alone because they were ever TRADED. */
+  protectedTraded: number;
+}
+
+/**
+ * Retire every setup the new weekly scan no longer carries, so prior watchlist
+ * ideas drop out of the pending set (and therefore out of alerts) instead of
+ * accumulating forever.
+ *
+ * Rules:
+ *   · UN-RETIRE first — anything present in this scan is live again, so a ticker
+ *     that returns after a few quiet weeks comes back cleanly.
+ *   · RETIRE the rest, but ONLY setups that were NEVER marked TRADED. An open
+ *     position, or a closed (exited) one, is never touched — there is no code path
+ *     here by which a real position can be retired.
+ *   · Writes to the `setups` table ONLY. decisions.user_action, the outcomes
+ *     user-fill columns, and every frozen at-mark column are untouched, so TRADED /
+ *     exited state cannot be clobbered by an ingest.
+ *
+ * Idempotent. Callers should only invoke this for a run that actually produced
+ * decisions — a parse-failed run is not the board (see getCurrentRunId), so it must
+ * not retire anything either.
+ */
+export function retireSupersededSetups(
+  seenSetupIds: number[],
+  runId: number,
+  timestamp: string
+): RetireResult {
+  const db = getDb();
+  const seen = [...new Set(seenSetupIds)];
+  const placeholders = seen.map(() => "?").join(",");
+  // Empty scan → nothing to key retirement off; do nothing rather than retire the
+  // whole book.
+  if (seen.length === 0) return { retired: 0, unretired: 0, protectedTraded: 0 };
+
+  const everTraded = `NOT EXISTS (
+        SELECT 1 FROM decisions d
+         WHERE d.setup_id = setups.id AND d.user_action = 'TRADED'
+      )`;
+
+  let result: RetireResult = { retired: 0, unretired: 0, protectedTraded: 0 };
+  const apply = db.transaction(() => {
+    const unretired = db
+      .prepare(
+        `UPDATE setups
+            SET retired_at = NULL, retired_reason = NULL
+          WHERE retired_at IS NOT NULL
+            AND id IN (${placeholders})`
+      )
+      .run(...seen).changes;
+
+    const retired = db
+      .prepare(
+        `UPDATE setups
+            SET retired_at = ?, retired_reason = ?
+          WHERE retired_at IS NULL
+            AND id NOT IN (${placeholders})
+            AND ${everTraded}`
+      )
+      .run(timestamp, `superseded_by_run:${runId}`, ...seen).changes;
+
+    const protectedTraded = (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM setups
+            WHERE id NOT IN (${placeholders}) AND NOT (${everTraded})`
+        )
+        .get(...seen) as { c: number }
+    ).c;
+
+    result = { retired, unretired, protectedTraded };
+  });
+  apply();
+
+  return result;
+}
+
+// ============================================================================
 // Session B (v1.4) — outcome tracking + user fills
 // ============================================================================
 
