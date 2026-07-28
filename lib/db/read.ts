@@ -300,6 +300,120 @@ export function getOpenPositions(): OpenPositionRow[] {
     .all() as OpenPositionRow[];
 }
 
+// ============================================================================
+// The CURRENT BOARD — the single source of truth for "what JACK is watching now"
+//
+// The terminal's LIVE/PENDING list is the decisions of the LAST validation run
+// (jack-view.tsx renders data.decisions from the last VALIDATE, routed through
+// combineJackDecisions). Everything that must agree with the on-screen board —
+// above all the alert monitor — reads it from here, run-scoped the same way.
+//
+// Before this existed, getPendingSetups() took each setup's own MAX(decision id)
+// with no run filter, so a setup last seen in a scan weeks ago stayed "pending"
+// forever: the terminal never showed it, the alert monitor always did. That was
+// the stale-alert bug.
+// ============================================================================
+
+export interface CurrentBoardRow {
+  decisionId: number;
+  setupId: number;
+  ticker: string;
+  handleLowDate: string;
+  section: "live" | "pending";
+  decision: string;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+  breakout: number | null;
+  // Latest user mark for the setup (across all runs) + its recorded exit, so
+  // callers can apply the SAME owned rule the UI uses (isOwnedPosition in
+  // lib/jack/combine-decisions.ts): TRADED and no recorded exit.
+  userAction: "TRADED" | "PASSED" | "WATCHED" | null;
+  userExitPrice: number | null;
+  retiredAt: string | null;
+}
+
+/**
+ * The validation run the board is showing: the most recent real run that actually
+ * INSERTED decisions.
+ *
+ * Not simply MAX(id): a run whose LLM output failed to parse still writes a
+ * validation_runs row with zero decisions. Scoping to it strictly would blank the
+ * pending set — and so silence pending alerts — on a fluke parse failure. Falling
+ * back to the last good list is the deliberate choice (the terminal shows an error
+ * banner + empty board in exactly that case, so nothing is being contradicted).
+ * Reference rows (frozen handle_score edges) are excluded, as in getLatestRunSummary.
+ */
+export function getCurrentRunId(): number | null {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT r.id AS id
+         FROM validation_runs r
+        WHERE r.reference_kind IS NULL
+          AND EXISTS (SELECT 1 FROM decisions d WHERE d.validation_run_id = r.id)
+        ORDER BY r.id DESC
+        LIMIT 1`
+    )
+    .get() as { id: number } | undefined;
+  return row?.id ?? null;
+}
+
+/**
+ * Every decision row of the current run, split by section — i.e. exactly the rows
+ * the terminal is displaying as LIVE/PENDING (before combineJackDecisions moves the
+ * owned ones into CURRENT POSITIONS). Empty when no run has produced decisions yet.
+ */
+export function getCurrentBoard(): { runId: number | null; live: CurrentBoardRow[]; pending: CurrentBoardRow[] } {
+  const runId = getCurrentRunId();
+  if (runId === null) return { runId: null, live: [], pending: [] };
+
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT
+         d.id               AS decisionId,
+         s.id               AS setupId,
+         s.ticker           AS ticker,
+         s.handle_low_date  AS handleLowDate,
+         d.section          AS section,
+         d.decision         AS decision,
+         s.entry            AS entry,
+         s.stop             AS stop,
+         s.t05_target       AS target,
+         s.breakout_level   AS breakout,
+         um.user_action     AS userAction,
+         o.user_exit_price  AS userExitPrice,
+         s.retired_at       AS retiredAt
+       FROM decisions d
+       JOIN setups s ON s.id = d.setup_id
+       -- outcomes.setup_id is UNIQUE, so this can't fan out the row count.
+       LEFT JOIN outcomes o ON o.setup_id = s.id
+       -- Latest non-null user mark per setup, across ALL runs (markDecisionUserAction
+       -- keeps exactly one marked row per setup, but MAX(id) is the same rule the
+       -- other readers use).
+       LEFT JOIN (
+              SELECT d2.setup_id AS setup_id, d2.user_action AS user_action
+                FROM decisions d2
+                JOIN (
+                       SELECT setup_id, MAX(id) AS max_id
+                         FROM decisions
+                        WHERE user_action IS NOT NULL
+                        GROUP BY setup_id
+                     ) l ON l.max_id = d2.id
+            ) um ON um.setup_id = s.id
+       WHERE d.validation_run_id = ?
+       ORDER BY s.ticker ASC`
+    )
+    .all(runId) as CurrentBoardRow[];
+
+  return {
+    runId,
+    live: rows.filter((r) => r.section === "live"),
+    pending: rows.filter((r) => r.section === "pending"),
+  };
+}
+
 export interface PendingSetupRow {
   setupId: number;
   ticker: string;
@@ -311,40 +425,43 @@ export interface PendingSetupRow {
 }
 
 /**
- * Pending watchlist setups — those whose LATEST decision is section='pending' and
- * that have never been marked TRADED (so not an open position). Used by the intraday
- * alert monitor for entry-trigger (breakout cross) + earnings + big-move alerts.
- * Read-only. Geometry may be null (setups from CSVs without levels) — callers that
- * need a level just skip those.
+ * The alert-eligible PENDING set — BY CONSTRUCTION the same rows the terminal is
+ * showing in its PENDING section. Used by the intraday monitor (entry-trigger +
+ * big-move + the IEX ticker batch) and the EOD earnings check.
+ *
+ *   current run's pending decisions
+ *     − currently-OWNED setups (latest mark TRADED and NO recorded exit — the same
+ *       rule as isOwnedPosition, which routes those rows to CURRENT POSITIONS)
+ *     − retired setups (belt-and-braces; a current-run setup is always un-retired
+ *       by retireSupersededSetups, so this can only ever be a no-op)
+ *
+ * Note the owned rule is *currently owned*, not *ever traded*: a setup that was
+ * traded, exited, and is firing again this week is back on the board and back in
+ * alerts, matching the display.
+ *
+ * INTENDED BEHAVIOUR — do not "fix" this as a regression: because the set is scoped
+ * to the last run, an ad-hoc small VALIDATE (pasting a 3-ticker CSV to re-check
+ * something) shrinks the alert pending-set to those 3 tickers. That is the point —
+ * alerts observe exactly what the board shows, whatever the board shows. Re-running
+ * the full weekly CSV restores the full set. Open positions are unaffected either
+ * way; they come from getOpenPositions(), which is deliberately NOT run-scoped.
+ *
+ * Geometry may be null (CSVs without levels) — callers that need a level skip those.
  */
 export function getPendingSetups(): PendingSetupRow[] {
-  const db = getDb();
-  return db
-    .prepare(
-      `SELECT
-         s.id              AS setupId,
-         s.ticker          AS ticker,
-         s.handle_low_date AS handleLowDate,
-         s.entry           AS entry,
-         s.stop            AS stop,
-         s.t05_target      AS target,
-         s.breakout_level  AS breakout
-       FROM setups s
-       JOIN (
-              SELECT setup_id, MAX(id) AS max_id
-                FROM decisions
-               GROUP BY setup_id
-            ) latest ON latest.setup_id = s.id
-       JOIN decisions dm ON dm.id = latest.max_id
-       WHERE dm.section = 'pending'
-         -- exclude anything ever entered (held wins over pending)
-         AND NOT EXISTS (
-               SELECT 1 FROM decisions d2
-                WHERE d2.setup_id = s.id AND d2.user_action = 'TRADED'
-             )
-       ORDER BY s.ticker ASC`
-    )
-    .all() as PendingSetupRow[];
+  const { pending } = getCurrentBoard();
+  return pending
+    .filter((r) => !(r.userAction === "TRADED" && r.userExitPrice == null))
+    .filter((r) => r.retiredAt == null)
+    .map((r) => ({
+      setupId: r.setupId,
+      ticker: r.ticker,
+      handleLowDate: r.handleLowDate,
+      entry: r.entry,
+      stop: r.stop,
+      target: r.target,
+      breakout: r.breakout,
+    }));
 }
 
 export function markDecisionUserAction(

@@ -89,6 +89,12 @@ function runMigrations(database: Database.Database): void {
     { name: "sector", def: "TEXT" },
     { name: "tier", def: "TEXT" },
     { name: "priority", def: "REAL" },
+    // Watchlist retirement (additive): a setup that a later weekly scan no longer
+    // carries is retired so it drops out of the pending set + alerts. NULL = live on
+    // the watchlist; re-appearing in a later scan clears it. Never set on a setup
+    // that was ever marked TRADED — see retireSupersededSetups in lib/db/write.ts.
+    { name: "retired_at", def: "TEXT" },
+    { name: "retired_reason", def: "TEXT" },
   ]);
   // Reference-row support on validation_runs: a non-run bookkeeping row that stores
   // the FROZEN hscore_edges + size map as auditable JSON, so the thresholds behind
