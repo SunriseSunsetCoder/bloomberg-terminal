@@ -20,7 +20,10 @@ import * as write from "../lib/db/write";
 import * as read from "../lib/db/read";
 import { replaySetup } from "../lib/jack/outcome-tracker";
 
-const RESOLUTION_DAYS = 90; // canonical replay window (trading days)
+// NOTE: replaySetup no longer takes a window from callers — it runs the FROZEN parity
+// windows (CONFIRM_WINDOW_BARS = 15 confirm, TIME_STOP_BARS = 120 exit) that mirror the
+// backtest. The old `RESOLUTION_DAYS = 90` argument here scanned a non-parity window and
+// has been removed.
 
 interface Setup {
   ticker: string;
@@ -63,6 +66,18 @@ const FILLS: Record<string, Fill> = {
   MAA: { entryDate: "2026-07-07", entryPrice: 141.96, exitDate: null, exitPrice: null, note: "still open, ~-5%" },
 };
 
+// ⚠ UNVERIFIED AGAINST THE CORRECTED REPLAY MODEL (2026-07-31).
+//
+// These expectations were derived when replaySetup fired on an intraday HIGH >= rim
+// and searched up to 130 bars for it. The replay now mirrors the backtest: a
+// confirming CLOSE > rim within 15 bars of the handle low. A winner whose breakout was
+// an intraday poke, or which confirmed late, SHOULD now come back never_fired — and
+// this table will report FAIL until it is re-derived.
+//
+// DO NOT loosen these to make the script pass. Re-derive them from
+// `npx tsx scripts/jack-recompute-outcomes.ts` (dry run, on the VPS), which prints the
+// confirming close / fill / exit per ticker, and hand-check one or two against the
+// notebook rule before freezing.
 const EXPECTED: Record<string, Expected> = {
   UNM: { reason: "target", approxR: 1.5, winner: true },
   BNY: { reason: "target", approxR: null, winner: true },
@@ -151,7 +166,7 @@ async function main() {
     const { bars, error } = await fetchTiingoRaw(s.ticker, s.handleLowDate);
     if (error || bars.length === 0) { computed[s.ticker] = { reason: "NO_DATA", r: null, fired: false, note: error }; continue; }
     const setupForReplay = { id: setupId, ticker: s.ticker, handleLowDate: s.handleLowDate, entry: s.entry, stop: s.stop, target: s.target, breakoutLevel: s.breakout };
-    const result = replaySetup(setupForReplay, bars, RESOLUTION_DAYS);
+    const result = replaySetup(setupForReplay, bars);
     if (result.kind === "written") {
       write.insertOutcome(result.outcome);
       computed[s.ticker] = { reason: result.outcome.exitReason ?? "?", r: result.outcome.rRealized ?? null, fired: result.outcome.fired };

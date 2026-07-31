@@ -13,23 +13,51 @@ import type { SetupNeedingOutcome } from "@/lib/db/read";
 import type { OutcomeRow } from "@/lib/db/write";
 
 // ============================================================
-// Resolution window — TRADING days. Same value gates "is this setup old enough
-// to resolve?" AND bounds the forward scan. Never hardcode a different number in
-// one place than the other. Set to 130 (≥120) so the strategy's full 120-trading-
-// day time stop is captured; the scheduled job imports THIS exact constant so the
-// job and the manual button always run an identical window.
+// ELIGIBILITY GATE — trading days. This bounds NOTHING inside the replay; it only
+// answers "is this setup old enough that its trade has certainly finished?" (see
+// getSetupsNeedingOutcomes). It is deliberately LARGER than TIME_STOP_BARS so the
+// full 120 exit bars are guaranteed to exist before a setup is ever resolved. The
+// scheduled job imports THIS exact constant so the job and the manual button gate
+// identically.
 // ============================================================
 export const DEFAULT_RESOLUTION_DAYS = 130;
 
-// ---- Modeling assumptions (documented, surfaced in the summary) ----
-//  1. TIE (stop and target both touched on the same bar) → assume STOP first.
-//     Conservative: we can't see intrabar sequence in daily OHLC, so we assume
-//     the worse outcome.
-//  2. TIMEOUT (neither stop nor target hit within the window) → mark-to-market:
-//     exit at the last close in the window, R = (close - entry) / (entry - stop).
+// ============================================================
+// PARITY CONSTANTS — these mirror the frozen backtest (cup_handle_15yr_history_1
+// .ipynb) that produced the raw-R reference in lib/jack/backtest-reference.ts.
+// Changing either one silently invalidates every live-vs-backtest comparison on
+// the scorecard. Do NOT tune them.
+//
+//   Cell 3 (entry):  for j in range(h_idx+1, min(h_idx+1+15, n)):
+//                        if C[j] > breakout: confirm = j; break
+//                    e_idx = confirm + 1;  e_px = O[e_idx]
+//   Cell 1 (exit):   TIME_STOP_DAYS = 120
+// ============================================================
+
+/** Bars AFTER handle_low_date in which a confirming CLOSE must appear, else no trade. */
+export const CONFIRM_WINDOW_BARS = 15;
+
+/** Bars the trade is allowed to run from entry before the time stop marks it to market. */
+export const TIME_STOP_BARS = 120;
+
+// ---- Modeling assumptions (documented, surfaced in the summary + on JSCORE) ----
+//  1. FIRE = a confirmed CLOSE above the rim within CONFIRM_WINDOW_BARS bars of the
+//     handle low. An intraday high poking through the rim is NOT a breakout — the
+//     backtest discarded those, and so do we.
+//  2. FILL = the NEXT bar's OPEN after the confirming close (never the rim, never the
+//     scanner's projected entry) — gap slippage included, as the backtest ate it.
+//  3. EXIT = intraday touch: stop on the bar LOW, target on the bar HIGH, stop checked
+//     FIRST (daily bars hide intrabar order, so the tie resolves to the worse outcome).
+//     A stop-out is exactly -1R because the fill is modeled AT the stop price.
+//  4. TIMEOUT = mark-to-market at the last close within TIME_STOP_BARS.
 export const ASSUMPTION_LABELS = [
-  "tie=stop-first (same-bar stop+target → stop, conservative — daily bars hide intrabar order)",
-  "timeout=mark-to-market (neither hit in window → exit at last close, R from that close)",
+  `fire=confirmed CLOSE above the rim within ${CONFIRM_WINDOW_BARS} bars of the handle low (unconfirmed → never_fired; an intraday poke is not a breakout)`,
+  "fill=next day's OPEN after the confirming close (matches the frozen backtest — gap slippage included)",
+  "exit=intraday touch, stop-first (stop on the bar low, target on the bar high; same-bar tie → stop, conservative)",
+  `timeout=${TIME_STOP_BARS}-bar mark-to-market (neither hit in window → exit at last close, R from that close)`,
+  // KNOWN LIMITATION — second-order, deliberately not closed. Would need the scanner
+  // to also emit ATR + the raw stop base before it could be re-derived honestly.
+  "known gap: the paper stop is the SCANNER's stop, anchored to its projected entry — the backtest re-derived the stop from the realized fill + ATR, so paper R carries a small stop-placement difference",
 ];
 
 interface Bar {
@@ -54,7 +82,11 @@ type ReplayResult =
 export function replaySetup(
   setup: SetupNeedingOutcome,
   bars: Bar[],
-  resolutionDays: number
+  // Exit-scan length. Defaults to the parity constant — callers should NOT pass this
+  // (runOutcomeTracker deliberately doesn't). It exists only so the self-test can
+  // drive short windows. The eligibility gate's resolutionDays is a DIFFERENT number
+  // and must never be threaded in here.
+  timeStopBars: number = TIME_STOP_BARS
 ): ReplayResult {
   const breakout = setup.breakoutLevel;
   const stop = setup.stop;
@@ -70,19 +102,40 @@ export function replaySetup(
   // Ensure ascending by date (defensive — Tiingo returns ascending already).
   const sorted = [...bars].sort((a, b) => a.date.localeCompare(b.date));
 
-  // --- Fire detection: first bar (within resolutionDays of handle_low_date)
-  // whose High >= breakout_level. fire_date == handle_low_date is common. ---
-  const fireWindow = Math.min(resolutionDays, sorted.length);
+  // --- Fire detection (backtest parity): the first bar STRICTLY AFTER the handle
+  // low, within CONFIRM_WINDOW_BARS, whose CLOSE is above the rim. Mirrors the
+  // notebook's `for j in range(h_idx+1, h_idx+1+15): if C[j] > breakout`.
+  //
+  // Anchored on the DATE, not on index 0: bars[0] is only the handle-low bar when
+  // that date was a trading day (a weekend/holiday handle low makes bars[0] already
+  // h_idx+1). Deriving the start from the date is correct either way.
+  const firstAfter = sorted.findIndex((b) => b.date > setup.handleLowDate);
+  if (firstAfter === -1) {
+    return { kind: "deferred", reason: "no bars after handle_low_date yet" };
+  }
+  const confirmWindowEnd = firstAfter + CONFIRM_WINDOW_BARS;
+  const confirmScanEnd = Math.min(confirmWindowEnd, sorted.length);
+
   let fireIdx = -1;
-  for (let i = 0; i < fireWindow; i++) {
-    if (sorted[i].high >= breakout) {
+  for (let i = firstAfter; i < confirmScanEnd; i++) {
+    // STRICT >, and CLOSE — an intraday high through the rim is not a confirmation.
+    if (sorted[i].close > breakout) {
       fireIdx = i;
       break;
     }
   }
 
   if (fireIdx === -1) {
-    // Never fired within the window → no trade. Excluded from R aggregation later.
+    if (sorted.length < confirmWindowEnd) {
+      // The window hasn't fully elapsed — don't lock in a wrong 'never_fired' that
+      // a later bar would have contradicted. Resolve on a later run.
+      return {
+        kind: "deferred",
+        reason: `confirm window not elapsed (${sorted.length - firstAfter}/${CONFIRM_WINDOW_BARS} bars)`,
+      };
+    }
+    // Window fully elapsed with no confirming close → terminal: no trade ever
+    // happened. Counted, and excluded from R aggregation, on every arm.
     return {
       kind: "written",
       outcome: {
@@ -117,8 +170,10 @@ export function replaySetup(
     };
   }
 
-  // --- Forward scan: up to resolutionDays bars FROM ENTRY (window matches the gate). ---
-  const scanEnd = Math.min(entryIdx + resolutionDays, sorted.length);
+  // --- Forward scan: TIME_STOP_BARS bars FROM ENTRY (the backtest's TIME_STOP_DAYS).
+  // Exit test is INTRADAY TOUCH, stop checked first — unchanged, and matching
+  // _sim_trade exactly: `if bl <= stop_price: ... ; if bh >= target_price: ...`. ---
+  const scanEnd = Math.min(entryIdx + timeStopBars, sorted.length);
   let maxHigh = -Infinity;
   let minLow = Infinity;
   let exitReason: "target" | "stop" | "timeout" | null = null;
@@ -160,15 +215,15 @@ export function replaySetup(
 
   if (exitReason === null) {
     const scannedBars = scanEnd - entryIdx;
-    if (scannedBars < resolutionDays) {
+    if (scannedBars < timeStopBars) {
       // Window not fully elapsed yet (gate approximation was slightly short) —
       // don't lock in a premature 'timeout'. Resolve on a later run.
       return {
         kind: "deferred",
-        reason: `only ${scannedBars}/${resolutionDays} forward bars available`,
+        reason: `only ${scannedBars}/${timeStopBars} forward bars available`,
       };
     }
-    // TIMEOUT → mark-to-market at the last close in the window (assumption #2).
+    // TIME STOP → mark-to-market at the last close in the window.
     const last = sorted[scanEnd - 1];
     exitReason = "timeout";
     exitPrice = last.close;
@@ -302,7 +357,11 @@ export async function runOutcomeTracker({
       continue;
     }
 
-    const result = replaySetup(setup, hist.bars, resolutionDays);
+    // NO third argument: the replay always runs the parity windows
+    // (CONFIRM_WINDOW_BARS / TIME_STOP_BARS). resolutionDays is the ELIGIBILITY gate
+    // only — threading it in here is what previously let the fire search run 130 bars
+    // wide instead of 15.
+    const result = replaySetup(setup, hist.bars);
 
     if (result.kind === "deferred") {
       summary.deferred++;

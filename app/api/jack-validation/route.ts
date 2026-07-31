@@ -306,6 +306,10 @@ interface PersistResult {
   // Watchlist retirement counts for this ingest (see retireSupersededSetups).
   retired: number;
   unretired: number;
+  // How many of this run's setups carry the geometry the outcome replay REQUIRES
+  // (breakout_level + stop + t05_target). 0 here means paper/outcome tracking will
+  // silently stay empty — the failure mode that went unnoticed for three months.
+  geometryOk: number;
   error?: string;
 }
 
@@ -339,6 +343,7 @@ function persistRun(args: {
     userMarks: new Map(),
     retired: 0,
     unretired: 0,
+    geometryOk: 0,
   };
 
   // Vercel guard — never touch the DB layer when persistence is off.
@@ -388,6 +393,25 @@ function persistRun(args: {
       const setupId = dbWrite.upsertSetup(seen, args.timestamp);
       setupIdMap.set(`${setup.ticker}|${handleLowDate}`, setupId);
       result.setupsUpserted++;
+      // Guard the three fields the outcome replay actually depends on — NOT whatever
+      // the scanner happens to emit. If these stop arriving, paper/outcome tracking
+      // goes quietly empty; the warning below is what makes that loud.
+      if (seen.breakoutLevel != null && seen.stop != null && seen.t05Target != null) {
+        result.geometryOk++;
+      }
+    }
+
+    if (result.setupsUpserted > 0 && result.geometryOk === 0) {
+      console.error(
+        `[jack-validation] ⚠ NO REPLAYABLE GEOMETRY — 0/${result.setupsUpserted} setups carried ` +
+          `breakout_level + stop + t05_target. Outcome/paper tracking will stay EMPTY for this run. ` +
+          `Check the scanner CSV's column names against parseCsvRow's aliases in lib/jack/validation-core.ts.`
+      );
+    } else if (result.geometryOk < result.setupsUpserted) {
+      console.warn(
+        `[jack-validation] partial geometry — ${result.geometryOk}/${result.setupsUpserted} setups are replayable ` +
+          `(need breakout_level + stop + t05_target).`
+      );
     }
 
     // 2. Insert the validation_runs row
@@ -838,7 +862,12 @@ export async function POST(req: NextRequest) {
       ? `> **Persistence:** ${persistenceUnavailableReason()}\n`
       : persistResult.error
         ? `> ⚠ Persistence error: ${persistResult.error}\n`
-        : `> **Persistence:** run #${persistResult.runId ?? "?"} · ${persistResult.setupsUpserted} setups tracked · ${persistResult.decisionsInserted} decisions recorded${persistResult.decisionsSkipped > 0 ? ` · ${persistResult.decisionsSkipped} skipped (unmatched)` : ""}${persistResult.retired > 0 ? ` · ${persistResult.retired} stale setups retired` : ""}${persistResult.unretired > 0 ? ` · ${persistResult.unretired} returned to the watchlist` : ""}${persistResult.jsonParseSuccess ? "" : " · ⚠ JSON parse failed, only run metadata stored"}\n`;
+        : `> **Persistence:** run #${persistResult.runId ?? "?"} · ${persistResult.setupsUpserted} setups tracked · ${persistResult.decisionsInserted} decisions recorded${persistResult.decisionsSkipped > 0 ? ` · ${persistResult.decisionsSkipped} skipped (unmatched)` : ""}${persistResult.retired > 0 ? ` · ${persistResult.retired} stale setups retired` : ""}${persistResult.unretired > 0 ? ` · ${persistResult.unretired} returned to the watchlist` : ""}${persistResult.jsonParseSuccess ? "" : " · ⚠ JSON parse failed, only run metadata stored"}\n` +
+          (persistResult.setupsUpserted > 0 && persistResult.geometryOk === 0
+            ? `> ⚠️ **NO REPLAYABLE GEOMETRY** — 0/${persistResult.setupsUpserted} setups carried breakout_level + stop + t05_target. Outcome tracking (and the JSCORE paper arm) will stay EMPTY for this run. Check the scanner CSV's column names.\n`
+            : persistResult.geometryOk < persistResult.setupsUpserted
+              ? `> ⚠ Partial geometry — ${persistResult.geometryOk}/${persistResult.setupsUpserted} setups are replayable (need breakout_level + stop + t05_target).\n`
+              : "");
 
     const preface =
       `> **Filter pipeline:** ${stats.inputRowCount} input → ` +

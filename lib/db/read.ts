@@ -81,8 +81,11 @@ export interface SetupNeedingOutcome {
  *     that only holds user fills (exit_reason IS NULL). A user-fills-only row must
  *     still get its theoretical outcome computed.
  *
- * Note: resolutionDays is the same window used by the forward scan in the replay
- * (default 90). Do NOT hardcode a different number — the gate and the scan must match.
+ * Note: resolutionDays is the ELIGIBILITY gate ONLY (default DEFAULT_RESOLUTION_DAYS
+ * = 130). It does NOT bound anything inside replaySetup: the fire search is
+ * CONFIRM_WINDOW_BARS (15) and the exit scan is TIME_STOP_BARS (120), both frozen for
+ * backtest parity. 130 > 120 is deliberate — it guarantees the full 120 exit bars
+ * exist before a setup is ever considered resolvable.
  */
 export function getSetupsNeedingOutcomes(resolutionDays = 90): SetupNeedingOutcome[] {
   const db = getDb();

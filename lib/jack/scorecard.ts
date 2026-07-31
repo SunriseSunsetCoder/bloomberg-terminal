@@ -363,11 +363,14 @@ export interface JackScorecard {
 }
 
 export const PAPER_ASSUMPTIONS = [
-  "paper entry = NEXT DAY's OPEN after the first bar whose high ≥ breakout_level (the backtest's own rule, not the CSV entry field)",
-  "tie (stop and target both touched on one bar) → stop first, conservative",
-  "timeout (neither hit in the window) → mark-to-market at the last close",
-  "window = 130 trading days; setups younger than that are not resolved yet and are absent here",
+  "paper FIRE = a confirmed CLOSE above the rim (breakout_level) within 15 bars of the handle low — an intraday high poking through the rim is NOT a breakout, and an unconfirmed setup never trades (never_fired)",
+  "paper FILL = the NEXT bar's OPEN after that confirming close — never the rim, never the scanner's projected entry. Gap slippage is included, exactly as the backtest ate it",
+  "exit = intraday touch: stop on the bar LOW, target on the bar HIGH, stop checked FIRST (same-bar tie → stop, conservative). A stop-out is exactly -1R",
+  "time stop = 120 bars from entry → mark-to-market at the last close",
+  "these four rules mirror the frozen backtest (cup_handle_15yr_history_1.ipynb) that produced the raw-R reference — that is what makes live-vs-reference a fair comparison",
+  "eligibility: a setup is only resolved once ~130 trading days have elapsed, so the full 120-bar window is guaranteed to exist. Younger setups are absent here, not zero",
   "never_fired setups are counted but excluded from R statistics, identically on every arm",
+  "KNOWN GAP (second-order): the paper stop is the SCANNER's stop, anchored to its projected entry — the backtest re-derived the stop from the realized fill + ATR. Closing it needs the scanner to emit ATR + the raw stop base",
 ];
 
 export function computeScorecard(

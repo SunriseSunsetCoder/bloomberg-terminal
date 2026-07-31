@@ -261,9 +261,17 @@ console.log("\n[8] PURE — theoretical arm + paper assumptions surfaced");
   const s = computeScorecard([trade(0.5, { rRealized: 2, exitReason: "target" })], new Map(), 2000);
   check("realized arm uses user R", near(s.live.realized.avgR, 0.5));
   check("theoretical arm uses replay R on the same trade", near(s.live.theoretical.avgR, 2));
-  check("paper assumptions include the next-day-open entry rule", s.paperAssumptions.some((a) => a.includes("NEXT DAY")));
-  check("paper assumptions include tie=stop-first", s.paperAssumptions.some((a) => a.includes("stop first")));
-  check("paper assumptions include the 130-day window", s.paperAssumptions.some((a) => a.includes("130")));
+  // These assert the CORRECTED parity model (confirming close → next-bar open fill →
+  // intraday-touch exits → 120-bar time stop). They previously locked the old
+  // high-touch/130-bar wording; if the model changes again, this must fail.
+  check("assumptions state the confirming-CLOSE fire rule", s.paperAssumptions.some((a) => /confirmed CLOSE/i.test(a)));
+  check("assumptions state the 15-bar confirm window", s.paperAssumptions.some((a) => /15 bars/i.test(a)));
+  check("assumptions state the next-bar OPEN fill", s.paperAssumptions.some((a) => /NEXT bar's OPEN/i.test(a)));
+  check("assumptions state intraday-touch, stop-first exits", s.paperAssumptions.some((a) => /intraday touch/i.test(a) && /stop checked FIRST/i.test(a)));
+  check("assumptions state the 120-bar time stop", s.paperAssumptions.some((a) => /120 bars/i.test(a)));
+  check("assumptions state the 130-day eligibility gate", s.paperAssumptions.some((a) => a.includes("130")));
+  check("assumptions disclose the scanner-stop known gap", s.paperAssumptions.some((a) => /KNOWN GAP/i.test(a)));
+  check("assumptions name the backtest as the parity source", s.paperAssumptions.some((a) => /cup_handle_15yr_history_1/i.test(a)));
 }
 
 // ===========================================================================
