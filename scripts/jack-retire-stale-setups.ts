@@ -211,3 +211,7 @@ main()
     console.error("\nFAILED:", err instanceof Error ? err.message : String(err), "\n");
     process.exit(1);
   });
+
+// This file is a module (top-level dynamic imports only) — keeps its `main` out of
+// the global script scope so tsc does not see it as a duplicate declaration.
+export {};

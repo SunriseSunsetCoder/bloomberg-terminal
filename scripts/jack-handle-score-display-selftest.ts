@@ -7,12 +7,8 @@
  *
  * Run:  npx tsx scripts/jack-handle-score-display-selftest.ts
  */
-import {
-  analysisDirection,
-  handleDirection,
-  signalsDisagree,
-  mainSharesForRow,
-} from "../components/bloomberg/views/jack-decisions-table";
+import { analysisDirection, handleDirection, signalsDisagree } from "../lib/jack/verdict";
+import { mainSharesForRow } from "../components/bloomberg/views/jack-decisions-table";
 
 let passed = 0;
 let failed = 0;

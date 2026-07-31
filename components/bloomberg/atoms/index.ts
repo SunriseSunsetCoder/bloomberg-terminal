@@ -18,7 +18,7 @@ export const errorAtom = atom<string | null>(null);
 export const isShortcutsHelpOpenAtom = atom(false);
 
 // View state atoms
-export const currentViewAtom = atom<"market" | "news" | "movers" | "volatility" | "rmi" | "iv" | "fleet" | "jack" | "jackAnalytics">("market");
+export const currentViewAtom = atom<"market" | "news" | "movers" | "volatility" | "rmi" | "iv" | "fleet" | "jack" | "jackAnalytics" | "jackScorecard">("market");
 // JACK panel state — persists across view navigation
 export const jackResultAtom = atom<JackValidationResponse | null>(null);
 export const jackIsPendingAtom = atom<boolean>(false);

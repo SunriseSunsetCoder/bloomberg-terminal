@@ -24,7 +24,8 @@ import {
   incompleteForSetups,
   isDegraded,
 } from "../lib/jack/reconcile";
-import { signalsDisagree, mainSharesForRow } from "../components/bloomberg/views/jack-decisions-table";
+import { signalsDisagree } from "../lib/jack/verdict";
+import { mainSharesForRow } from "../components/bloomberg/views/jack-decisions-table";
 
 let passed = 0;
 let failed = 0;
