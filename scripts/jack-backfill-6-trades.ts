@@ -43,10 +43,18 @@ interface Fill {
   note: string;
 }
 interface Expected {
-  reason: "target" | "still_open"; // required theoretical outcome
+  /** The EXACT theoretical outcome the corrected replay must produce. */
+  reason: "target" | "stop" | "timeout" | "still_open" | "never_fired";
+  /** Asserted within R_TOLERANCE when non-null. */
   approxR: number | null;
-  winner: boolean; // correctness gate: winners MUST fire and not stop/never_fire
+  /** Why this is the expected value — the audit trail for the assertion. */
+  note: string;
 }
+
+// The reason must match EXACTLY and, where an R is given, it must land within this
+// tolerance. Stricter than the old "winner must fire and not stop" heuristic, which
+// let a wrong-but-positive outcome pass.
+const R_TOLERANCE = 0.05;
 
 const SETUPS: Setup[] = [
   { ticker: "BNY", handleLowDate: "2026-05-08", breakout: 138.6, entry: 138.74, stop: 130.03, target: 147.95, cupDepthPct: 14.4, handleRetrPct: 45.2 },
@@ -66,25 +74,42 @@ const FILLS: Record<string, Fill> = {
   MAA: { entryDate: "2026-07-07", entryPrice: 141.96, exitDate: null, exitPrice: null, note: "still open, ~-5%" },
 };
 
-// ⚠ UNVERIFIED AGAINST THE CORRECTED REPLAY MODEL (2026-07-31).
-//
-// These expectations were derived when replaySetup fired on an intraday HIGH >= rim
-// and searched up to 130 bars for it. The replay now mirrors the backtest: a
-// confirming CLOSE > rim within 15 bars of the handle low. A winner whose breakout was
-// an intraday poke, or which confirmed late, SHOULD now come back never_fired — and
-// this table will report FAIL until it is re-derived.
-//
-// DO NOT loosen these to make the script pass. Re-derive them from
-// `npx tsx scripts/jack-recompute-outcomes.ts` (dry run, on the VPS), which prints the
-// confirming close / fill / exit per ticker, and hand-check one or two against the
-// notebook rule before freezing.
+// VERIFIED against the corrected replay model (2026-07-31) — confirming CLOSE > rim
+// within 15 bars of the handle low, fill at the next bar's open, 120-bar time stop.
+// Re-derived from a `jack-recompute-outcomes.ts` dry run on real Tiingo bars and
+// hand-checked against the notebook rule. These are measurements, not targets: if the
+// script reports FAIL, fix the replay or re-verify the data — do NOT edit this table
+// to make it pass.
 const EXPECTED: Record<string, Expected> = {
-  UNM: { reason: "target", approxR: 1.5, winner: true },
-  BNY: { reason: "target", approxR: null, winner: true },
-  WELL: { reason: "target", approxR: null, winner: true },
-  EXPD: { reason: "target", approxR: 1.1, winner: true },
-  MET: { reason: "still_open", approxR: null, winner: false },
-  MAA: { reason: "still_open", approxR: null, winner: false },
+  UNM: { reason: "target", approxR: 1.53, note: "unchanged by the model correction" },
+  BNY: {
+    reason: "target",
+    approxR: 0.87,
+    // Was +1.79R under the old intraday-high fire. The first confirming CLOSE is
+    // 2026-05-21 @ 138.98 — one bar later — so the fill is the next open, 139.59.
+    // Higher fill, same target ⇒ smaller R. This is the correction working.
+    note: "was +1.79R; first confirming close 2026-05-21 @ 138.98 → fill 139.59",
+  },
+  WELL: {
+    reason: "never_fired",
+    approxR: null,
+    // Was target +1.70R. Inside the 15-bar window from 2026-05-19 the max CLOSE was
+    // 218.61 — never above the 221.68 rim. The intraday poke that fired it under the
+    // old model was also outside the window. Two independent reasons it must not fire.
+    note: "max close in window 218.61 < rim 221.68; the old poke was also out of window",
+  },
+  EXPD: { reason: "target", approxR: 0.71, note: "unchanged by the model correction" },
+  // MET and MAA carry NO theoretical outcome to migrate — they never had one under the
+  // old model, so they were absent from the recompute. They are the user's genuinely
+  // open positions (entered 2026-07-07, no exit), and their 120-bar exit window has not
+  // elapsed, so the replay should DEFER → reported as "still_open". Unverified against
+  // live bars; left as the pre-existing assertion rather than invented.
+  //
+  // If either comes back never_fired, that is a REAL finding — their confirm window HAS
+  // elapsed, so it would mean no close cleared the rim within 15 bars even though the
+  // position was actually entered. Hand-check before touching this table.
+  MET: { reason: "still_open", approxR: null, note: "open position; 120-bar window not elapsed → deferred" },
+  MAA: { reason: "still_open", approxR: null, note: "open position; 120-bar window not elapsed → deferred" },
 };
 
 interface Bar { date: string; open: number; high: number; low: number; close: number; volume: number }
@@ -178,24 +203,37 @@ async function main() {
 
   // ---- 4. comparison table + PASS/FAIL ----
   console.log("\n=== REPLAY COMPARISON (computed theoretical vs expected) ===");
-  console.log("  ticker | computed        R      | expected     | user_R  | verdict");
-  console.log("  -------+-----------------------+--------------+---------+--------");
+  console.log("  ticker | computed        R      | expected           | user_R  | verdict");
+  console.log("  -------+-----------------------+--------------------+---------+--------");
   let allPass = true;
   for (const s of SETUPS) {
     const c = computed[s.ticker];
     const e = EXPECTED[s.ticker];
-    // Correctness gate: winners must fire and NOT stop/never_fire (ideally target).
-    // still_open ones must be unresolved (still_open/deferred), NOT stopped.
-    let pass: boolean;
-    if (e.winner) pass = c.fired && c.reason !== "stop" && c.reason !== "never_fired";
-    else pass = c.reason === "still_open";
+    // EXACT reason match, plus the R within tolerance when one is asserted. Replaces
+    // the old winner/not-stop heuristic, which would pass a wrong outcome as long as
+    // it was positive.
+    const reasonPass = c.reason === e.reason;
+    const rPass = e.approxR == null || (c.r != null && Math.abs(c.r - e.approxR) <= R_TOLERANCE);
+    const pass = reasonPass && rPass;
     if (!pass) allPass = false;
     const compStr = `${c.reason}`.padEnd(12) + fmtR(c.r);
-    console.log(`  ${s.ticker.padEnd(6)} | ${compStr.padEnd(21)} | ${e.reason.padEnd(12)} | ${fmtR(userR[s.ticker])} | ${pass ? "PASS" : "*** FAIL ***"}${c.note ? "  (" + c.note + ")" : ""}`);
+    const why = !reasonPass
+      ? `reason ≠ ${e.reason}`
+      : !rPass
+        ? `R off by >${R_TOLERANCE} vs ${fmtR(e.approxR)}`
+        : "";
+    const expStr = `${e.reason}${e.approxR != null ? ` ${fmtR(e.approxR)}` : ""}`;
+    console.log(
+      `  ${s.ticker.padEnd(6)} | ${compStr.padEnd(21)} | ${expStr.padEnd(18)} | ${fmtR(userR[s.ticker])} | ` +
+        `${pass ? "PASS" : `*** FAIL *** ${why}`}${c.note ? "  (" + c.note + ")" : ""}`
+    );
   }
-  console.log(`\n  ${allPass ? "✅ REPLAY VALIDATION PASSED — computed ≈ expected for all 6" : "❌ REPLAY VALIDATION FAILED — see FAIL rows above (investigate replay logic, not paper over)"}`);
-  console.log("\n  Note EXPD: theoretical target_hit (~+1.1R, setup ran to ~181) vs your actual");
-  console.log("  +0.4R (exited early at 172.30) — the theoretical-vs-execution divergence.");
+  console.log(`\n  ${allPass ? "✅ REPLAY VALIDATION PASSED — computed == expected for all 6" : "❌ REPLAY VALIDATION FAILED — see FAIL rows above (investigate the replay or re-verify the data; do NOT edit EXPECTED to pass)"}`);
+  console.log("\n  Note EXPD: theoretical target hit (+0.71R) vs your actual +0.4R (exited");
+  console.log("  early at 172.30, setup later ran to ~181) — theoretical-vs-execution divergence.");
+  console.log("  Note WELL: never_fired is CORRECT — no close cleared the 221.68 rim inside the");
+  console.log("  15-bar window (max close 218.61). You entered pre-breakout; the setup never");
+  console.log("  confirmed on the backtest's rule, so it contributes no paper trade.");
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
