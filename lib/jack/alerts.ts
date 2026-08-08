@@ -566,6 +566,30 @@ async function evaluateEntryConfirmations(
 
       // No TTL — exactly once per setup, for the setup's lifetime.
       if (await fireOnce(alert, key)) fired++;
+
+      // BOARD FLAG — same detection that just fired the alert, persisted so the board
+      // shows the fire without waiting for the weekly re-VALIDATE. Derived from the
+      // SAME `resolved`/`late` branch evalEntryConfirmed used, so the badge and the
+      // Telegram text can never disagree.
+      //
+      // Written AFTER the send and wrapped: a DB hiccup must never throw out of the
+      // EOD pass or block an alert. Set-once in SQL (fired_at IS NULL), and because
+      // the loop short-circuits on the Redis marker, fired_status is captured at FIRST
+      // detection and deliberately not chased afterwards — a 'confirmed' fire that
+      // later resolves stays 'confirmed' on the board until the next VALIDATE or until
+      // the user trades it. The entry_resolved alert and the outcome tracker cover
+      // true resolution; the board's job here is "this fired, act or not".
+      try {
+        const dbWrite = require("@/lib/db/write") as typeof import("@/lib/db/write");
+        dbWrite.markDecisionFired(s.decisionId, {
+          firedAt: etDate,
+          fireClose: fire.fireClose as number,
+          fireBar: fire.fireBarIndex as number,
+          firedStatus: resolved ? "resolved" : late ? "late" : "confirmed",
+        });
+      } catch (err) {
+        console.error(`JACK fired-flag persist failed for ${s.ticker} (alert already sent):`, err);
+      }
     } catch (err) {
       // A single bad setup must never take down the pass.
       console.error(`JACK entry-confirm failed for ${s.ticker}:`, err);

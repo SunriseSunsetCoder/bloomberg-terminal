@@ -339,6 +339,11 @@ export interface CurrentBoardRow {
   tier: string | null;
   priority: number | null;
   sizeBucket: string | null;
+  // Close-confirmed FIRE flag (display status; `section` is unchanged by a fire).
+  firedAt: string | null;
+  fireClose: number | null;
+  fireBar: number | null;
+  firedStatus: "confirmed" | "late" | "resolved" | null;
 }
 
 /**
@@ -393,6 +398,10 @@ export function getCurrentBoard(): { runId: number | null; live: CurrentBoardRow
          s.tier             AS tier,
          s.priority         AS priority,
          s.size_bucket      AS sizeBucket,
+         d.fired_at         AS firedAt,
+         d.fire_close       AS fireClose,
+         d.fire_bar         AS fireBar,
+         d.fired_status     AS firedStatus,
          um.user_action     AS userAction,
          o.user_exit_price  AS userExitPrice,
          s.retired_at       AS retiredAt
@@ -427,6 +436,8 @@ export function getCurrentBoard(): { runId: number | null; live: CurrentBoardRow
 
 export interface PendingSetupRow {
   setupId: number;
+  /** The CURRENT RUN's decision row for this setup — the row markDecisionFired stamps. */
+  decisionId: number;
   ticker: string;
   handleLowDate: string;
   entry: number | null;
@@ -437,6 +448,11 @@ export interface PendingSetupRow {
   tier: string | null;
   priority: number | null;
   sizeBucket: string | null;
+  // Close-confirmed FIRE flag (display status only — never a scoping input).
+  firedAt: string | null;
+  fireClose: number | null;
+  fireBar: number | null;
+  firedStatus: "confirmed" | "late" | "resolved" | null;
 }
 
 /**
@@ -470,6 +486,7 @@ export function getPendingSetups(): PendingSetupRow[] {
     .filter((r) => r.retiredAt == null)
     .map((r) => ({
       setupId: r.setupId,
+      decisionId: r.decisionId,
       ticker: r.ticker,
       handleLowDate: r.handleLowDate,
       entry: r.entry,
@@ -479,7 +496,60 @@ export function getPendingSetups(): PendingSetupRow[] {
       tier: r.tier,
       priority: r.priority,
       sizeBucket: r.sizeBucket,
+      firedAt: r.firedAt,
+      fireClose: r.fireClose,
+      fireBar: r.fireBar,
+      firedStatus: r.firedStatus,
     }));
+}
+
+export interface FiredFlag {
+  firedAt: string;
+  fireClose: number | null;
+  fireBar: number | null;
+  firedStatus: "confirmed" | "late" | "resolved";
+}
+
+/**
+ * Fire flags for the board's re-hydration path, keyed by setup_id. Read-only.
+ *
+ * Resolved PER SETUP (latest non-null fired_at across all of the setup's decision
+ * rows), NOT per current-run decision row. That matters: a weekly re-VALIDATE inserts
+ * FRESH decision rows with fired_at NULL, and the EOD entry loop's once-per-setup Redis
+ * marker stops it from re-stamping — so a per-row read would drop the badge every
+ * Friday. The flag belongs to the setup's lifetime, so it is read that way.
+ *
+ * Display only — never an input to scoping, eligibility, or the owned/retired rules.
+ */
+export function getFiredFlagsForSetups(setupIds: number[]): Map<number, FiredFlag> {
+  const flags = new Map<number, FiredFlag>();
+  if (setupIds.length === 0) return flags;
+
+  const db = getDb();
+  const placeholders = setupIds.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT d.setup_id AS setupId, d.fired_at AS firedAt, d.fire_close AS fireClose,
+              d.fire_bar AS fireBar, d.fired_status AS firedStatus
+         FROM decisions d
+         JOIN (
+                SELECT setup_id, MAX(id) AS max_id
+                  FROM decisions
+                 WHERE fired_at IS NOT NULL AND setup_id IN (${placeholders})
+                 GROUP BY setup_id
+              ) latest ON latest.max_id = d.id`
+    )
+    .all(...setupIds) as Array<{ setupId: number } & FiredFlag>;
+
+  for (const r of rows) {
+    flags.set(r.setupId, {
+      firedAt: r.firedAt,
+      fireClose: r.fireClose,
+      fireBar: r.fireBar,
+      firedStatus: r.firedStatus,
+    });
+  }
+  return flags;
 }
 
 export function markDecisionUserAction(

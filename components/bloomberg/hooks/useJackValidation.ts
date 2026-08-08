@@ -49,6 +49,14 @@ export interface JackDecisionClient {
   // Frozen decision-time context (marked rows only).
   jackDecisionAtMark: string | null;
   sharesAtMark: number | null;
+  // Close-confirmed FIRE flag (display status). Set by the 18:00 EOD entry pass;
+  // `section` is NOT changed by a fire — Phase 2 re-sections for display only.
+  firedAt?: string | null;
+  fireClose?: number | null;
+  fireBar?: number | null;
+  firedStatus?: "confirmed" | "late" | "resolved" | null;
+  /** The DB section BEFORE any DISPLAY re-sectioning (set only when a row moves). */
+  dbSection?: "live" | "pending" | null;
   // ---- handle_score signal (recommendation; the user decides + sizes) ----
   handleScore?: number | null;
   sizeBucket?: "full" | "half" | "skip" | null;

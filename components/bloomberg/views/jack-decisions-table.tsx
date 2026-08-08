@@ -6,6 +6,7 @@ import type { JackDecisionClient } from "@/components/bloomberg/hooks/useJackVal
 import { CandleThumbnail } from "@/components/bloomberg/ui/candle-thumbnail";
 import { CandleChartModal } from "@/components/bloomberg/ui/candle-chart-modal";
 import { classifyVerdict, signalsDisagree } from "@/lib/jack/verdict";
+import { computeSectionRanks, dbSectionOf, rankKey } from "@/lib/jack/combine-decisions";
 
 // ============================================================================
 // JACK decision surface (UI v2). ONE expandable row per setup, in two preserved
@@ -236,6 +237,8 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     (async () => {
       try {
         const res = await fetch(`/api/jack-decisions?setupIds=${setupIds.join(",")}`);
+        // marks/fills only — the FIRE flags are polled by useJackFiredFlags in
+        // jack-view and arrive on props, so combineJackDecisions can re-section on them.
         const json = (await res.json()) as { marks?: Record<string, MarkDto> };
         if (cancelled || !json.marks) return;
         setRows(seedRows(overlayMarks(decisions, json.marks)));
@@ -326,28 +329,16 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   const liveDecisions = useMemo(() => decisions.filter((d) => d.section === "live"), [decisions]);
   const pendingDecisions = useMemo(() => decisions.filter((d) => d.section === "pending"), [decisions]);
 
-  // Ordinal priority rank shown on the row as "P1", "P2", … (P1 = the single best
-  // pick this week). Derived purely from POSITION: liveDecisions is already sorted
-  // by priority DESC (buildClientDecisions), so we number the LIVE rows that carry
-  // a non-null priority 1..N in that order. The underlying priority FLOAT is
-  // untouched (still the sort + persistence key) — this is display only. Keyed by
-  // section|ticker|date so ONLY live priority-bearing rows resolve a rank; nulls,
-  // pending, and open rows get no entry (→ no P-label), matching prior behavior.
-  const priorityRank = useMemo(() => {
-    const m = new Map<string, number>();
-    let n = 0;
-    for (const d of liveDecisions) {
-      // Owned setups (marked TRADED) are positions to manage, not candidates to
-      // rank — they consume no P-number (P1..N covers only setups you can still
-      // deploy into). Defensive: TRADED rows normally route to CURRENT POSITIONS
-      // (combineJackDecisions) so they aren't in liveDecisions anyway.
-      if (d.userAction === "TRADED") continue;
-      if (d.priority == null) continue;
-      n += 1; // ties increment normally in the stable sorted order
-      m.set(`${d.section}|${d.ticker}|${d.handleLowDate}`, n);
-    }
-    return m;
-  }, [liveDecisions]);
+  // Ordinal priority rank shown as "P1", "P2", … — TWO INDEPENDENT sequences, each
+  // numbered from P1 and each computed over the DB section (dbSection ?? section),
+  // i.e. BEFORE any display re-sectioning:
+  //   · LIVE ranks    — this run's live rows
+  //   · PENDING ranks — this run's pending rows, ranked among themselves ("as if it
+  //                     breaks")
+  // A pending setup that FIRES renders in the LIVE group but keeps its PENDING rank
+  // and never joins the live population — so a fire cannot renumber the live ranks.
+  // The blend (priority DESC → bucket → handle_score) lives in computePriorityRanks.
+  const sectionRanks = useMemo(() => computeSectionRanks(decisions), [decisions]);
 
   if (decisions.length === 0) return null;
 
@@ -474,6 +465,50 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
         {d.sector}
       </span>
     ) : null;
+  // Close-confirmed FIRE badge. The flag arrives on the decision row (polled by
+  // useJackFiredFlags in jack-view, which also feeds combineJackDecisions' display
+  // re-section) — a 'confirmed'/'late' row is rendered under LIVE, a 'resolved' one
+  // stays where it is and gets the muted tag.
+  const firedBadge = (d: JackDecisionClient) => {
+    if (!d.firedStatus || !d.firedAt) return null;
+    const detail = [
+      d.fireClose != null ? `close ${d.fireClose.toFixed(2)}` : null,
+      d.fireBar != null ? `bar ${d.fireBar}/15` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    if (d.firedStatus === "resolved") {
+      return (
+        <span
+          className={`text-[10px] px-1 py-0.5 rounded border ${border} ${subFg} whitespace-nowrap shrink-0`}
+          title={`Close-confirmed fire on ${d.firedAt}, and the trade has already hit its stop or target — not actionable, so it stays out of the LIVE group.${detail ? ` (${detail})` : ""}`}
+        >
+          fired · resolved
+        </span>
+      );
+    }
+
+    const late = d.firedStatus === "late";
+    return (
+      <span className="inline-flex items-center gap-1 shrink-0">
+        <span
+          className={`text-[10px] px-1 py-0.5 rounded border font-bold whitespace-nowrap ${
+            late ? "border-amber-600 text-amber-400" : "border-green-600 text-green-400"
+          }`}
+          title={
+            late
+              ? `Close-confirmed fire on ${d.firedAt} — earlier than today, so entering now is off-parity vs the backtest fill.`
+              : "Close confirmed above the rim. The backtest fill is the NEXT session's open."
+          }
+        >
+          {late ? `🔥 FIRED ${d.firedAt}` : "🔥 FIRED · buy next open"}
+        </span>
+        {detail && <span className={`text-[10px] ${subFg} whitespace-nowrap`}>{detail}</span>}
+      </span>
+    );
+  };
+
   // "exited" marker — a TRADED setup with a recorded exit that is firing AGAIN this
   // week (so it routes to LIVE, not CURRENT POSITIONS). Distinguishes it from a
   // never-traded candidate; it deliberately carries NO P-rank (re-entry is a choice).
@@ -490,12 +525,19 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     ) : null;
   const priorityLabel = (d: JackDecisionClient) =>
     (() => {
-      const rank = priorityRank.get(`${d.section}|${d.ticker}|${d.handleLowDate}`);
+      const from = dbSectionOf(d);
+      if (from === "open") return null;
+      const rank = (from === "live" ? sectionRanks.live : sectionRanks.pending).get(rankKey(d));
       if (rank == null) return null;
+      const pendingRank = from === "pending";
       return (
         <span
           className={`text-[10px] ${subFg} whitespace-nowrap shrink-0`}
-          title="LIVE priority rank — 1 is the highest-priority (best) setup this week. Ranks the priority-bearing LIVE rows in sorted order."
+          title={
+            pendingRank
+              ? "PENDING priority rank — 1 is the best of this week's pending setups, ranked among themselves as if it breaks. Independent of the LIVE ranks; a fired setup keeps this number."
+              : "LIVE priority rank — 1 is the highest-priority (best) live setup this week. Independent of the PENDING ranks."
+          }
         >
           {`P${rank}`}
         </span>
@@ -961,6 +1003,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
           {sectorLabel(d)}
           {priorityLabel(d)}
           {exitedLabel(d)}
+          {firedBadge(d)}
           {disagreeFlag(shownAnalysisVerdict, d)}
           <span className={`text-[11px] ${subFg} whitespace-nowrap shrink-0`}>
             {d.stop != null ? d.stop.toFixed(2) : "—"} <span className="opacity-60">→</span>{" "}

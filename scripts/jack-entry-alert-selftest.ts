@@ -361,6 +361,56 @@ console.log("\n[13] LATE ENTRY that already played out → ALREADY RESOLVED, nev
 }
 
 // ===========================================================================
+console.log("\n[14] Board FIRED flag mirrors the alert classification exactly");
+// ===========================================================================
+{
+  // The EOD pass derives firedStatus from the SAME `resolved`/`late` branch that
+  // picks the alert wording, so the badge and the Telegram text can never disagree.
+  // This mirrors that derivation and asserts it against the alert type.
+  const firedStatusFor = (
+    fireDate: string,
+    etDate: string,
+    resolved: { kind: "stop" | "target"; date: string } | null
+  ): "confirmed" | "late" | "resolved" => {
+    const late = fireDate < etDate;
+    return late && resolved ? "resolved" : late ? "late" : "confirmed";
+  };
+
+  const cases: Array<{
+    label: string;
+    fireDate: string;
+    etDate: string;
+    resolved: { kind: "stop" | "target"; date: string } | null;
+    expectStatus: "confirmed" | "late" | "resolved";
+    expectType: string;
+  }> = [
+    { label: "same-day fire", fireDate: dateAt(3), etDate: dateAt(3), resolved: null, expectStatus: "confirmed", expectType: "entry_confirmed" },
+    { label: "earlier fire, still open", fireDate: dateAt(1), etDate: dateAt(4), resolved: null, expectStatus: "late", expectType: "late_entry" },
+    { label: "earlier fire, stopped out", fireDate: dateAt(1), etDate: dateAt(4), resolved: { kind: "stop", date: dateAt(3) }, expectStatus: "resolved", expectType: "entry_resolved" },
+    { label: "earlier fire, hit target", fireDate: dateAt(1), etDate: dateAt(4), resolved: { kind: "target", date: dateAt(3) }, expectStatus: "resolved", expectType: "entry_resolved" },
+    // A resolved payload on a same-day fire is impossible (the fill hasn't happened);
+    // both the alert and the flag must ignore it rather than disagree.
+    { label: "same-day fire with a bogus resolved payload", fireDate: dateAt(3), etDate: dateAt(3), resolved: { kind: "stop", date: dateAt(3) }, expectStatus: "confirmed", expectType: "entry_confirmed" },
+  ];
+
+  for (const c of cases) {
+    const status = firedStatusFor(c.fireDate, c.etDate, c.resolved);
+    const alert = mkAlert(c.fireDate, c.etDate, 3, 2, c.resolved);
+    check(`${c.label} → firedStatus '${c.expectStatus}'`, status === c.expectStatus, status);
+    check(`  alert type is ${c.expectType}`, alert.type === c.expectType, alert.type);
+    // The pairing itself is the invariant: one status per alert type, always.
+    const pairing: Record<string, string> = {
+      entry_confirmed: "confirmed",
+      late_entry: "late",
+      entry_resolved: "resolved",
+    };
+    check(`  status and alert type agree`, pairing[alert.type] === status, `${alert.type} vs ${status}`);
+  }
+
+  check("every fired classification maps to a persisted status", ["confirmed", "late", "resolved"].every((s) => cases.some((c) => c.expectStatus === s)));
+}
+
+// ===========================================================================
 // [8] + [9] — properties of the pending ACCESSOR, against a real DB.
 // ===========================================================================
 const dir = mkdtempSync(join(tmpdir(), "jack-entry-alert-"));

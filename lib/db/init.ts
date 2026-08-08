@@ -77,6 +77,14 @@ function runMigrations(database: Database.Database): void {
     // even if the setup is later re-ingested with a refreshed score.
     { name: "handle_score_at_mark", def: "REAL" },
     { name: "size_bucket_at_mark", def: "TEXT" },
+    // Close-confirmed FIRE flag (additive): written by the 18:00 EOD entry pass so the
+    // board can show a fired setup without waiting for the weekly re-VALIDATE. This is
+    // DISPLAY STATUS ONLY — `section` stays the scoping key for the alert/refresh
+    // system and is never mutated. See markDecisionFired in lib/db/write.ts.
+    { name: "fired_at", def: "TEXT" },
+    { name: "fire_close", def: "REAL" },
+    { name: "fire_bar", def: "INTEGER" },
+    { name: "fired_status", def: "TEXT" },
   ]);
   // handle_score signal (additive): the validated CwH handle-quality score + its
   // sizing directive, carried on every setup. Read from the weekly watchlist CSV

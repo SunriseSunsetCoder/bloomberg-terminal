@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database, RefreshCw, DollarSign, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useJackValidation } from "@/components/bloomberg/hooks/useJackValidation";
 import { useJackOpenPositions } from "@/components/bloomberg/hooks/useJackOpenPositions";
+import { useJackFiredFlags } from "@/components/bloomberg/hooks/useJackFiredFlags";
 import { JackDecisionsTable } from "@/components/bloomberg/views/jack-decisions-table";
 import { combineJackDecisions } from "@/lib/jack/combine-decisions";
 
@@ -57,14 +58,35 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
   // is authoritative — the next VALIDATE reads the same exit, making this redundant
   // (never contradictory), so we never need to clear it.
   const [localExits, setLocalExits] = useState<Record<number, { price: number; date: string | null }>>({});
+
+  // Close-confirmed FIRE flags, polled on the same 180s cadence as the open-position
+  // board. The validation response is frozen at VALIDATE time, so this is what lets an
+  // 18:00 fire re-section a row to LIVE on an already-open terminal, unattended.
+  const setupIds = useMemo(
+    () =>
+      Array.from(
+        new Set((data?.decisions ?? []).map((d) => d.setupId).filter((x): x is number => x != null))
+      ),
+    [data?.decisions]
+  );
+  const { data: firedFlags } = useJackFiredFlags(setupIds);
+
   const combinedDecisions = useMemo(() => {
-    const runDecisions = (data?.decisions ?? []).map((d) =>
-      d.setupId != null && localExits[d.setupId]
-        ? { ...d, userExitPrice: localExits[d.setupId].price, userExitDate: localExits[d.setupId].date }
-        : d
-    );
+    const runDecisions = (data?.decisions ?? []).map((d) => {
+      let row = d;
+      if (d.setupId != null && localExits[d.setupId]) {
+        row = { ...row, userExitPrice: localExits[d.setupId].price, userExitDate: localExits[d.setupId].date };
+      }
+      // Overlay the freshly-polled flag BEFORE combining, so combineJackDecisions can
+      // do the display re-section (fired → LIVE group) on current data.
+      const f = d.setupId != null ? firedFlags?.[String(d.setupId)] : undefined;
+      if (f) {
+        row = { ...row, firedAt: f.firedAt, fireClose: f.fireClose, fireBar: f.fireBar, firedStatus: f.firedStatus };
+      }
+      return row;
+    });
     return combineJackDecisions(runDecisions, openData?.positions ?? []);
-  }, [data?.decisions, openData?.positions, localExits]);
+  }, [data?.decisions, openData?.positions, localExits, firedFlags]);
 
   // "Update Outcomes" trigger (Session B, Deliverable 3) — POST the tracker,
   // toast the summary. React state only, no storage.

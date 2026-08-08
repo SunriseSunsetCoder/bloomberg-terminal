@@ -9,7 +9,7 @@
  *
  * Run:  npx tsx scripts/jack-combine-decisions-selftest.ts
  */
-import { combineJackDecisions } from "../lib/jack/combine-decisions";
+import { combineJackDecisions, computeSectionRanks, rankKey } from "../lib/jack/combine-decisions";
 import type { JackDecisionClient } from "../components/bloomberg/hooks/useJackValidation";
 
 let passed = 0;
@@ -133,6 +133,146 @@ console.log("\n[5b] Stale open fetch lists the exited setup → still routes to 
   const out = combineJackDecisions(run, open);
   const sec = bySetup(out, 1).map((r) => r.section);
   check("stale open row dropped; exited setup → live only", sec.length === 1 && sec[0] === "live", sec.join(","));
+}
+
+// ---- 6. FIRED display re-section (Phase 2) --------------------------------
+// A close-confirmed fire moves the row into the LIVE display group WITHOUT the DB's
+// decisions.section ever changing — that column is the scoping key for the price
+// refresh + alert passes and must keep saying 'pending'.
+console.log("\n[6] FIRED rows re-section to LIVE for display only");
+{
+  const run = [
+    mk({ setupId: 1, ticker: "CONF", section: "pending", firedStatus: "confirmed", firedAt: "2026-08-07", fireClose: 101.5, fireBar: 3 }),
+    mk({ setupId: 2, ticker: "LATE", section: "pending", firedStatus: "late", firedAt: "2026-08-04" }),
+    mk({ setupId: 3, ticker: "RESOLV", section: "pending", firedStatus: "resolved", firedAt: "2026-08-03" }),
+    mk({ setupId: 4, ticker: "QUIET", section: "pending" }),
+    mk({ setupId: 5, ticker: "ALREADYLIVE", section: "live", firedStatus: "confirmed", firedAt: "2026-08-07" }),
+  ];
+  const out = combineJackDecisions(run, []);
+  const sec = (id: number) => bySetup(out, id).map((r) => r.section).join(",");
+
+  check("fired 'confirmed' pending -> live", sec(1) === "live", sec(1));
+  check("fired 'late' pending -> live", sec(2) === "live", sec(2));
+  check("fired 'resolved' -> STAYS pending (not actionable)", sec(3) === "pending", sec(3));
+  check("unfired pending -> unchanged", sec(4) === "pending", sec(4));
+  check("already-live fired row -> still live (no double move)", sec(5) === "live", sec(5));
+
+  const conf = bySetup(out, 1)[0];
+  check("re-sectioned row keeps its flag payload for the badge", conf.firedStatus === "confirmed" && conf.fireClose === 101.5 && conf.fireBar === 3);
+  check("re-sectioned row keeps ticker/geometry", conf.ticker === "CONF");
+
+  const ids = out.map((r) => r.setupId);
+  check("every setup in exactly one section", ids.length === new Set(ids).size && new Set(ids).size === 5, ids.join(","));
+  check("nothing vanished", out.length === 5, String(out.length));
+}
+
+// ---- 6b. OWNED WINS over a fire ------------------------------------------
+console.log("\n[6b] Owned still wins over a fired flag");
+{
+  const run = [mk({ setupId: 1, ticker: "OWNEDFIRE", section: "pending", userAction: "TRADED", userExitPrice: null, firedStatus: "confirmed", firedAt: "2026-08-07" })];
+  const open = [mk({ setupId: 1, ticker: "OWNEDFIRE", section: "open", userAction: "TRADED", userExitPrice: null })];
+  const out = combineJackDecisions(run, open);
+  const sec = bySetup(out, 1).map((r) => r.section);
+  check("owned + fired -> open only, never live", sec.length === 1 && sec[0] === "open", sec.join(","));
+}
+{
+  // Owned but the open fetch hasn't caught up: the fall-through guard must still send
+  // it to "open", not let the fire re-section it to live.
+  const run = [mk({ setupId: 1, ticker: "RACE", section: "pending", userAction: "TRADED", userExitPrice: null, firedStatus: "late", firedAt: "2026-08-05" })];
+  const out = combineJackDecisions(run, []);
+  const sec = bySetup(out, 1).map((r) => r.section);
+  check("owned+fired with a lagging open fetch -> open (guard beats the fire)", sec.length === 1 && sec[0] === "open", sec.join(","));
+}
+{
+  // A traded-then-EXITED setup is NOT owned; if it fired again it should route live.
+  const run = [mk({ setupId: 1, ticker: "REFIRE", section: "pending", userAction: "TRADED", userExitPrice: 42, userExitDate: "2026-08-01", firedStatus: "confirmed", firedAt: "2026-08-07" })];
+  const out = combineJackDecisions(run, []);
+  const sec = bySetup(out, 1).map((r) => r.section);
+  check("exited + fired again -> live (exit means not owned)", sec.length === 1 && sec[0] === "live", sec.join(","));
+}
+
+// ---- 7. P-RANK: two independent sequences, immune to a fire ---------------
+// LIVE rows and PENDING rows are ranked in SEPARATE populations, each from P1, both
+// taken from the DB section (dbSection ?? section) so a display move can't reshuffle
+// them. Blend = priority DESC -> size bucket -> handle_score DESC.
+console.log("\n[7] P-rank: independent LIVE and PENDING sequences");
+{
+  const board = (firedTicker: string | null) => [
+    mk({ setupId: 1, ticker: "L1", section: "live", priority: 9.0, sizeBucket: "full", handleScore: 0.8 }),
+    mk({ setupId: 2, ticker: "L2", section: "live", priority: 6.0, sizeBucket: "full", handleScore: 0.7 }),
+    mk({ setupId: 3, ticker: "L3", section: "live", priority: 3.0, sizeBucket: "full", handleScore: 0.6 }),
+    mk({
+      setupId: 4, ticker: "P1T", section: "pending", priority: 8.0, sizeBucket: "full", handleScore: 0.75,
+      ...(firedTicker === "P1T" ? { firedStatus: "confirmed" as const, firedAt: "2026-08-07" } : {}),
+    }),
+    mk({ setupId: 5, ticker: "P2T", section: "pending", priority: 5.0, sizeBucket: "full", handleScore: 0.65 }),
+  ];
+
+  const ranksOf = (firedTicker: string | null) => {
+    const out = combineJackDecisions(board(firedTicker), []);
+    const r = computeSectionRanks(out);
+    const byTicker = new Map(out.map((d) => [d.ticker, d]));
+    const rank = (t: string) => {
+      const d = byTicker.get(t)!;
+      const from = d.dbSection ?? d.section;
+      return (from === "live" ? r.live : r.pending).get(rankKey(d)) ?? null;
+    };
+    return { out, rank, byTicker };
+  };
+
+  // (2) pending rows carry their OWN sequence starting at P1
+  {
+    const { rank } = ranksOf(null);
+    check("live rows rank P1..P3 by priority", rank("L1") === 1 && rank("L2") === 2 && rank("L3") === 3, `${rank("L1")},${rank("L2")},${rank("L3")}`);
+    check("pending rows rank from P1 among THEMSELVES", rank("P1T") === 1 && rank("P2T") === 2, `${rank("P1T")},${rank("P2T")}`);
+    check("pending P1 is not the live P1 (separate populations)", rank("P1T") === 1 && rank("L1") === 1);
+  }
+
+  // (1) live ranks identical with and without a fire
+  {
+    const before = ranksOf(null);
+    const after = ranksOf("P1T");
+    const seq = (r: ReturnType<typeof ranksOf>) => ["L1", "L2", "L3"].map(r.rank).join(",");
+    check("live P-ranks are UNCHANGED when a pending row fires", seq(before) === seq(after), `${seq(before)} vs ${seq(after)}`);
+    check("  and are still 1,2,3", seq(after) === "1,2,3", seq(after));
+  }
+
+  // (3) a fired row displays in the live group but keeps its PENDING rank
+  {
+    const { out, rank, byTicker } = ranksOf("P1T");
+    check("fired pending row is displayed in the LIVE group", byTicker.get("P1T")!.section === "live");
+    check("  but its dbSection still says pending", byTicker.get("P1T")!.dbSection === "pending");
+    check("  and it shows its PENDING rank (P1), not a live rank", rank("P1T") === 1, String(rank("P1T")));
+    check("  the other pending row keeps P2", rank("P2T") === 2, String(rank("P2T")));
+    const liveGroup = out.filter((d) => d.section === "live").map((d) => d.ticker);
+    check("  live display group now holds 4 rows", liveGroup.length === 4, liveGroup.join(","));
+    check("  no live rank was consumed by the fired row", computeSectionRanks(out).live.size === 3, String(computeSectionRanks(out).live.size));
+  }
+
+  // TRADED and priority-less rows consume no number (prior behaviour preserved)
+  {
+    const rows = [
+      mk({ setupId: 1, ticker: "A", section: "live", priority: 9, userAction: "TRADED", userExitPrice: null }),
+      mk({ setupId: 2, ticker: "B", section: "live", priority: 8 }),
+      mk({ setupId: 3, ticker: "C", section: "live", priority: null }),
+      mk({ setupId: 4, ticker: "D", section: "live", priority: 7 }),
+    ];
+    const r = computeSectionRanks(rows).live;
+    check("owned row consumes no P-number", !r.has("A|2026-07-10"));
+    check("priority-less row consumes no P-number", !r.has("C|2026-07-10"));
+    check("remaining rows number 1,2", r.get("B|2026-07-10") === 1 && r.get("D|2026-07-10") === 2, `${r.get("B|2026-07-10")},${r.get("D|2026-07-10")}`);
+  }
+
+  // Tie on priority falls through to bucket then handle_score
+  {
+    const rows = [
+      mk({ setupId: 1, ticker: "TIEA", section: "pending", priority: 5, sizeBucket: "half", handleScore: 0.9 }),
+      mk({ setupId: 2, ticker: "TIEB", section: "pending", priority: 5, sizeBucket: "full", handleScore: 0.4 }),
+      mk({ setupId: 3, ticker: "TIEC", section: "pending", priority: 5, sizeBucket: "full", handleScore: 0.8 }),
+    ];
+    const r = computeSectionRanks(rows).pending;
+    check("priority tie -> bucket then score decides", r.get("TIEC|2026-07-10") === 1 && r.get("TIEB|2026-07-10") === 2 && r.get("TIEA|2026-07-10") === 3, [r.get("TIEC|2026-07-10"), r.get("TIEB|2026-07-10"), r.get("TIEA|2026-07-10")].join(","));
+  }
 }
 
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed`);

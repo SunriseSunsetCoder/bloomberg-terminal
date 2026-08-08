@@ -255,6 +255,51 @@ export function insertDecisions(
 }
 
 // ============================================================================
+// Close-confirmed FIRE flag — board display status, NOT scoping
+// ============================================================================
+
+export type FiredStatus = "confirmed" | "late" | "resolved";
+
+export interface FiredMark {
+  /** ET date the fire was FIRST detected. */
+  firedAt: string;
+  fireClose: number;
+  /** 1-based bar index within the 15-bar confirm window. */
+  fireBar: number;
+  firedStatus: FiredStatus;
+}
+
+/**
+ * Stamp a decision row with the close-confirmed fire detected by the 18:00 EOD pass.
+ *
+ * SET-ONCE: the `fired_at IS NULL` guard makes this idempotent — the first detection
+ * wins and every later pass is a no-op. Returns the number of rows changed (0 when
+ * already stamped), so callers can log without re-reading.
+ *
+ * CRITICAL: this writes DISPLAY STATUS only. `decisions.section` is the scoping key
+ * behind getPendingSetups() → the intraday price refresh, the alert ticker batch, and
+ * the EOD entry/earnings passes. It is deliberately NOT touched here: flipping a fired
+ * setup to 'live' would silently drop it out of the refresh + alert-eligible set.
+ */
+export function markDecisionFired(decisionId: number, mark: FiredMark): number {
+  const db = getDb();
+  const apply = db.transaction(() =>
+    db
+      .prepare(
+        `UPDATE decisions
+            SET fired_at     = @firedAt,
+                fire_close   = @fireClose,
+                fire_bar     = @fireBar,
+                fired_status = @firedStatus
+          WHERE id = @decisionId
+            AND fired_at IS NULL`
+      )
+      .run({ decisionId, ...mark }).changes
+  );
+  return apply();
+}
+
+// ============================================================================
 // Watchlist retirement — keeps the pending set from accumulating stale ideas
 // ============================================================================
 

@@ -59,10 +59,18 @@ export async function GET(req: NextRequest) {
     const map = dbRead.getUserMarksForSetups(setupIds);
     const marks: Record<string, import("@/lib/db/read").UserMark> = {};
     for (const [setupId, mark] of map) marks[String(setupId)] = mark;
-    return NextResponse.json({ marks });
+
+    // Close-confirmed FIRE flags. This is the ONLY path that refreshes board rows
+    // without a re-VALIDATE (the validation response is cached in a Jotai atom), so
+    // it is what makes a fire visible the evening it happens.
+    const firedMap = dbRead.getFiredFlagsForSetups(setupIds);
+    const fired: Record<string, import("@/lib/db/read").FiredFlag> = {};
+    for (const [setupId, flag] of firedMap) fired[String(setupId)] = flag;
+
+    return NextResponse.json({ marks, fired });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ marks: {}, error: msg }, { status: 500 });
+    return NextResponse.json({ marks: {}, fired: {}, error: msg }, { status: 500 });
   }
 }
 

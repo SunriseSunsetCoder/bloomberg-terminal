@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS decisions (
     -- this preserves the decision-time context Session C needs (additive; NULL
     -- until the row is marked).
     jack_decision_at_mark TEXT,
+    -- Close-confirmed FIRE flag, written by the 18:00 EOD entry pass (detectFire).
+    -- DISPLAY STATUS ONLY — `section` remains the scoping key for the alert/refresh
+    -- system and is never mutated by a fire. Set once, at first detection.
+    fired_at              TEXT,    -- ET date the fire was FIRST detected (NULL = unfired)
+    fire_close            REAL,    -- the confirming close
+    fire_bar              INTEGER, -- bar index within the 15-bar confirm window
+    fired_status          TEXT,    -- 'confirmed' | 'late' | 'resolved'
     CHECK (section IN ('live', 'pending')),
     CHECK (user_action IS NULL OR user_action IN ('TRADED', 'PASSED', 'WATCHED'))
 );
