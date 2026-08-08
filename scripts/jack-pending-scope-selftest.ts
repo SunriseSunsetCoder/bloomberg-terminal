@@ -35,7 +35,7 @@ async function main(): Promise<void> {
   const write = await import("../lib/db/write");
   const read = await import("../lib/db/read");
   const { combineJackDecisions } = await import("../lib/jack/combine-decisions");
-  const { evalStopHit, evalApproachStop } = await import("../lib/jack/alerts");
+  const { evalStopHit, evalApproachStop, buildIntradayAlerts } = await import("../lib/jack/alerts");
   const { getDb } = await import("../lib/db/init");
   const db = getDb();
 
@@ -244,6 +244,43 @@ async function main(): Promise<void> {
   check("open AAA still fires a stop-hit alert", !!aaa && evalStopHit(aaa.ticker, 94, aaa.stop) !== null);
   check("open AAA still fires an approach-stop heads-up", !!aaa && evalApproachStop(aaa.ticker, 96.5, aaa.stop) !== null);
   check("open AAA is not double-counted into pending", !alertSet.includes("AAA"));
+
+  // ---- 3b. INTRADAY SCOPE: owned-positions ONLY (changed 2026-08-07) -------
+  // Pending setups get NO intraday Telegram alerts; the entry signal is solely the
+  // 18:00 EOD close-confirmed pass. Quotes are supplied for BOTH owned and pending
+  // tickers — the pending ones must produce nothing at all.
+  {
+    const openRows = read.getOpenPositions();
+    const pendingTickers = read.getPendingSetups().map((p) => p.ticker);
+    const quote = (ticker: string, tngoLast: number, prevClose: number) => ({
+      ticker, price: tngoLast, tngoLast, prevClose,
+    });
+    const quotes = [
+      // AAA is OWNED, sitting 1.6% above its 95 stop → approach-stop, and +12% on the
+      // day → big-move.
+      quote("AAA", 96.5, 86),
+      // Pending tickers: a textbook breakout cross AND a huge move. Under the old
+      // scope both would have alerted; now neither may.
+      ...pendingTickers.map((t) => quote(t, 130, 99)),
+    ];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const built = buildIntradayAlerts(openRows as any, quotes as any).filter(Boolean) as Array<{ type: string; ticker: string }>;
+    const tickersAlerted = [...new Set(built.map((a) => a.ticker))];
+
+    check("intraday alerts fire ONLY for owned tickers", sorted(tickersAlerted) === sorted(["AAA"]), tickersAlerted.join(","));
+    check(
+      "pending setups produce ZERO intraday alerts",
+      pendingTickers.every((t) => !tickersAlerted.includes(t)),
+      `pending=[${pendingTickers.join(",")}] alerted=[${tickersAlerted.join(",")}]`
+    );
+    check("no entry_trigger is emitted at all (dormant)", !built.some((a) => a.type === "entry_trigger"), built.map((a) => a.type).join(","));
+    check("owned position still gets approach-stop", built.some((a) => a.ticker === "AAA" && a.type === "approach_stop"));
+    check("owned position still gets big-move", built.some((a) => a.ticker === "AAA" && a.type === "big_move"));
+    check(
+      "a pending ticker with a textbook cross still yields nothing",
+      built.filter((a) => pendingTickers.includes(a.ticker)).length === 0
+    );
+  }
 
   // ---- 4. INGEST DOES NOT CLOBBER TRADED/EXITED STATE ----------------------
   const aaaAfter = db

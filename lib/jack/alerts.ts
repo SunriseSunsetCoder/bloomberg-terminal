@@ -121,7 +121,14 @@ export function evalBigMove(ticker: string, now: number | null, prevClose: numbe
   );
 }
 
-/** Same-day CROSS only: prevClose < level AND tngoLast >= level (not a standing "already above"). */
+/**
+ * DORMANT (2026-08-07) — nothing calls this. Intraday alerts are owned-positions-only;
+ * the entry signal comes solely from the EOD close-confirmed pass. Kept, exported and
+ * unit-tested, so the intraday entry heads-up can be switched back on without being
+ * rebuilt. Re-enabling means adding a pending loop back to evaluateIntradayAlerts.
+ *
+ * Same-day CROSS only: prevClose < level AND tngoLast >= level (not a standing "already above").
+ */
 export function evalEntryTrigger(
   ticker: string,
   prevClose: number | null,
@@ -398,20 +405,36 @@ export async function fireHealth(failure: HealthFailure, detail: string, etDate:
 // ============================================================
 
 /**
- * HEADS-UP evaluation from the intraday IEX quotes. Open positions get
- * approach-stop/target + big-move; pending setups (held-wins → excluded if also held)
- * get entry-trigger + big-move. tngoLast-null tickers are suppressed.
+ * HEADS-UP evaluation from the intraday IEX quotes — OWNED POSITIONS ONLY.
+ *
+ * Scope (changed 2026-08-07): intraday alerts cover positions you actually hold —
+ * approach-stop, approach-target, big-move. PENDING setups get NO intraday Telegram
+ * alerts at all. The entry signal is now solely the 18:00 EOD close-confirmed pass
+ * (evaluateEntryConfirmations), which fires on a daily CLOSE above the rim and is on
+ * backtest parity — unlike the intraday cross, which frequently reversed before the
+ * close and was labeled "not a system signal" for exactly that reason.
+ *
+ * Pending tickers are still price-refreshed by runIntradayMonitor so the board's NOW
+ * price stays live; this is an ALERTING scope change, not a refresh change.
+ *
+ * evalEntryTrigger and the "entry_trigger" AlertType remain in the file, unit-tested
+ * and DORMANT — nothing calls them. They are kept so the intraday entry heads-up can
+ * be re-enabled without rebuilding it.
+ *
+ * tngoLast-null tickers are suppressed (no fabricated alert off a stale close).
  */
-export async function evaluateIntradayAlerts(quotes: IexQuote[], now: Date): Promise<number> {
-  if (!alertsEnabled()) return 0;
-  const etDate = etDateISO(now);
+
+/**
+ * Pure alert construction for the intraday pass — no Redis, no Telegram, no DB. Split
+ * out so the owned-only SCOPE is directly testable: feed it quotes for owned AND
+ * pending tickers and the pending ones must produce nothing.
+ */
+export function buildIntradayAlerts(
+  open: Array<{ ticker: string; stop: number | null; target: number | null }>,
+  quotes: IexQuote[]
+): Array<Alert | null> {
   const qmap = new Map(quotes.map((q) => [q.ticker.toUpperCase(), q]));
-  const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
-
-  const open = dbRead.getOpenPositions();
-  const held = new Set(open.map((p) => p.ticker.toUpperCase()));
   const alerts: Array<Alert | null> = [];
-
   for (const p of open) {
     const q = qmap.get(p.ticker.toUpperCase());
     if (!q || q.tngoLast == null) continue; // suppression
@@ -420,26 +443,16 @@ export async function evaluateIntradayAlerts(quotes: IexQuote[], now: Date): Pro
     alerts.push(evalApproachTarget(p.ticker, now2, p.target));
     alerts.push(evalBigMove(p.ticker, now2, q.prevClose));
   }
+  return alerts;
+}
 
-  const pending = dbRead.getPendingSetups().filter((s) => !held.has(s.ticker.toUpperCase()));
-  for (const s of pending) {
-    const q = qmap.get(s.ticker.toUpperCase());
-    if (!q || q.tngoLast == null) continue;
-    // Once the EOD close-confirmed entry has fired for this setup, the intraday
-    // HEADS-UP entry-trigger is redundant noise about an entry already signalled by
-    // the system-tier alert — suppress it. Guarded: a Redis hiccup just means the
-    // heads-up still sends, which is the safe direction.
-    let entryConfirmed = false;
-    try {
-      entryConfirmed = await alreadySent(entryMarkerKey(s.ticker, s.handleLowDate));
-    } catch {
-      entryConfirmed = false;
-    }
-    if (!entryConfirmed) {
-      alerts.push(evalEntryTrigger(s.ticker, q.prevClose, q.tngoLast, s.breakout ?? s.entry));
-    }
-    alerts.push(evalBigMove(s.ticker, q.tngoLast, q.prevClose));
-  }
+export async function evaluateIntradayAlerts(quotes: IexQuote[], now: Date): Promise<number> {
+  if (!alertsEnabled()) return 0;
+  const etDate = etDateISO(now);
+  const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
+
+  // OWNED POSITIONS ONLY — no pending loop. See the doc comment above.
+  const alerts = buildIntradayAlerts(dbRead.getOpenPositions(), quotes);
 
   let fired = 0;
   for (const a of alerts) if (a && (await fireAlert(a, etDate))) fired++;
