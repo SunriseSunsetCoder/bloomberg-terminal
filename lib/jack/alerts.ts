@@ -19,6 +19,9 @@ import { detectFire, findTouchExit, fetchDailyBars, CONFIRM_WINDOW_BARS } from "
 import { PRICES_KEY, type IexQuote, type StoredPrices } from "./price-refresh";
 import { sendTelegram, alertsEnabled } from "./telegram";
 import { fetchEarningsMap, earningsEnabled } from "./finnhub";
+// The frozen size map decides what is tradeable — a SKIP setup is never entered, so it
+// must never produce an actionable entry signal.
+import { isTradeableSetup } from "./handle-score";
 
 // ---- Thresholds (named constants; the only knobs) --------------------------
 export const APPROACH_PCT = 0.03; // NOW within 3% of stop/target
@@ -500,6 +503,7 @@ async function evaluateEntryConfirmations(
 
   let fired = 0;
   let skippedNoRim = 0;
+  let skippedNotTradeable = 0;
   let fetchFailures = 0;
 
   for (const s of pending) {
@@ -507,6 +511,16 @@ async function evaluateEntryConfirmations(
       // 1. Rim required — the pre-7/17 rimless cohort simply cannot be confirmed.
       if (s.breakout == null) {
         skippedNoRim++;
+        continue;
+      }
+
+      // 1b. TRADEABLE ONLY. The frozen SIZE_MAP puts Q1/Q2 in the SKIP bucket, which
+      // the strategy never enters — so a SKIP setup closing above its rim must NOT be
+      // advertised as "buy next session's open". Checked BEFORE the marker and the
+      // bars fetch, so a skip costs no Tiingo call and leaves no marker behind (if it
+      // is later re-ingested as tradeable, it can still alert).
+      if (!isTradeableSetup(s)) {
+        skippedNotTradeable++;
         continue;
       }
 
@@ -606,7 +620,8 @@ async function evaluateEntryConfirmations(
   }
   console.log(
     `JACK entry confirmations: ${fired} fired · ${pending.length} pending checked · ` +
-      `${skippedNoRim} skipped (no rim) · ${fetchFailures} fetch failure(s)`
+      `${skippedNoRim} skipped (no rim) · ${skippedNotTradeable} skipped (SKIP bucket / Q1-Q2) · ` +
+      `${fetchFailures} fetch failure(s)`
   );
   return fired;
 }

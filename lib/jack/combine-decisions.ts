@@ -23,6 +23,9 @@
 // =============================================================================
 
 import type { JackDecisionClient } from "@/components/bloomberg/hooks/useJackValidation";
+// The frozen size map decides what is tradeable — a SKIP setup must never be promoted
+// into the actionable LIVE group by a fire.
+import { isTradeableSetup } from "@/lib/jack/handle-score";
 
 // Owned = a live position to manage: marked TRADED AND no recorded exit. A
 // recorded exit (userExitPrice set) = CLOSED, so the setup is no longer owned —
@@ -52,11 +55,17 @@ export const isFiredActionable = (d: JackDecisionClient): boolean =>
  *
  * Only a PENDING row is moved — a live row is already live, and 'resolved' stays put
  * carrying its flag so the view can show a muted "fired & resolved" tag.
+ *
+ * TRADEABLE ONLY: a SKIP-bucket / Q1-Q2 setup is never entered per the frozen SIZE_MAP,
+ * so a fire on one must not promote it into the actionable LIVE group. It keeps its
+ * flag (the badge still says it fired) and stays in PENDING. This gate is independent
+ * of the one in evaluateEntryConfirmations on purpose — it also covers rows flagged by
+ * an EOD pass that ran before that gate existed.
  */
 function applyFiredDisplaySection(d: JackDecisionClient): JackDecisionClient {
   // `dbSection` preserves where the row actually lives in the DB, so the P-rank
   // populations stay stable across a display move (see computePriorityRanks).
-  if (d.section === "pending" && isFiredActionable(d)) {
+  if (d.section === "pending" && isFiredActionable(d) && isTradeableSetup(d)) {
     return { ...d, section: "live" as const, dbSection: "pending" as const };
   }
   return d;

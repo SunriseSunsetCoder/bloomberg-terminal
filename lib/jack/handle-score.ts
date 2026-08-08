@@ -79,6 +79,33 @@ export function normalizeSizeBucket(v: string | null | undefined): SizeBucket | 
   return null;
 }
 
+/**
+ * Is this setup one the strategy would actually TRADE?
+ *
+ * The frozen SIZE_MAP says Q5/Q4/Q3 → full and Q1/Q2 → skip, so a SKIP setup is never
+ * entered. Anything downstream that produces an ACTIONABLE entry signal — the EOD
+ * close-confirmed alert, the board's fired→LIVE display move — must consult this, or a
+ * Q1/Q2 setup closing above its rim would be advertised as "buy next open", flatly
+ * contradicting the size map.
+ *
+ * Rules, in order:
+ *   · an explicit SKIP bucket   → NOT tradeable
+ *   · full or half              → tradeable (half is a reduced size, still a trade)
+ *   · no bucket, tier Q1 or Q2  → NOT tradeable (the tier maps to skip)
+ *   · anything else / unknown   → tradeable
+ *
+ * That last rule is deliberate: we only suppress on POSITIVE evidence of a skip. An
+ * unclassified setup keeps its prior behaviour rather than silently losing a signal.
+ */
+export function isTradeableSetup(s: { sizeBucket?: string | null; tier?: string | null }): boolean {
+  const bucket = normalizeSizeBucket(s.sizeBucket);
+  if (bucket === "skip") return false;
+  if (bucket === "full" || bucket === "half") return true;
+  const tier = (s.tier ?? "").toUpperCase().trim();
+  if (tier === "Q1" || tier === "Q2") return false;
+  return true;
+}
+
 // -----------------------------------------------------------------------------
 // Unit-mismatch fix (spec "Data-hygiene caveats"): cup_depth_pct / handle_retr_pct
 // arrive as FRACTIONS (0.15) on recent_breakout rows but PERCENTS (14.5) on

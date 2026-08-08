@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectFire, findTouchExit, CONFIRM_WINDOW_BARS, type Bar } from "../lib/jack/outcome-tracker";
 import { evalEntryConfirmed, entryMarkerKey, alertMarkerKey } from "../lib/jack/alerts";
+import { isTradeableSetup } from "../lib/jack/handle-score";
 
 let passed = 0;
 let failed = 0;
@@ -58,8 +59,14 @@ function wouldFire(args: {
   handleLowDate: string;
   rim: number | null;
   markerAlreadySet?: boolean;
+  sizeBucket?: string | null;
+  tier?: string | null;
 }): { fired: boolean; reason: string; fireDate?: string | null; fireBarIndex?: number | null } {
   if (args.rim == null) return { fired: false, reason: "skipped: no rim" };
+  // Mirrors the loop order in evaluateEntryConfirmations: rim -> tradeable -> marker.
+  if (!isTradeableSetup({ sizeBucket: args.sizeBucket, tier: args.tier })) {
+    return { fired: false, reason: "skipped: not tradeable (SKIP bucket / Q1-Q2)" };
+  }
   if (args.markerAlreadySet) return { fired: false, reason: "skipped: already alerted once" };
   const f = detectFire(args.bars, args.handleLowDate, args.rim);
   if (f.status !== "fired") return { fired: false, reason: f.status };
@@ -408,6 +415,57 @@ console.log("\n[14] Board FIRED flag mirrors the alert classification exactly");
   }
 
   check("every fired classification maps to a persisted status", ["confirmed", "late", "resolved"].every((s) => cases.some((c) => c.expectStatus === s)));
+}
+
+// ===========================================================================
+console.log("\n[15] SKIP setups produce NO buy alert (frozen SIZE_MAP: Q1/Q2 never traded)");
+// ===========================================================================
+{
+  // A textbook confirming close — the ONLY thing stopping the alert is the size map.
+  const bars = [flat(0), flat(1), bar(2, 99, 102, 98, 101), ...flats(3, 5)];
+
+  const cases: Array<{ label: string; sizeBucket?: string | null; tier?: string | null; expectFire: boolean }> = [
+    { label: "SKIP bucket", sizeBucket: "skip", tier: "Q2", expectFire: false },
+    { label: "Q1, no bucket", sizeBucket: null, tier: "Q1", expectFire: false },
+    { label: "Q2, no bucket", sizeBucket: null, tier: "Q2", expectFire: false },
+    { label: "SKIP bucket on a Q5 tier (bucket wins)", sizeBucket: "skip", tier: "Q5", expectFire: false },
+    { label: "FULL bucket", sizeBucket: "full", tier: "Q5", expectFire: true },
+    { label: "HALF bucket", sizeBucket: "half", tier: "Q3", expectFire: true },
+    { label: "unclassified (no bucket, no tier)", sizeBucket: null, tier: null, expectFire: true },
+    { label: "Q4 tier, no bucket", sizeBucket: null, tier: "Q4", expectFire: true },
+  ];
+
+  for (const c of cases) {
+    const r = wouldFire({ bars, handleLowDate: HLD, rim: RIM, sizeBucket: c.sizeBucket, tier: c.tier });
+    check(`${c.label} -> ${c.expectFire ? "FIRES" : "no alert"}`, r.fired === c.expectFire, r.reason);
+  }
+
+  // The suppression is the size map, not a detection failure: detectFire still says
+  // "fired" for the very same bars.
+  const detected = detectFire(bars, HLD, RIM);
+  check("detectFire itself still reports a fire for the SKIP setup's bars", detected.status === "fired");
+  check("  so the suppression is the size-map gate, not a missed breakout",
+    wouldFire({ bars, handleLowDate: HLD, rim: RIM, sizeBucket: "skip" }).reason.includes("not tradeable"));
+
+  // Gate ordering: a SKIP setup is rejected BEFORE the marker check, so it leaves no
+  // marker behind and can still alert if it is later re-ingested as tradeable.
+  const skipThenTradeable = wouldFire({ bars, handleLowDate: HLD, rim: RIM, sizeBucket: "full" });
+  check("a re-ingested SKIP->FULL setup can still alert", skipThenTradeable.fired);
+
+  // And the rim guard still precedes the size-map gate.
+  check("no rim is reported as the no-rim skip, not the size-map skip",
+    wouldFire({ bars, handleLowDate: HLD, rim: null, sizeBucket: "skip" }).reason === "skipped: no rim");
+}
+{
+  // The predicate itself, directly.
+  check("isTradeableSetup: skip bucket -> false", !isTradeableSetup({ sizeBucket: "skip" }));
+  check("isTradeableSetup: SKIP uppercase/padded -> false", !isTradeableSetup({ sizeBucket: "  SKIP  " }));
+  check("isTradeableSetup: full -> true", isTradeableSetup({ sizeBucket: "full" }));
+  check("isTradeableSetup: half -> true", isTradeableSetup({ sizeBucket: "half" }));
+  check("isTradeableSetup: Q1 tier -> false", !isTradeableSetup({ tier: "Q1" }));
+  check("isTradeableSetup: q2 lowercase -> false", !isTradeableSetup({ tier: "q2" }));
+  check("isTradeableSetup: Q3/Q4/Q5 -> true", ["Q3", "Q4", "Q5"].every((t) => isTradeableSetup({ tier: t })));
+  check("isTradeableSetup: empty -> true (no positive skip evidence)", isTradeableSetup({}));
 }
 
 // ===========================================================================

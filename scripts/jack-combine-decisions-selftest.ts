@@ -327,5 +327,47 @@ console.log("\n[8] PENDING sorts by its own P-rank");
   check("live order undisturbed, fired row appended after native live rows", liveOrder.join(",") === "L1,L2,PA", liveOrder.join(","));
 }
 
+// ---- 9. SKIP setups never promote into the actionable LIVE group ----------
+// The frozen SIZE_MAP puts Q1/Q2 in the SKIP bucket, which the strategy never enters.
+// A fire on one must NOT re-section it into LIVE — that would advertise a trade the
+// size map forbids. It keeps its flag and stays in PENDING.
+console.log("\n[9] fired SKIP setups stay in PENDING");
+{
+  const fired = { firedStatus: "confirmed" as const, firedAt: "2026-08-08", fireClose: 101.5, fireBar: 3 };
+  const run = [
+    mk({ setupId: 1, ticker: "SKIPB", section: "pending", sizeBucket: "skip", tier: "Q2", ...fired }),
+    mk({ setupId: 2, ticker: "Q1NOBUCKET", section: "pending", tier: "Q1", ...fired }),
+    mk({ setupId: 3, ticker: "Q2NOBUCKET", section: "pending", tier: "Q2", ...fired }),
+    mk({ setupId: 4, ticker: "FULLT", section: "pending", sizeBucket: "full", tier: "Q5", ...fired }),
+    mk({ setupId: 5, ticker: "HALFT", section: "pending", sizeBucket: "half", tier: "Q3", ...fired }),
+    mk({ setupId: 6, ticker: "UNKNOWN", section: "pending", ...fired }),
+    // A SKIP bucket on a Q5 tier: the explicit bucket wins, no promotion.
+    mk({ setupId: 7, ticker: "SKIPQ5", section: "pending", sizeBucket: "skip", tier: "Q5", ...fired }),
+  ];
+  const out = combineJackDecisions(run, []);
+  const sec = (id: number) => bySetup(out, id).map((r) => r.section).join(",");
+
+  check("fired SKIP bucket stays pending", sec(1) === "pending", sec(1));
+  check("fired Q1 (no bucket) stays pending", sec(2) === "pending", sec(2));
+  check("fired Q2 (no bucket) stays pending", sec(3) === "pending", sec(3));
+  check("fired FULL still promotes to live (unchanged)", sec(4) === "live", sec(4));
+  check("fired HALF promotes to live (reduced size is still a trade)", sec(5) === "live", sec(5));
+  check("fired but unclassified promotes (no positive skip evidence)", sec(6) === "live", sec(6));
+  check("explicit SKIP bucket beats a Q5 tier", sec(7) === "pending", sec(7));
+
+  const skipRow = bySetup(out, 1)[0];
+  check("suppressed row KEEPS its fired flag (badge still shows)", skipRow.firedStatus === "confirmed" && skipRow.fireClose === 101.5);
+  check("suppressed row was not given a dbSection (never moved)", skipRow.dbSection === undefined, String(skipRow.dbSection));
+
+  const ids = out.map((r) => r.setupId);
+  check("every setup still in exactly one section", ids.length === new Set(ids).size && new Set(ids).size === 7, ids.join(","));
+}
+{
+  // Owned wins over everything, including the skip gate.
+  const run = [mk({ setupId: 1, ticker: "OWNEDSKIP", section: "pending", sizeBucket: "skip", userAction: "TRADED", userExitPrice: null, firedStatus: "confirmed", firedAt: "2026-08-08" })];
+  const out = combineJackDecisions(run, []);
+  check("owned + fired + SKIP -> open (owned still wins)", bySetup(out, 1).map((r) => r.section).join(",") === "open");
+}
+
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
