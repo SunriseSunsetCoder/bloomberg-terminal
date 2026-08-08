@@ -60,13 +60,164 @@ export const ASSUMPTION_LABELS = [
   "known gap: the paper stop is the SCANNER's stop, anchored to its projected entry — the backtest re-derived the stop from the realized fill + ATR, so paper R carries a small stop-placement difference",
 ];
 
-interface Bar {
+export interface Bar {
   date: string;
   open: number;
   high: number;
   low: number;
   close: number;
   volume: number;
+}
+
+// ============================================================
+// FIRE DETECTION — the ONE definition of "did this setup break out?"
+//
+// Extracted from replaySetup so the JSCORE paper arm and the EOD entry alert cannot
+// drift apart. Both call THIS function; there is no second implementation of the rule
+// anywhere in the codebase, and there must never be one. Re-implementing it is how the
+// 2026-07-31 parity bug (intraday-high fire, 130-bar search) got in.
+//
+// The rule, mirroring the notebook's
+//     for j in range(h_idx+1, min(h_idx+1+15, n)): if C[j] > breakout: confirm = j
+//   · search starts at the first bar dated STRICTLY AFTER handle_low_date — NOT index
+//     0, because bars[0] is only the handle-low bar when that date was a trading day
+//     (a weekend/holiday handle low makes bars[0] already h_idx+1)
+//   · CONFIRM_WINDOW_BARS bars wide
+//   · STRICT close > breakout — an intraday high through the rim is NOT a confirmation
+// ============================================================
+
+export type FireStatus =
+  | "fired" // a confirming close was found inside the window
+  | "deferred" // window not fully elapsed yet — a later bar may still confirm
+  | "never_fired"; // window fully elapsed with no confirming close — terminal
+
+export interface FireDetection {
+  status: FireStatus;
+  /** Absolute index into the DATE-SORTED bars. null unless fired. */
+  fireIndex: number | null;
+  /** 1-based bars since the handle low (1 = first bar dated after it). null unless fired. */
+  fireBarIndex: number | null;
+  fireClose: number | null;
+  fireDate: string | null;
+  /** How many of CONFIRM_WINDOW_BARS have elapsed (for display + deferred reasons). */
+  barsInWindow: number;
+  /** Populated on `deferred` — why we refuse to call it yet. */
+  reason?: string;
+}
+
+/**
+ * Detect the confirming close. Callers MUST guard a null rim before calling — a setup
+ * with no breakout_level cannot be confirmed and is skipped upstream (the paper replay
+ * bails as "missing geometry"; the entry alert skips and counts it).
+ *
+ * Sorts defensively by date; the returned `fireIndex` refers to that sorted order.
+ * replaySetup sorts identically before calling, so the index is valid against its array.
+ */
+export function detectFire(bars: Bar[], handleLowDate: string, breakout: number): FireDetection {
+  const sorted = [...bars].sort((a, b) => a.date.localeCompare(b.date));
+
+  const firstAfter = sorted.findIndex((b) => b.date > handleLowDate);
+  if (firstAfter === -1) {
+    return {
+      status: "deferred",
+      fireIndex: null,
+      fireBarIndex: null,
+      fireClose: null,
+      fireDate: null,
+      barsInWindow: 0,
+      reason: "no bars after handle_low_date yet",
+    };
+  }
+
+  const windowEnd = firstAfter + CONFIRM_WINDOW_BARS;
+  const scanEnd = Math.min(windowEnd, sorted.length);
+  const barsInWindow = scanEnd - firstAfter;
+
+  for (let i = firstAfter; i < scanEnd; i++) {
+    // STRICT >, and CLOSE.
+    if (sorted[i].close > breakout) {
+      return {
+        status: "fired",
+        fireIndex: i,
+        fireBarIndex: i - firstAfter + 1, // 1-based bars since the handle low
+        fireClose: sorted[i].close,
+        fireDate: sorted[i].date,
+        barsInWindow,
+      };
+    }
+  }
+
+  if (sorted.length < windowEnd) {
+    // Window hasn't fully elapsed — don't lock in a 'never_fired' a later bar would
+    // contradict.
+    return {
+      status: "deferred",
+      fireIndex: null,
+      fireBarIndex: null,
+      fireClose: null,
+      fireDate: null,
+      barsInWindow,
+      reason: `confirm window not elapsed (${barsInWindow}/${CONFIRM_WINDOW_BARS} bars)`,
+    };
+  }
+
+  return {
+    status: "never_fired",
+    fireIndex: null,
+    fireBarIndex: null,
+    fireClose: null,
+    fireDate: null,
+    barsInWindow,
+  };
+}
+
+// ============================================================
+// EXIT DETECTION — the ONE definition of "did this trade hit stop or target?"
+//
+// Same discipline as detectFire: extracted so the paper replay and the EOD entry
+// alert's already-resolved check cannot drift. INTRADAY TOUCH, stop checked FIRST —
+// mirroring _sim_trade:
+//     if bl <= stop_price:   -> stop
+//     if bh >= target_price: -> target
+// The stop-first ordering IS the tie rule: a bar touching both resolves to the stop,
+// conservatively, because daily bars hide intrabar sequence.
+// ============================================================
+
+/** Per-bar intraday-touch test. Returns the exit this bar produces, if any. */
+export function exitOnBar(bar: Bar, stop: number, target: number): "stop" | "target" | null {
+  if (bar.low <= stop) return "stop"; // checked first — also resolves the same-bar tie
+  if (bar.high >= target) return "target";
+  return null;
+}
+
+export interface TouchExit {
+  kind: "stop" | "target";
+  date: string;
+  /** The modeled fill: the level itself, matching the replay. */
+  price: number;
+  /** Absolute index into the date-sorted bars. */
+  barIndex: number;
+}
+
+/**
+ * First intraday touch at or after `fromIndex`, bounded by `maxBars`. Used by the EOD
+ * entry alert to tell a still-actionable LATE ENTRY from one that already played out.
+ * `bars` must be date-sorted (the caller sorts once and shares the index space).
+ */
+export function findTouchExit(
+  bars: Bar[],
+  fromIndex: number,
+  stop: number,
+  target: number,
+  maxBars: number = TIME_STOP_BARS
+): TouchExit | null {
+  const end = Math.min(fromIndex + maxBars, bars.length);
+  for (let i = Math.max(0, fromIndex); i < end; i++) {
+    const hit = exitOnBar(bars[i], stop, target);
+    if (hit === "stop") return { kind: "stop", date: bars[i].date, price: stop, barIndex: i };
+    if (hit === "target") return { kind: "target", date: bars[i].date, price: target, barIndex: i };
+  }
+  return null;
 }
 
 // ============================================================
@@ -102,38 +253,16 @@ export function replaySetup(
   // Ensure ascending by date (defensive — Tiingo returns ascending already).
   const sorted = [...bars].sort((a, b) => a.date.localeCompare(b.date));
 
-  // --- Fire detection (backtest parity): the first bar STRICTLY AFTER the handle
-  // low, within CONFIRM_WINDOW_BARS, whose CLOSE is above the rim. Mirrors the
-  // notebook's `for j in range(h_idx+1, h_idx+1+15): if C[j] > breakout`.
-  //
-  // Anchored on the DATE, not on index 0: bars[0] is only the handle-low bar when
-  // that date was a trading day (a weekend/holiday handle low makes bars[0] already
-  // h_idx+1). Deriving the start from the date is correct either way.
-  const firstAfter = sorted.findIndex((b) => b.date > setup.handleLowDate);
-  if (firstAfter === -1) {
-    return { kind: "deferred", reason: "no bars after handle_low_date yet" };
-  }
-  const confirmWindowEnd = firstAfter + CONFIRM_WINDOW_BARS;
-  const confirmScanEnd = Math.min(confirmWindowEnd, sorted.length);
+  // --- Fire detection (backtest parity) — delegated to the SHARED detectFire so the
+  // paper replay and the EOD entry alert can never disagree. Do not inline this rule
+  // again. `sorted` is ordered identically to detectFire's own sort, so fireIndex is
+  // a valid index into it.
+  const fire = detectFire(sorted, setup.handleLowDate, breakout);
 
-  let fireIdx = -1;
-  for (let i = firstAfter; i < confirmScanEnd; i++) {
-    // STRICT >, and CLOSE — an intraday high through the rim is not a confirmation.
-    if (sorted[i].close > breakout) {
-      fireIdx = i;
-      break;
-    }
+  if (fire.status === "deferred") {
+    return { kind: "deferred", reason: fire.reason ?? "confirm window not elapsed" };
   }
-
-  if (fireIdx === -1) {
-    if (sorted.length < confirmWindowEnd) {
-      // The window hasn't fully elapsed — don't lock in a wrong 'never_fired' that
-      // a later bar would have contradicted. Resolve on a later run.
-      return {
-        kind: "deferred",
-        reason: `confirm window not elapsed (${sorted.length - firstAfter}/${CONFIRM_WINDOW_BARS} bars)`,
-      };
-    }
+  if (fire.status === "never_fired") {
     // Window fully elapsed with no confirming close → terminal: no trade ever
     // happened. Counted, and excluded from R aggregation, on every arm.
     return {
@@ -147,6 +276,7 @@ export function replaySetup(
       },
     };
   }
+  const fireIdx = fire.fireIndex as number;
 
   // --- Entry: next trading day's Open after the fire day. ---
   const entryIdx = fireIdx + 1;
@@ -186,25 +316,16 @@ export function replaySetup(
     if (bar.high > maxHigh) maxHigh = bar.high;
     if (bar.low < minLow) minLow = bar.low;
 
-    const stopHit = bar.low <= stop;
-    const targetHit = bar.high >= target;
-
-    if (stopHit && targetHit) {
-      // TIE → assume STOP first (conservative modeling assumption #1).
-      exitReason = "stop";
-      exitPrice = stop;
-      exitDate = bar.date;
-      rRealized = -1;
-      break;
-    }
-    if (stopHit) {
+    // Delegated to the SHARED exitOnBar — stop-first ordering IS the tie rule.
+    const hit = exitOnBar(bar, stop, target);
+    if (hit === "stop") {
       exitReason = "stop";
       exitPrice = stop;
       exitDate = bar.date;
       rRealized = -1; // (stop - entry) / (entry - stop) === -1
       break;
     }
-    if (targetHit) {
+    if (hit === "target") {
       exitReason = "target";
       exitPrice = target;
       exitDate = bar.date;
@@ -254,12 +375,15 @@ export function replaySetup(
 }
 
 // ============================================================
-// Internal Tiingo EOD proxy — reuse the (now-fixed) [ticker] route with the
-// Session B startDate + raw params so we get the full post-setup history in
-// unadjusted prices (matching nominal breakout/stop/target levels).
+// Tiingo EOD proxy — reuse the (now-fixed) [ticker] route with the Session B
+// startDate + raw params so we get the full post-setup history in unadjusted prices
+// (matching nominal breakout/stop/target levels).
+//
+// EXPORTED because the EOD entry alert needs the SAME daily bars this replay uses —
+// official daily closes, never the intraday tngoLast. One fetch path, one source.
 // ============================================================
 
-async function fetchHistory(
+export async function fetchDailyBars(
   base: string,
   ticker: string,
   startDate: string
@@ -322,7 +446,7 @@ export async function runOutcomeTracker({
 
   // Fetch histories in parallel (Tiingo), then replay + write sequentially (SQLite).
   const histories = await Promise.all(
-    setups.map((s) => fetchHistory(tiingoBase, s.ticker, s.handleLowDate))
+    setups.map((s) => fetchDailyBars(tiingoBase, s.ticker, s.handleLowDate))
   );
 
   const summary: OutcomesSummary = {

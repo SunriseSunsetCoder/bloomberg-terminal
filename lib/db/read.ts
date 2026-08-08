@@ -334,6 +334,11 @@ export interface CurrentBoardRow {
   userAction: "TRADED" | "PASSED" | "WATCHED" | null;
   userExitPrice: number | null;
   retiredAt: string | null;
+  // DISPLAY ONLY — scanner classification carried through for alert/UI text. These
+  // NEVER affect eligibility, scoping, or the owned/retired rules above.
+  tier: string | null;
+  priority: number | null;
+  sizeBucket: string | null;
 }
 
 /**
@@ -385,6 +390,9 @@ export function getCurrentBoard(): { runId: number | null; live: CurrentBoardRow
          s.stop             AS stop,
          s.t05_target       AS target,
          s.breakout_level   AS breakout,
+         s.tier             AS tier,
+         s.priority         AS priority,
+         s.size_bucket      AS sizeBucket,
          um.user_action     AS userAction,
          o.user_exit_price  AS userExitPrice,
          s.retired_at       AS retiredAt
@@ -425,6 +433,10 @@ export interface PendingSetupRow {
   stop: number | null;
   target: number | null;
   breakout: number | null;
+  // DISPLAY ONLY (see CurrentBoardRow) — used by the EOD entry alert's message text.
+  tier: string | null;
+  priority: number | null;
+  sizeBucket: string | null;
 }
 
 /**
@@ -464,6 +476,9 @@ export function getPendingSetups(): PendingSetupRow[] {
       stop: r.stop,
       target: r.target,
       breakout: r.breakout,
+      tier: r.tier,
+      priority: r.priority,
+      sizeBucket: r.sizeBucket,
     }));
 }
 
