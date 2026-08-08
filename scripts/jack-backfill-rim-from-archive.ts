@@ -27,138 +27,32 @@
  * mature from ~November onward, and the existing outcome tracker picks them up then.
  */
 import Database from "better-sqlite3";
-import { readdirSync, readFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { normalizeIsoDate } from "../lib/jack/reconcile";
+// Shared archive parser/matcher — the SAME normalization the priority diagnostic uses.
+// Extracted so two tools can never disagree about what "the same setup" means.
+import { readArchiveCsvs, normTicker, type ArchiveFileReport } from "../lib/jack/archive-csv";
 
-const DEFAULT_ARCHIVE_DIR = "c:\\repos\\watchlist";
+const DEFAULT_ARCHIVE_DIR = "c:/repos/watchlist"; // forward slashes: Node accepts them on Windows and they need no escaping
 const APPLY = process.argv.includes("--apply");
 const archiveDir = process.argv.slice(2).find((a) => !a.startsWith("--")) ?? DEFAULT_ARCHIVE_DIR;
 
-// ---------------------------------------------------------------------------
-// Normalization — the SAME rules the ingest used, applied to BOTH sides so a
-// formatting difference can never cause a silent miss.
-// ---------------------------------------------------------------------------
-
-/** Header key normalizer — mirrors parseCsvRow's normKey (BOM/quote/case/space/hyphen). */
-const normKey = (s: string): string => {
-  const t = s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
-  return t.replace(/["']/g, "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-};
-
-/** Ticker normalizer — strip BOM + quotes, trim, uppercase (DB stores it this way). */
-const normTicker = (s: string): string => {
-  const t = s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
-  return t.replace(/["']/g, "").trim().toUpperCase();
-};
-
-/** Numeric cell → finite positive number, or null. Tolerates $ , % and spaces. */
-const normNum = (s: string | undefined): number | null => {
-  if (s === undefined) return null;
-  const cleaned = s.replace(/["']/g, "").replace(/[$,%\s]/g, "");
-  if (cleaned === "") return null;
-  const n = Number(cleaned);
-  return Number.isFinite(n) && n > 0 ? n : null;
-};
-
-/** CSV line splitter that respects double-quoted fields (pandas quotes on demand). */
-function splitCsvLine(line: string, delim: string): string[] {
-  const out: string[] = [];
-  let cur = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') { cur += '"'; i++; } else { inQuotes = false; }
-      } else cur += ch;
-    } else if (ch === '"') inQuotes = true;
-    else if (ch === delim) { out.push(cur); cur = ""; }
-    else cur += ch;
-  }
-  out.push(cur);
-  return out.map((c) => c.trim());
-}
-
-const detectDelim = (header: string): string =>
-  header.split("\t").length > header.split(",").length ? "\t" : ",";
-
-// ---------------------------------------------------------------------------
-// Archive read
-// ---------------------------------------------------------------------------
-
-interface FileReport {
-  file: string;
-  rows: number;
-  hasTicker: boolean;
-  hasDate: boolean;
-  hasRim: boolean;
-  usableRims: number;
-  badDates: number;
-  badRims: number;
-}
-
 interface RimEntry {
-  /** distinct parsed rim values → the files that carried each */
+  /** distinct parsed rim values -> the files that carried each */
   values: Map<number, string[]>;
 }
 
-const RIM_ALIASES = ["breakout_level", "breakout", "cup_rim", "rim"];
-
-function readArchive(dir: string): { rims: Map<string, RimEntry>; files: FileReport[] } {
+/** Group the shared archive rows into one rim per key, tracking cross-file conflicts. */
+function readArchive(dir: string): { rims: Map<string, RimEntry>; files: ArchiveFileReport[] } {
+  const { rows, files } = readArchiveCsvs(dir);
   const rims = new Map<string, RimEntry>();
-  const files: FileReport[] = [];
-
-  const names = readdirSync(dir).filter((f) => f.toLowerCase().endsWith(".csv")).sort();
-  for (const name of names) {
-    const text = readFileSync(join(dir, name), "utf-8");
-    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    const report: FileReport = {
-      file: name, rows: Math.max(0, lines.length - 1),
-      hasTicker: false, hasDate: false, hasRim: false,
-      usableRims: 0, badDates: 0, badRims: 0,
-    };
-    if (lines.length < 2) { files.push(report); continue; }
-
-    const delim = detectDelim(lines[0]);
-    const header = splitCsvLine(lines[0], delim);
-    const idx = new Map<string, number>();
-    header.forEach((h, i) => {
-      const k = normKey(h);
-      if (k && !idx.has(k)) idx.set(k, i);
-    });
-    const at = (cols: string[], ...aliases: string[]): string | undefined => {
-      for (const a of aliases) {
-        const i = idx.get(normKey(a));
-        if (i !== undefined && i < cols.length) return cols[i];
-      }
-      return undefined;
-    };
-
-    report.hasTicker = idx.has("ticker");
-    report.hasDate = idx.has("handle_low_date");
-    report.hasRim = RIM_ALIASES.some((a) => idx.has(a));
-    if (!report.hasTicker || !report.hasDate || !report.hasRim) { files.push(report); continue; }
-
-    for (const line of lines.slice(1)) {
-      const cols = splitCsvLine(line, delim);
-      const ticker = normTicker(at(cols, "ticker") ?? "");
-      const date = normalizeIsoDate((at(cols, "handle_low_date") ?? "").replace(/["']/g, "").trim());
-      const rim = normNum(at(cols, ...RIM_ALIASES));
-      if (!ticker) continue;
-      if (!date) { report.badDates++; continue; }
-      if (rim == null) { report.badRims++; continue; }
-
-      const key = `${ticker}|${date}`;
-      const entry = rims.get(key) ?? { values: new Map<number, string[]>() };
-      const seenFiles = entry.values.get(rim) ?? [];
-      if (!seenFiles.includes(name)) seenFiles.push(name);
-      entry.values.set(rim, seenFiles);
-      rims.set(key, entry);
-      report.usableRims++;
-    }
-    files.push(report);
+  for (const r of rows) {
+    if (r.breakout == null) continue; // older format / blank cell — contributes nothing
+    const entry = rims.get(r.key) ?? { values: new Map<number, string[]>() };
+    const seen = entry.values.get(r.breakout) ?? [];
+    if (!seen.includes(r.file)) seen.push(r.file);
+    entry.values.set(r.breakout, seen);
+    rims.set(r.key, entry);
   }
   return { rims, files };
 }
@@ -198,15 +92,14 @@ function main(): number {
   const { rims, files } = readArchive(archiveDir);
 
   console.log("--- ARCHIVE FILES -----------------------------------------------");
-  console.log(`  ${"FILE".padEnd(42)}${"ROWS".padStart(6)}${"RIMS".padStart(7)}  ticker date rim   notes`);
+  console.log(`  ${"FILE".padEnd(42)}${"ROWS".padStart(6)}${"PARSED".padStart(8)}  ticker date rim  prio  notes`);
   for (const f of files) {
-    const flags = `${f.hasTicker ? " yes " : " NO  "} ${f.hasDate ? "yes " : "NO  "} ${f.hasRim ? "yes" : "NO "}`;
+    const flags = `${f.hasTicker ? " yes " : " NO  "} ${f.hasDate ? "yes " : "NO  "} ${f.hasRim ? "yes" : "NO "}  ${f.hasPriority ? "yes" : "NO "}`;
     const notes: string[] = [];
     if (!f.hasRim) notes.push("NO breakout_level — older format, contributes nothing");
     if (!f.hasTicker || !f.hasDate) notes.push("missing key column");
     if (f.badDates) notes.push(`${f.badDates} unparseable date(s)`);
-    if (f.badRims) notes.push(`${f.badRims} unusable rim value(s)`);
-    console.log(`  ${f.file.padEnd(42)}${String(f.rows).padStart(6)}${String(f.usableRims).padStart(7)}  ${flags}   ${notes.join("; ")}`);
+    console.log(`  ${f.file.padEnd(42)}${String(f.rows).padStart(6)}${String(f.parsed).padStart(8)}  ${flags}   ${notes.join("; ")}`);
   }
   const noRimFiles = files.filter((f) => !f.hasRim);
   console.log(`\n  ${files.length} file(s) · ${files.filter((f) => f.hasRim).length} carry a rim column · ${noRimFiles.length} do not`);

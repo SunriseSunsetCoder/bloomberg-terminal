@@ -6,7 +6,7 @@ import type { JackDecisionClient } from "@/components/bloomberg/hooks/useJackVal
 import { CandleThumbnail } from "@/components/bloomberg/ui/candle-thumbnail";
 import { CandleChartModal } from "@/components/bloomberg/ui/candle-chart-modal";
 import { classifyVerdict, signalsDisagree } from "@/lib/jack/verdict";
-import { computeSectionRanks, dbSectionOf, rankKey } from "@/lib/jack/combine-decisions";
+import { computeSectionRanks, dbSectionOf, rankKey, sortByRank } from "@/lib/jack/combine-decisions";
 
 // ============================================================================
 // JACK decision surface (UI v2). ONE expandable row per setup, in two preserved
@@ -325,10 +325,6 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     return (exit - entry) / (entry - d.stop);
   };
 
-  const openDecisions = useMemo(() => decisions.filter((d) => d.section === "open"), [decisions]);
-  const liveDecisions = useMemo(() => decisions.filter((d) => d.section === "live"), [decisions]);
-  const pendingDecisions = useMemo(() => decisions.filter((d) => d.section === "pending"), [decisions]);
-
   // Ordinal priority rank shown as "P1", "P2", … — TWO INDEPENDENT sequences, each
   // numbered from P1 and each computed over the DB section (dbSection ?? section),
   // i.e. BEFORE any display re-sectioning:
@@ -339,6 +335,18 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   // and never joins the live population — so a fire cannot renumber the live ranks.
   // The blend (priority DESC → bucket → handle_score) lives in computePriorityRanks.
   const sectionRanks = useMemo(() => computeSectionRanks(decisions), [decisions]);
+  const openDecisions = useMemo(() => decisions.filter((d) => d.section === "open"), [decisions]);
+  const liveDecisions = useMemo(() => decisions.filter((d) => d.section === "live"), [decisions]);
+  // PENDING renders in ITS OWN P-rank order: P1 first, unranked (no scanner priority)
+  // last, stable within ties — sorted by the SAME map that renders the chips, so the
+  // list and the chips can never disagree. LIVE order is untouched: it keeps the
+  // buildClientDecisions ordering, and a fired pending row that re-sections into the
+  // live group stays after the native live rows rather than reshuffling them.
+  const pendingDecisions = useMemo(
+    () => sortByRank(decisions.filter((d) => d.section === "pending"), sectionRanks.pending),
+    [decisions, sectionRanks]
+  );
+
 
   if (decisions.length === 0) return null;
 

@@ -9,7 +9,7 @@
  *
  * Run:  npx tsx scripts/jack-combine-decisions-selftest.ts
  */
-import { combineJackDecisions, computeSectionRanks, rankKey } from "../lib/jack/combine-decisions";
+import { combineJackDecisions, computeSectionRanks, rankKey, sortByRank } from "../lib/jack/combine-decisions";
 import type { JackDecisionClient } from "../components/bloomberg/hooks/useJackValidation";
 
 let passed = 0;
@@ -273,6 +273,58 @@ console.log("\n[7] P-rank: independent LIVE and PENDING sequences");
     const r = computeSectionRanks(rows).pending;
     check("priority tie -> bucket then score decides", r.get("TIEC|2026-07-10") === 1 && r.get("TIEB|2026-07-10") === 2 && r.get("TIEA|2026-07-10") === 3, [r.get("TIEC|2026-07-10"), r.get("TIEB|2026-07-10"), r.get("TIEA|2026-07-10")].join(","));
   }
+}
+
+// ---- 8. PENDING list order matches its P-rank chips -----------------------
+// The pending group is sorted by the SAME map that renders its chips: P1 first,
+// unranked (null priority / owned) last, stable within ties.
+console.log("\n[8] PENDING sorts by its own P-rank");
+{
+  // Deliberately scrambled input order.
+  const rows = [
+    mk({ setupId: 1, ticker: "MID", section: "pending", priority: 5, sizeBucket: "full", handleScore: 0.6 }),
+    mk({ setupId: 2, ticker: "NOPRIO_A", section: "pending", priority: null }),
+    mk({ setupId: 3, ticker: "BEST", section: "pending", priority: 9, sizeBucket: "full", handleScore: 0.9 }),
+    mk({ setupId: 4, ticker: "NOPRIO_B", section: "pending", priority: null }),
+    mk({ setupId: 5, ticker: "WORST", section: "pending", priority: 1, sizeBucket: "full", handleScore: 0.3 }),
+  ];
+  const ranks = computeSectionRanks(rows).pending;
+  const sortedRows = sortByRank(rows, ranks);
+  const order = sortedRows.map((d) => d.ticker);
+
+  check("pending list is in P-rank order", order.slice(0, 3).join(",") === "BEST,MID,WORST", order.join(","));
+  check("unranked rows sort LAST", order.slice(3).join(",") === "NOPRIO_A,NOPRIO_B", order.join(","));
+  check("unranked keep their input order (stable)", order.indexOf("NOPRIO_A") < order.indexOf("NOPRIO_B"));
+  check("nothing added or dropped by the sort", sortedRows.length === rows.length);
+
+  // The list position and the chip must agree for every ranked row.
+  const positionsMatchChips = sortedRows
+    .filter((d) => ranks.has(rankKey(d)))
+    .every((d, idx) => ranks.get(rankKey(d)) === idx + 1);
+  check("row N in the list carries chip P(N)", positionsMatchChips, sortedRows.map((d) => `${d.ticker}:${ranks.get(rankKey(d)) ?? "-"}`).join(" "));
+
+  // Already-sorted input is a no-op (idempotent).
+  check("sorting an already-ordered list changes nothing", sortByRank(sortedRows, ranks).map((d) => d.ticker).join(",") === order.join(","));
+}
+{
+  // A fired row leaves the pending group; the rest keep ascending rank order (with a
+  // gap where the fired row's number was), and LIVE order is untouched.
+  const rows = [
+    mk({ setupId: 1, ticker: "L1", section: "live", priority: 9 }),
+    mk({ setupId: 2, ticker: "L2", section: "live", priority: 4 }),
+    mk({ setupId: 3, ticker: "PB", section: "pending", priority: 3 }),
+    mk({ setupId: 4, ticker: "PA", section: "pending", priority: 8, firedStatus: "confirmed", firedAt: "2026-08-07" }),
+    mk({ setupId: 5, ticker: "PC", section: "pending", priority: 1 }),
+  ];
+  const out = combineJackDecisions(rows, []);
+  const ranks = computeSectionRanks(out);
+  const pendingOrder = sortByRank(out.filter((d) => d.section === "pending"), ranks.pending).map((d) => d.ticker);
+  const liveOrder = out.filter((d) => d.section === "live").map((d) => d.ticker);
+
+  check("fired row left the pending list", !pendingOrder.includes("PA"), pendingOrder.join(","));
+  check("remaining pending stay in rank order", pendingOrder.join(",") === "PB,PC", pendingOrder.join(","));
+  check("their chips keep the ORIGINAL pending numbers (P2, P3)", ranks.pending.get(rankKey(out.find((d) => d.ticker === "PB")!)) === 2 && ranks.pending.get(rankKey(out.find((d) => d.ticker === "PC")!)) === 3);
+  check("live order undisturbed, fired row appended after native live rows", liveOrder.join(",") === "L1,L2,PA", liveOrder.join(","));
 }
 
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed`);

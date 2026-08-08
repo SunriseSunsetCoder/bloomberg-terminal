@@ -118,6 +118,25 @@ export function computePriorityRanks(rows: JackDecisionClient[]): Map<string, nu
 }
 
 /**
+ * Order rows by an ordinal rank map: P1 first, unranked (no scanner priority, or owned)
+ * LAST, stable within ties.
+ *
+ * Used to sort the PENDING group by the very map that renders its P-chips, so the list
+ * order and the chips cannot disagree — including for rows that came from a payload
+ * cached before this ordering existed. Sorting an already-ordered list is a no-op, so
+ * this is safe to apply unconditionally.
+ */
+export function sortByRank(
+  rows: JackDecisionClient[],
+  ranks: Map<string, number>
+): JackDecisionClient[] {
+  return rows
+    .map((d, i) => ({ d, i, rank: ranks.get(rankKey(d)) ?? Number.POSITIVE_INFINITY }))
+    .sort((a, b) => (a.rank !== b.rank ? a.rank - b.rank : a.i - b.i))
+    .map((x) => x.d);
+}
+
+/**
  * Both sequences at once, split by DB section. Pass the COMBINED rows — the split
  * uses dbSectionOf, so it is immune to the fired display move.
  */
