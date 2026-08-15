@@ -32,15 +32,17 @@ import { isTradeableSetup } from "@/lib/jack/handle-score";
 // it routes normally (LIVE if still firing this week, else nowhere). Keying only
 // on userAction === "TRADED" (ignoring exit) is the bug that left an exited-but-
 // still-firing setup stuck in CURRENT POSITIONS via the fall-through guard.
-export const isOwnedPosition = (d: JackDecisionClient): boolean =>
-  d.userAction === "TRADED" && d.userExitPrice == null;
+export const isOwnedPosition = (d: {
+  userAction?: string | null;
+  userExitPrice?: number | null;
+}): boolean => d.userAction === "TRADED" && d.userExitPrice == null;
 
 /**
  * A close-confirmed fire that is still ACTIONABLE — the setup broke out and the trade
  * has not already played out. 'resolved' is deliberately excluded: it fired AND hit its
  * stop or target, so it must never join the actionable LIVE group.
  */
-export const isFiredActionable = (d: JackDecisionClient): boolean =>
+export const isFiredActionable = (d: { firedStatus?: string | null }): boolean =>
   d.firedStatus === "confirmed" || d.firedStatus === "late";
 
 /**

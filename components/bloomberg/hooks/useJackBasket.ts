@@ -7,6 +7,8 @@ export interface JackBasketFeed {
   reason?: string;
   candidates?: BasketCandidate[];
   open?: OpenHolding[];
+  /** Size of the un-narrowed pending pipeline, for the empty state. */
+  pendingTotal?: number;
   error?: string;
 }
 

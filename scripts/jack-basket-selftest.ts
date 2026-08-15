@@ -9,6 +9,8 @@
  */
 import {
   computeBasket,
+  selectBasketCandidates,
+  isBasketEligible,
   trimToFit,
   buildOrderList,
   computeRR,
@@ -373,6 +375,123 @@ console.log("\n[10] Empty / degenerate inputs");
   const t = computeBasket([cand({ ticker: "NOGEO", entry: null, stop: null })], [], opts());
   check("missing geometry is flagged and hidden", t.rows[0].flags.includes("missing_geometry") && t.rows[0].hidden);
   check("  contributes nothing", t.included.length === 0 && t.positionDollars === 0);
+}
+
+// ===========================================================================
+console.log("\n[11] Basket sources the LIVE (FIRED) group, not raw pending");
+// ===========================================================================
+{
+  // One row of every kind the board can hand us. Only the fired-actionable,
+  // tradeable, non-owned ones are buyable at the next open.
+  const fired = (st: string) => ({ firedStatus: st, firedAt: "2026-08-14" });
+  const mixed = [
+    { ...cand({ ticker: "PENDING" }) },
+    { ...cand({ ticker: "CONFIRMED" }), ...fired("confirmed") },
+    { ...cand({ ticker: "LATE" }), ...fired("late") },
+    { ...cand({ ticker: "RESOLVED" }), ...fired("resolved") },
+    { ...cand({ ticker: "OWNEDFIRED" }), ...fired("confirmed"), userAction: "TRADED", userExitPrice: null },
+    { ...cand({ ticker: "EXITEDFIRED" }), ...fired("confirmed"), userAction: "TRADED", userExitPrice: 120 },
+    { ...cand({ ticker: "Q1FIRED", tier: "Q1", sizeBucket: "skip" }), ...fired("confirmed") },
+    { ...cand({ ticker: "Q2FIRED", tier: "Q2", sizeBucket: null }), ...fired("confirmed") },
+  ];
+
+  const picked = selectBasketCandidates(mixed).map((r) => r.ticker).sort();
+  check("only fired-actionable + tradeable + non-owned survive",
+    picked.join(",") === "CONFIRMED,EXITEDFIRED,LATE", picked.join(","));
+  check("  un-fired pending is excluded", !picked.includes("PENDING"));
+  check("  fired-but-RESOLVED is excluded", !picked.includes("RESOLVED"));
+  check("  an owned (held) setup is excluded", !picked.includes("OWNEDFIRED"));
+  check("  a traded-then-EXITED setup is buyable again", picked.includes("EXITEDFIRED"));
+  check("  Q1 SKIP is excluded even though it fired", !picked.includes("Q1FIRED"));
+  check("  Q2 SKIP is excluded even though it fired", !picked.includes("Q2FIRED"));
+
+  check("isBasketEligible: confirmed -> true", isBasketEligible({ firedStatus: "confirmed", sizeBucket: "full", tier: "Q5" }));
+  check("isBasketEligible: late -> true", isBasketEligible({ firedStatus: "late", sizeBucket: "full", tier: "Q5" }));
+  check("isBasketEligible: resolved -> false", !isBasketEligible({ firedStatus: "resolved", sizeBucket: "full", tier: "Q5" }));
+  check("isBasketEligible: null firedStatus -> false", !isBasketEligible({ firedStatus: null, sizeBucket: "full", tier: "Q5" }));
+  check("isBasketEligible: owned -> false", !isBasketEligible({ firedStatus: "confirmed", sizeBucket: "full", userAction: "TRADED", userExitPrice: null }));
+
+  const t = computeBasket(selectBasketCandidates(mixed), [], opts());
+  check("the sized basket holds exactly the eligible rows",
+    t.rows.map((r) => r.ticker).sort().join(",") === "CONFIRMED,EXITEDFIRED,LATE", t.rows.map((r) => r.ticker).join(","));
+  check("  every sized row is a fired one", t.rows.length === 3);
+  check("  and the empty case is empty, not everything",
+    computeBasket(selectBasketCandidates([cand({ ticker: "NOTFIRED" })]), [], opts()).rows.length === 0);
+}
+
+// ===========================================================================
+console.log("\n[12] Open positions are run-INDEPENDENT and all roll in");
+// ===========================================================================
+{
+  // Open positions are owned + un-exited; they persist across validation runs, so a
+  // holding opened weeks ago must still count toward every capacity check.
+  const openBook = [
+    hold({ ticker: "OLD1", sector: "Energy" }),
+    hold({ ticker: "OLD2", sector: "Energy" }),
+    hold({ ticker: "OLD3", sector: "Financials" }),
+    hold({ ticker: "OLD4", sector: "Health Care" }),
+    hold({ ticker: "OLD5", sector: "Technology" }),
+  ];
+  const liveRow = { ...cand({ ticker: "NEW", sector: "Utilities" }), firedStatus: "confirmed" };
+  const t = computeBasket([liveRow], openBook, opts());
+
+  check("ALL open positions are counted, not just one", t.openCount === 5, String(t.openCount));
+  check("  open notional sums every holding", near(t.openNotional, 25_000), String(t.openNotional));
+  check("  buying power subtracts all of them", near(t.buyingPower, 45_000), String(t.buyingPower));
+  check("  open risk sums every holding", near(t.openRiskDollars, 2500), String(t.openRiskDollars));
+  check("  slots count all open + new", t.slotsUsed === 6, String(t.slotsUsed));
+  check("  heat includes all open risk", near(t.heatPct, ((2500 + 525) / DEFAULT_ACCOUNT_SIZE) * 100), String(t.heatPct));
+
+  const secNames = t.sectors.map((x) => x.sector).sort().join(",");
+  check("every open sector appears in the panel",
+    secNames === "Energy,Financials,Health Care,Technology,Utilities", secNames);
+  check("  the 2-name Energy sector keeps BOTH tickers",
+    t.sectors.find((x) => x.sector === "Energy")!.openTickers.join(",") === "OLD1,OLD2");
+  check("  a same-sector holding pair counts 2, not 1",
+    t.sectors.find((x) => x.sector === "Energy")!.open === 2);
+
+  const other = { ...cand({ ticker: "OTHER", sector: "Materials" }), firedStatus: "confirmed" };
+  const t2 = computeBasket([other], openBook, opts());
+  check("re-validating does not change the open count", t2.openCount === t.openCount);
+  check("  nor open notional / buying power",
+    near(t2.openNotional, t.openNotional) && near(t2.buyingPower, t.buyingPower));
+  check("an empty basket still carries the whole open book",
+    computeBasket([], openBook, opts()).openCount === 5);
+}
+
+// ===========================================================================
+console.log("\n[13] Account size is a live parameter, not a constant");
+// ===========================================================================
+{
+  const rows = [cand({ ticker: "AAA" })];
+  const at70 = computeBasket(rows, [], opts({ accountSize: 70_000 }));
+  const at35 = computeBasket(rows, [], opts({ accountSize: 35_000 }));
+  const at140 = computeBasket(rows, [], opts({ accountSize: 140_000 }));
+
+  check("default account size is $70,000",
+    defaultBasketOptions().accountSize === DEFAULT_ACCOUNT_SIZE && DEFAULT_ACCOUNT_SIZE === 70_000);
+  check("halving the account halves risk$", near(at35.riskDollars, at70.riskDollars / 2),
+    at35.riskDollars + " vs " + at70.riskDollars);
+  check("  and halves the share count", at35.rows[0].shares === Math.floor(at70.rows[0].shares / 2), String(at35.rows[0].shares));
+  // NOT exactly half: shares are FLOORED, so $262.50 / $5 = 52 shares, not 52.5.
+  check("  position$ follows the floored share count", near(at35.positionDollars, 52 * 100), String(at35.positionDollars));
+  check("  which is within one share of half", Math.abs(at35.positionDollars - at70.positionDollars / 2) <= 100);
+  check("  reward$ likewise follows the floored shares", near(at35.rewardDollars, 52 * 15), String(at35.rewardDollars));
+  check("doubling the account doubles risk$", near(at140.riskDollars, at70.riskDollars * 2));
+
+  const openBook = [hold({ ticker: "H1" })];
+  const bp70 = computeBasket(rows, openBook, opts({ accountSize: 70_000 }));
+  const bp35 = computeBasket(rows, openBook, opts({ accountSize: 35_000 }));
+  check("buying power = account - open notional, at 70k", near(bp70.buyingPower, 65_000), String(bp70.buyingPower));
+  check("  and tracks the account down to 35k", near(bp35.buyingPower, 30_000), String(bp35.buyingPower));
+  // Heat RISES as the account shrinks, but not by exactly 2x: the OPEN risk is a fixed
+  // dollar amount while the new-basket risk scales with the account.
+  check("heat rises when the account halves", bp35.heatPct > bp70.heatPct, bp35.heatPct + " vs " + bp70.heatPct);
+  check("  heat at 70k = (525 new + 500 open)/70k", near(bp70.heatPct, (1025 / 70_000) * 100), String(bp70.heatPct));
+  check("  heat at 35k = (262.50 new + 500 open)/35k", near(bp35.heatPct, (762.5 / 35_000) * 100), String(bp35.heatPct));
+
+  const odd = computeBasket(rows, [], opts({ accountSize: 12_345 }));
+  check("an arbitrary account size flows through", near(odd.riskDollars, 12_345 * 0.0075), String(odd.riskDollars));
 }
 
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed\n`);

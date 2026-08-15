@@ -182,17 +182,6 @@ export function JackBasketView({ isDarkMode = true, onBack }: Props) {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <label className={`text-[11px] ${subFg} flex items-center gap-1`}>
-            account
-            <input
-              type="number"
-              min={1}
-              step={1000}
-              value={accountSize}
-              onChange={(e) => setAccount(Number(e.target.value))}
-              className={`w-24 px-1.5 py-0.5 rounded ${inputBg} ${inputBorder} border ${fg} font-mono text-[11px] focus:outline-none focus:border-orange-500`}
-            />
-          </label>
           <button
             type="button"
             onClick={() => refetch()}
@@ -207,6 +196,21 @@ export function JackBasketView({ isDarkMode = true, onBack }: Props) {
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 min-w-0">
         {/* Controls */}
         <div className={`flex flex-wrap items-center gap-3 text-[11px] mb-3 print:hidden`}>
+          {/* Account size drives EVERY dollar figure below — risk$, position$, reward$,
+              buying power, heat and all totals re-compute live from this one input. */}
+          <label className={`flex items-center gap-1.5 ${fg} font-bold`}>
+            ACCOUNT $
+            <input
+              type="number"
+              min={1}
+              step={1000}
+              value={accountSize}
+              onChange={(e) => setAccount(Number(e.target.value))}
+              title="Account size — drives risk$, position$, reward$, buying power, heat and every total. Persisted."
+              className={`w-28 px-1.5 py-1 rounded ${inputBg} border-2 border-orange-700 ${fg} font-mono text-[12px] font-bold focus:outline-none focus:border-orange-500`}
+            />
+          </label>
+          <div className={`w-px h-5 ${hairline}`} />
           <label className="flex items-center gap-1">
             <input
               type="checkbox"
@@ -313,6 +317,9 @@ export function JackBasketView({ isDarkMode = true, onBack }: Props) {
 
         {/* The standing caveat */}
         <div className={`text-[10px] ${subFg} border ${border} ${cardBg} rounded px-2.5 py-1.5 mb-3`}>
+          Rows are the board's <b className={fg}>LIVE (fired)</b> new-entry group — close-confirmed above the rim,
+          tradeable (Q3–Q5), not already held. Un-fired pending and already-resolved setups are excluded.
+          <br />
           Frictionless — <b className={fg}>sizes are ceilings</b>, not instructions. Slippage, partial fills, and your own
           discretion all reduce them. Sector caps, buying power, heat and slots all include your OPEN positions.
         </div>
@@ -481,8 +488,20 @@ export function JackBasketView({ isDarkMode = true, onBack }: Props) {
               ))}
               {totals.rows.length === 0 && (
                 <tr>
-                  <td colSpan={17} className={`px-1.5 py-3 text-center ${subFg}`}>
-                    {live ? "No pending setups on the current board." : "LIVE pull is off."}
+                  <td colSpan={17} className={`px-1.5 py-4 text-center ${subFg}`}>
+                    {!live ? (
+                      "LIVE pull is off."
+                    ) : (
+                      <>
+                        No live (fired) setups right now — the basket fills as setups fire and move to LIVE.
+                        {data?.pendingTotal ? (
+                          <div className="mt-1 opacity-80">
+                            {data.pendingTotal} setup{data.pendingTotal === 1 ? "" : "s"} still pending, waiting on a
+                            confirming close above the rim.
+                          </div>
+                        ) : null}
+                      </>
+                    )}
                   </td>
                 </tr>
               )}

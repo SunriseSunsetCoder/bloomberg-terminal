@@ -17,7 +17,14 @@
 // =============================================================================
 
 import { computeSizing, isTradeableSetup, normalizeSizeBucket } from "@/lib/jack/handle-score";
-import { computePriorityRanks, rankKey, sortByRank, type RankableRow } from "@/lib/jack/combine-decisions";
+import {
+  computePriorityRanks,
+  isFiredActionable,
+  isOwnedPosition,
+  rankKey,
+  sortByRank,
+  type RankableRow,
+} from "@/lib/jack/combine-decisions";
 
 // ---- Frozen policy knobs ----------------------------------------------------
 
@@ -56,6 +63,46 @@ export function riskPctFor(tier: string | null | undefined, scheme: RiskScheme):
   const table = TIER_RISK_PCT[scheme];
   const pct = t === "Q5" ? table.Q5 : t === "Q4" ? table.Q4 : table.Q3;
   return t === "Q5" ? Math.min(pct, Q5_RISK_CAP_PCT) : pct;
+}
+
+// ---- Candidate selection ----------------------------------------------------
+
+/** The minimum needed to decide whether a board row belongs in the basket. */
+export interface BasketEligibleInput {
+  firedStatus?: string | null;
+  sizeBucket?: string | null;
+  tier?: string | null;
+  userAction?: string | null;
+  userExitPrice?: number | null;
+}
+
+/**
+ * Does this board row belong in the basket?
+ *
+ * The basket sizes what you would BUY AT THE NEXT OPEN — i.e. the board's LIVE
+ * (fired) new-entry group, not the whole pending pipeline. Three gates, every one of
+ * them the board's own rule rather than a re-derivation:
+ *
+ *   · FIRED and still actionable — isFiredActionable: 'confirmed' or 'late'. A setup
+ *     that has not closed above its rim yet is not buyable, and a 'resolved' one has
+ *     already hit its stop or target, so neither can be sized.
+ *   · TRADEABLE — isTradeableSetup: the frozen SIZE_MAP (Q1/Q2 = skip, never entered).
+ *   · NOT OWNED — isOwnedPosition: something you already hold is a position to manage,
+ *     not a new entry. getPendingSetups() already excludes these; this is the safety
+ *     net that keeps the rule true even if the source changes.
+ */
+export function isBasketEligible(row: BasketEligibleInput): boolean {
+  if (isOwnedPosition(row)) return false;
+  if (!isFiredActionable(row)) return false;
+  return isTradeableSetup(row);
+}
+
+/**
+ * Narrow a board/pending row set down to the basket's LIVE (fired) candidates.
+ * Generic so it can run on PendingSetupRow straight out of the accessor.
+ */
+export function selectBasketCandidates<T extends BasketEligibleInput>(rows: T[]): T[] {
+  return rows.filter(isBasketEligible);
 }
 
 // ---- Inputs -----------------------------------------------------------------
