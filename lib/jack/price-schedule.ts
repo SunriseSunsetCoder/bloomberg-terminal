@@ -128,8 +128,10 @@ export async function priceScheduleTick(): Promise<void> {
             (r.ranOutcomes ? ` · outcomes: ${r.outcomeSummary}` : "")
         );
         // Close-based SYSTEM alerts, evaluated AFTER the eod refresh wrote jack:prices.
-        // selfBase() is passed through so the close-confirmed ENTRY pass can pull the
-        // same daily bars the outcome tracker uses (official closes, not tngoLast).
+        // selfBase() is passed through so the close-confirmed ENTRY pass AND the
+        // second-chance recovery pass can pull the same daily bars the outcome tracker
+        // uses (official closes, not tngoLast). Both are daily-bar signals — EOD only,
+        // never intraday — and both run inside this once-per-ET-day marker.
         await evaluateEodAlerts(now, `${selfBase()}/api/tiingo`);
       } catch (err) {
         console.error("JACK price refresh (scheduled eod) failed:", err);

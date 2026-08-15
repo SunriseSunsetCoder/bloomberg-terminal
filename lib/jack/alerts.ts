@@ -22,6 +22,10 @@ import { fetchEarningsMap, earningsEnabled } from "./finnhub";
 // The frozen size map decides what is tradeable — a SKIP setup is never entered, so it
 // must never produce an actionable entry signal.
 import { isTradeableSetup } from "./handle-score";
+// Recovery re-entry gate — pure, shares detectFire with the paper replay.
+import { evalSecondChance, RETEST_WINDOW_BARS, RUNUP_FRAC } from "./second-chance";
+// The board's LIVE-group rule, so the candidate pool matches what the board shows.
+import { isInLiveDisplayGroup, isOwnedPosition } from "./combine-decisions";
 
 // ---- Thresholds (named constants; the only knobs) --------------------------
 export const APPROACH_PCT = 0.03; // NOW within 3% of stop/target
@@ -51,14 +55,18 @@ export type AlertType =
   // target touched), so it is reported but must never say "buy".
   | "entry_confirmed"
   | "late_entry"
-  | "entry_resolved";
+  | "entry_resolved"
+  // Recovery re-entry on a setup that fired, was never taken, and has pulled back to
+  // its original entry while still live. SYSTEM tier — backtested, not a heads-up.
+  | "second_chance";
 
 export type HealthFailure =
   | "intraday_refresh"
   | "eod_refresh"
   | "iex_batch"
   | "finnhub_fetch"
-  | "entry_bars_fetch";
+  | "entry_bars_fetch"
+  | "second_chance_bars_fetch";
 
 export interface Alert {
   type: AlertType;
@@ -335,6 +343,16 @@ export function entryMarkerKey(ticker: string, handleLowDate: string): string {
   return `jack:alert:entry_confirmed:${T(ticker.trim())}:${handleLowDate.trim()}`;
 }
 
+/**
+ * ONCE-PER-SETUP marker for the recovery re-entry. Same shape and discipline as
+ * entryMarkerKey: setup identity, no ET date, no TTL. A setup gets at most ONE
+ * recovery ping for its lifetime — if it pulls back, bounces and pulls back again we
+ * do not re-spam, because the second pullback is not new information.
+ */
+export function secondChanceMarkerKey(ticker: string, handleLowDate: string): string {
+  return `jack:alert:second_chance:${T(ticker.trim())}:${handleLowDate.trim()}`;
+}
+
 // Err toward SENDING on a Redis read failure (a rare dup beats a missed stop-hit).
 async function alreadySent(key: string): Promise<boolean> {
   try {
@@ -389,6 +407,7 @@ const HEALTH_LABEL: Record<HealthFailure, string> = {
   iex_batch: "IEX batch unavailable",
   finnhub_fetch: "earnings fetch failed",
   entry_bars_fetch: "entry-alert daily bars fetch failed",
+  second_chance_bars_fetch: "second-chance daily bars fetch failed",
 };
 
 export async function fireHealth(failure: HealthFailure, detail: string, etDate: string): Promise<boolean> {
@@ -626,6 +645,139 @@ async function evaluateEntryConfirmations(
   return fired;
 }
 
+/**
+ * SECOND CHANCE — a missed setup has pulled back to its original entry.
+ *
+ * Pure message builder (the gate itself is evalSecondChance). SYSTEM tier: this is a
+ * backtested signal, not a heads-up. The footer caveat is not decoration — re-entering
+ * on a pullback RESTORES the original R:R, it does not improve it, and using it as a
+ * substitute for the normal entry is a worse strategy. Say so every time.
+ */
+export function evalSecondChanceAlert(args: {
+  ticker: string;
+  tier: string | null;
+  pRank: number | null;
+  entry: number;
+  stop: number;
+  t05: number;
+  rr: number | null;
+  barsSinceEntry: number;
+  runupPct: number | null;
+}): Alert {
+  const head = [
+    `🔁 SECOND CHANCE — ${T(args.ticker)}`,
+    args.pRank != null || args.tier ? `  (${[args.pRank != null ? `P${args.pRank}` : null, args.tier?.toUpperCase() ?? null].filter(Boolean).join(" · ")})` : "",
+  ].join("");
+
+  const text =
+    `${head}\n` +
+    `Missed setup pulled back to entry — re-entry available.\n` +
+    `Entry (limit) ${p2(args.entry)}  ·  stop ${p2(args.stop)}  ·  t05 ${p2(args.t05)}\n` +
+    `R:R ${args.rr != null ? args.rr.toFixed(2) : "—"}` +
+    `  ·  ${args.barsSinceEntry} bar${args.barsSinceEntry === 1 ? "" : "s"} since fire` +
+    (args.runupPct != null ? `  ·  ran up ${args.runupPct.toFixed(0)}% toward t05, then retested` : "") +
+    `\n` +
+    `Never hit target, never stopped — still live.\n` +
+    `recovery of a missed entry — restores original R:R, doesn't improve it (backtested +0.32R / PF 1.83)`;
+
+  return mk("second_chance", "system", args.ticker, text);
+}
+
+/**
+ * EOD recovery pass. Runs after the entry confirmations, on the same 18:00 block.
+ *
+ * CANDIDATE POOL — the full run-scoped board (LIVE + pending), owned- and
+ * retired-excluded, NOT getPendingSetups(). getPendingSetups() returns only
+ * section='pending' rows; sourcing from it is exactly what left the Basket Sizer blank
+ * while the board showed LIVE (10), because a validated-LIVE setup never appears there.
+ *
+ * FIRE GATE — evalSecondChance runs the SHARED detectFire over the bars. We do not
+ * gate on the fired_at column: the EOD pass only stamps it on pending rows, so a
+ * validated-LIVE setup would be excluded despite having fired.
+ *
+ * Failure discipline matches the entry pass: per-setup try/catch, a bars-fetch failure
+ * routes to the OPERATIONAL health path, and one bad setup never aborts the loop.
+ */
+async function evaluateSecondChance(
+  etDate: string,
+  tiingoBase: string,
+  dbRead: typeof import("@/lib/db/read")
+): Promise<number> {
+  const board = dbRead.getCurrentBoard();
+  const candidates = [...board.live, ...board.pending].filter(
+    (r) => !isOwnedPosition(r) && r.retiredAt == null && isTradeableSetup(r) && isInLiveDisplayGroup(r)
+  );
+  if (candidates.length === 0) return 0;
+
+  let ranks = new Map<number, number>();
+  try {
+    const dbAnalytics = require("@/lib/db/analytics") as typeof import("@/lib/db/analytics");
+    ranks = dbAnalytics.getPriorityRanks();
+  } catch (err) {
+    console.warn("JACK second-chance: P-rank lookup unavailable, omitting the field:", err);
+  }
+
+  let fired = 0;
+  let fetchFailures = 0;
+  const reasons = new Map<string, number>();
+
+  for (const s of candidates) {
+    try {
+      if (s.breakout == null || s.stop == null || s.target == null) continue;
+
+      // Dedup BEFORE the fetch — an already-alerted setup costs no Tiingo call.
+      const key = secondChanceMarkerKey(s.ticker, s.handleLowDate);
+      if (await alreadySent(key)) continue;
+
+      const { bars, error } = await fetchDailyBars(tiingoBase, s.ticker, s.handleLowDate);
+      if (error || bars.length === 0) {
+        fetchFailures++;
+        continue;
+      }
+
+      const res = evalSecondChance(
+        { handleLowDate: s.handleLowDate, breakout: s.breakout, stop: s.stop, target: s.target },
+        bars
+      );
+      reasons.set(res.reason, (reasons.get(res.reason) ?? 0) + 1);
+      if (!res.eligible) continue;
+
+      const alert = evalSecondChanceAlert({
+        ticker: s.ticker,
+        tier: s.tier,
+        pRank: ranks.get(s.setupId) ?? null,
+        entry: res.entry as number,
+        stop: res.stop as number,
+        t05: res.t05 as number,
+        rr: res.rr,
+        barsSinceEntry: res.barsSinceEntry as number,
+        runupPct: res.runupPct,
+      });
+
+      // No TTL — one recovery ping per setup, ever.
+      if (await fireOnce(alert, key)) fired++;
+    } catch (err) {
+      console.error(`JACK second-chance failed for ${s.ticker}:`, err);
+      fetchFailures++;
+    }
+  }
+
+  if (fetchFailures > 0) {
+    await fireHealth(
+      "second_chance_bars_fetch",
+      `${fetchFailures}/${candidates.length} board setups could not be checked for a recovery re-entry`,
+      etDate
+    );
+  }
+  console.log(
+    `JACK second chance: ${fired} fired · ${candidates.length} candidate(s) checked ` +
+      `(runup>=${RUNUP_FRAC * 100}% toward t05, <=${RETEST_WINDOW_BARS} bars) · ` +
+      `${[...reasons.entries()].map(([r, n]) => `${r}:${n}`).join(" ") || "no evaluations"}` +
+      (fetchFailures > 0 ? ` · ${fetchFailures} fetch failure(s)` : "")
+  );
+  return fired;
+}
+
 export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise<number> {
   if (!alertsEnabled()) return 0;
   const etDate = etDateISO(now);
@@ -689,6 +841,13 @@ export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise
       fired += await evaluateEntryConfirmations(now, etDate, tiingoBase, dbRead);
     } catch (err) {
       console.error("JACK entry-confirmation pass failed:", err);
+    }
+    // RECOVERY pass — isolated from the entry pass for the same reason the entry pass
+    // is isolated from the exit alerts: one failing must never suppress the others.
+    try {
+      fired += await evaluateSecondChance(etDate, tiingoBase, dbRead);
+    } catch (err) {
+      console.error("JACK second-chance pass failed:", err);
     }
   } else {
     console.warn("JACK entry confirmations skipped — no tiingoBase passed to evaluateEodAlerts");
