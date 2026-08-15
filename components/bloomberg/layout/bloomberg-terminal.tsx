@@ -28,6 +28,7 @@ import { IVView } from "../views/iv-view";
 import { JackView } from "../views/jack-view";
 import { JackAnalyticsView } from "../views/jack-analytics-view";
 import { JackScorecardView } from "../views/jack-scorecard-view";
+import { JackBasketView } from "../views/jack-basket-view";
 import MarketMoversView from "../views/market-movers-view";
 import { MarketView } from "../views/market-view";
 import NewsView from "../views/news-view";
@@ -54,6 +55,7 @@ export default function BloombergTerminal() {
 	handleJackView,
     handleJackAnalyticsView,
     handleJackScorecardView,
+    handleJackBasketView,
     handleCancelClick,
     handleNewClick,
     handleBlancClick,
@@ -232,6 +234,14 @@ export default function BloombergTerminal() {
     );
   }
 
+  if (currentView === "jackBasket") {
+    return (
+      <TerminalLayout shortcuts={shortcuts}>
+        <JackBasketView isDarkMode={isDarkMode} onBack={handleBackFromView} />
+      </TerminalLayout>
+    );
+  }
+
   return (
     <TerminalLayout shortcuts={shortcuts}>
       <TerminalHeader
@@ -248,6 +258,7 @@ export default function BloombergTerminal() {
 		onJackClick={handleJackView}
         onJackAnalyticsClick={handleJackAnalyticsView}
         onJackScorecardClick={handleJackScorecardView}
+        onJackBasketClick={handleJackBasketView}
         onHelpClick={handleHelpClick}
         onThemeToggle={handleThemeToggle}
       />

@@ -246,6 +246,10 @@ export interface OpenPositionRow {
   jackAnalysisAtMark: string | null;
   handleScore: number | null;
   sizeBucket: string | null;
+  // DISPLAY ONLY — the combined-book sector cap counts OPEN positions too, so the
+  // basket sizer needs the sector of what you already hold.
+  sector: string | null;
+  tier: string | null;
   userEntryPrice: number | null;
   userEntryDate: string | null;
   userExitPrice: number | null;
@@ -279,6 +283,8 @@ export function getOpenPositions(): OpenPositionRow[] {
          dm.jack_analysis_at_mark AS jackAnalysisAtMark,
          s.handle_score          AS handleScore,
          s.size_bucket           AS sizeBucket,
+         s.sector                AS sector,
+         s.tier                  AS tier,
          o.user_entry_price      AS userEntryPrice,
          o.user_entry_date       AS userEntryDate,
          o.user_exit_price       AS userExitPrice,
@@ -339,6 +345,8 @@ export interface CurrentBoardRow {
   tier: string | null;
   priority: number | null;
   sizeBucket: string | null;
+  sector: string | null;
+  handleScore: number | null;
   // Close-confirmed FIRE flag (display status; `section` is unchanged by a fire).
   firedAt: string | null;
   fireClose: number | null;
@@ -398,6 +406,8 @@ export function getCurrentBoard(): { runId: number | null; live: CurrentBoardRow
          s.tier             AS tier,
          s.priority         AS priority,
          s.size_bucket      AS sizeBucket,
+         s.sector           AS sector,
+         s.handle_score     AS handleScore,
          d.fired_at         AS firedAt,
          d.fire_close       AS fireClose,
          d.fire_bar         AS fireBar,
@@ -448,6 +458,8 @@ export interface PendingSetupRow {
   tier: string | null;
   priority: number | null;
   sizeBucket: string | null;
+  sector: string | null;
+  handleScore: number | null;
   // Close-confirmed FIRE flag (display status only — never a scoping input).
   firedAt: string | null;
   fireClose: number | null;
@@ -496,6 +508,8 @@ export function getPendingSetups(): PendingSetupRow[] {
       tier: r.tier,
       priority: r.priority,
       sizeBucket: r.sizeBucket,
+      sector: r.sector,
+      handleScore: r.handleScore,
       firedAt: r.firedAt,
       fireClose: r.fireClose,
       fireBar: r.fireBar,

@@ -159,6 +159,8 @@ async function main(): Promise<void> {
           tier: null,
           priority: null,
           sizeBucket: p.sizeBucket,
+          sector: null,
+          handleScore: p.handleScore,
           firedAt: null,
           fireClose: null,
           fireBar: null,

@@ -90,8 +90,22 @@ function applyFiredDisplaySection(d: JackDecisionClient): JackDecisionClient {
 
 const BUCKET_RANK: Record<string, number> = { full: 0, half: 1, skip: 2 };
 
+/**
+ * The minimum a row needs to be ranked. Structural on purpose: JackDecisionClient
+ * satisfies it, and so does a PendingSetupRow-derived object, so the Basket Sizer ranks
+ * with THIS function instead of re-deriving the blend.
+ */
+export interface RankableRow {
+  ticker: string;
+  handleLowDate: string;
+  userAction?: string | null;
+  priority?: number | null;
+  sizeBucket?: string | null;
+  handleScore?: number | null;
+}
+
 /** Identity for rank lookup. NOT section-keyed — a row's section can change for display. */
-export const rankKey = (d: JackDecisionClient): string => `${d.ticker}|${d.handleLowDate}`;
+export const rankKey = (d: RankableRow): string => `${d.ticker}|${d.handleLowDate}`;
 
 /** Where the row lives in the DB, regardless of where it is being displayed. */
 export const dbSectionOf = (d: JackDecisionClient): "live" | "pending" | "open" =>
@@ -103,7 +117,7 @@ export const dbSectionOf = (d: JackDecisionClient): "live" | "pending" | "open" 
  * Owned (TRADED) rows and rows with no scanner priority consume no number — a P-rank
  * covers setups you can still deploy into, matching the prior behaviour.
  */
-export function computePriorityRanks(rows: JackDecisionClient[]): Map<string, number> {
+export function computePriorityRanks(rows: RankableRow[]): Map<string, number> {
   const ranked = rows
     .filter((d) => d.userAction !== "TRADED" && d.priority != null)
     .map((d, i) => ({ d, i }))
@@ -135,10 +149,7 @@ export function computePriorityRanks(rows: JackDecisionClient[]): Map<string, nu
  * cached before this ordering existed. Sorting an already-ordered list is a no-op, so
  * this is safe to apply unconditionally.
  */
-export function sortByRank(
-  rows: JackDecisionClient[],
-  ranks: Map<string, number>
-): JackDecisionClient[] {
+export function sortByRank<T extends RankableRow>(rows: T[], ranks: Map<string, number>): T[] {
   return rows
     .map((d, i) => ({ d, i, rank: ranks.get(rankKey(d)) ?? Number.POSITIVE_INFINITY }))
     .sort((a, b) => (a.rank !== b.rank ? a.rank - b.rank : a.i - b.i))

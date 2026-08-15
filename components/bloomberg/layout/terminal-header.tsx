@@ -6,6 +6,7 @@ import {
   BarChart2,
   Briefcase,
   Gauge,
+  Calculator,
   Database,
   HelpCircle,
   Moon,
@@ -37,6 +38,7 @@ type TerminalHeaderProps = {
   onJackClick: () => void;
   onJackAnalyticsClick: () => void;
   onJackScorecardClick: () => void;
+  onJackBasketClick: () => void;
   onHelpClick: () => void;
   onThemeToggle: () => void;
 };
@@ -84,6 +86,7 @@ export function TerminalHeader({
   onJackClick,
   onJackAnalyticsClick,
   onJackScorecardClick,
+  onJackBasketClick,
   onHelpClick,
   onThemeToggle,
 }: TerminalHeaderProps) {
@@ -188,6 +191,10 @@ export function TerminalHeader({
         <BloombergButton color="green" onClick={onJackScorecardClick}>
           <Gauge className="h-3 w-3 mr-1" />
           JSCORE
+        </BloombergButton>
+        <BloombergButton color="green" onClick={onJackBasketClick}>
+          <Calculator className="h-3 w-3 mr-1" />
+          BASKET
         </BloombergButton>
         <BloombergButton color="accent" onClick={onHelpClick}>
           <HelpCircle className="h-3 w-3 mr-1" />
