@@ -5,6 +5,8 @@ import { ArrowLeft, Calculator, RefreshCw, RotateCcw, Copy, Check, Scissors, Pri
 import { useJackBasket } from "@/components/bloomberg/hooks/useJackBasket";
 import {
   computeBasket,
+  openNotionalOf,
+  openRiskOf,
   trimToFit,
   buildOrderList,
   defaultBasketOptions,
@@ -91,6 +93,10 @@ export function JackBasketView({ isDarkMode = true, onBack }: Props) {
 
   const candidates = useMemo(() => (live ? data?.candidates ?? [] : []), [live, data?.candidates]);
   const open = useMemo(() => data?.open ?? [], [data?.open]);
+  // Only render a column when at least one holding actually carries the field —
+  // an all-blank column is worse than no column.
+  const showTier = useMemo(() => open.some((p) => p.tier != null && p.tier !== ""), [open]);
+  const showSector = useMemo(() => open.some((p) => p.sector != null && p.sector !== ""), [open]);
   const totals = useMemo(() => computeBasket(candidates, open, opts), [candidates, open, opts]);
 
   const setAccount = useCallback((n: number) => {
@@ -335,7 +341,22 @@ export function JackBasketView({ isDarkMode = true, onBack }: Props) {
           </div>
         )}
         {live && data?.error && (
-          <div className="text-red-400 text-sm p-3 rounded bg-red-950/20 border border-red-900">Error: {data.error}</div>
+          <div className="text-red-400 text-sm p-3 rounded bg-red-950/20 border border-red-900 mb-3">
+            Error: {data.error}
+          </div>
+        )}
+        {live && data?.candidatesError && (
+          <div className="text-red-400 text-[11px] p-2 rounded bg-red-950/20 border border-red-900 mb-2">
+            <AlertTriangle size={11} className="inline mr-1" />
+            LIVE feed failed: {data.candidatesError} — open positions below are unaffected.
+          </div>
+        )}
+        {live && data?.openError && (
+          <div className="text-red-400 text-[11px] p-2 rounded bg-red-950/20 border border-red-900 mb-2">
+            <AlertTriangle size={11} className="inline mr-1" />
+            Open-position feed failed: {data.openError} — sector caps, buying power and heat are
+            UNDERSTATED until this is fixed.
+          </div>
         )}
         {!live && (
           <div className={`text-[11px] ${subFg} mb-3`}>
@@ -509,23 +530,106 @@ export function JackBasketView({ isDarkMode = true, onBack }: Props) {
           </table>
         </div>
 
-        {/* Open book, for context */}
-        {open.length > 0 && (
-          <>
-            <div className="flex items-center gap-2 mt-5 mb-1">
-              <span className={`text-[11px] font-bold ${fg} tracking-widest`}>OPEN POSITIONS (counted in every cap)</span>
-              <div className={`flex-1 h-px ${hairline}`} />
-            </div>
+        {/* OPEN POSITIONS — always rendered, and deliberately styled like the board's
+            CURRENT POSITIONS group (amber accent, tinted card) so it reads as CONTEXT,
+            not as new orders. Run-independent: shows whether or not anything fired this
+            week and whether or not the LIVE feed succeeded. */}
+        <div className={`rounded border ${border} ${isDarkMode ? "bg-amber-950/15" : "bg-amber-50"} p-2 mt-5`}>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-[11px] font-bold tracking-widest text-amber-400">OPEN POSITIONS</span>
+            <span className={`text-[11px] ${subFg}`}>({open.length})</span>
+            <span className={`text-[10px] ${subFg}`}>
+              {open.length === 0
+                ? "— none held"
+                : "— counted in every cap (sector · buying power · heat · slots)"}
+            </span>
+            <div className={`flex-1 h-px ${hairline}`} />
+          </div>
+
+          {open.length === 0 ? (
             <div className={`text-[11px] ${subFg}`}>
-              {open.map((p) => (
-                <span key={p.ticker} className="mr-3">
-                  {p.ticker}
-                  {p.sector ? ` · ${p.sector}` : ""} · {p.shares ?? 0} sh
-                </span>
-              ))}
+              {data?.openError
+                ? "Could not load open positions — see the error above."
+                : "Nothing marked TRADED without a recorded exit. The whole account is available buying power."}
             </div>
-          </>
-        )}
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="text-[11px] w-full">
+                <thead>
+                  <tr className={subFg}>
+                    <th className="text-left px-1.5 py-0.5 font-normal">Ticker</th>
+                    {showTier && <th className="text-left px-1.5 py-0.5 font-normal">Tier</th>}
+                    {showSector && <th className="text-left px-1.5 py-0.5 font-normal">Sector</th>}
+                    <th className="text-right px-1.5 py-0.5 font-normal">Shares</th>
+                    <th className="text-right px-1.5 py-0.5 font-normal">Entry/Fill</th>
+                    <th className="text-right px-1.5 py-0.5 font-normal">Stop</th>
+                    <th className="text-right px-1.5 py-0.5 font-normal">Position $</th>
+                    <th className="text-right px-1.5 py-0.5 font-normal">Risk $</th>
+                    <th className="text-right px-1.5 py-0.5 font-normal">%Acct</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {open.map((p) => {
+                    // Reuse the pure helpers the combined-book math uses, so the table
+                    // can never disagree with the tiles above it.
+                    const notional = openNotionalOf(p);
+                    const risk = openRiskOf(p);
+                    const fill = p.userEntryPrice ?? p.entry;
+                    return (
+                      <tr key={`${p.ticker}|${p.setupId ?? ""}`} className={`border-t ${border}`}>
+                        <td className={`px-1.5 py-0.5 font-bold ${fg}`}>{p.ticker}</td>
+                        {showTier && <td className="px-1.5 py-0.5">{p.tier ?? "—"}</td>}
+                        {showSector && <td className="px-1.5 py-0.5">{p.sector ?? "—"}</td>}
+                        <td className="px-1.5 py-0.5 text-right">
+                          {p.shares != null ? (
+                            p.shares.toLocaleString()
+                          ) : (
+                            <span
+                              className="text-amber-400"
+                              title="No share count recorded on the marked decision, so this position contributes $0 to open notional and heat."
+                            >
+                              unknown
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-1.5 py-0.5 text-right">{num2(fill)}</td>
+                        <td className="px-1.5 py-0.5 text-right">{num2(p.stop)}</td>
+                        <td className="px-1.5 py-0.5 text-right">{notional > 0 ? usd0(notional) : "—"}</td>
+                        <td className="px-1.5 py-0.5 text-right">{risk > 0 ? usd0(risk) : "—"}</td>
+                        <td className="px-1.5 py-0.5 text-right">
+                          {notional > 0 && accountSize > 0 ? pct1((notional / accountSize) * 100) : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  <tr className={`border-t ${border} font-bold`}>
+                    <td className={`px-1.5 py-0.5 ${subFg}`}>TOTAL</td>
+                    {showTier && <td />}
+                    {showSector && <td />}
+                    <td className="px-1.5 py-0.5 text-right">
+                      {open.reduce((n, p) => n + (p.shares ?? 0), 0).toLocaleString()}
+                    </td>
+                    <td />
+                    <td />
+                    <td className="px-1.5 py-0.5 text-right">{usd0(totals.openNotional)}</td>
+                    <td className="px-1.5 py-0.5 text-right">{usd0(totals.openRiskDollars)}</td>
+                    <td className="px-1.5 py-0.5 text-right">
+                      {accountSize > 0 ? pct1((totals.openNotional / accountSize) * 100) : "—"}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {open.some((p) => p.shares == null) && (
+            <div className="text-[11px] text-amber-400 mt-1">
+              <AlertTriangle size={11} className="inline mr-1" />
+              One or more open positions have no recorded share count, so open notional, buying power
+              and heat are UNDERSTATED.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

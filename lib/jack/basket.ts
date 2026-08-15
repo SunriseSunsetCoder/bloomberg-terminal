@@ -129,6 +129,7 @@ export interface OpenHolding {
   setupId: number | null;
   ticker: string;
   sector?: string | null;
+  tier?: string | null;
   entry: number | null;
   stop: number | null;
   /** Shares actually held (frozen at mark) — drives open notional + open risk. */
