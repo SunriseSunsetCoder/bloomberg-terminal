@@ -26,6 +26,8 @@ import {
   type BasketOptions,
   type OpenHolding,
 } from "../lib/jack/basket";
+import { isTradeableSetup } from "../lib/jack/handle-score";
+import { isInLiveDisplayGroup } from "../lib/jack/combine-decisions";
 
 let passed = 0;
 let failed = 0;
@@ -378,45 +380,84 @@ console.log("\n[10] Empty / degenerate inputs");
 }
 
 // ===========================================================================
-console.log("\n[11] Basket sources the LIVE (FIRED) group, not raw pending");
+console.log("\n[11] Basket sources the board's LIVE DISPLAY GROUP");
 // ===========================================================================
 {
-  // One row of every kind the board can hand us. Only the fired-actionable,
-  // tradeable, non-owned ones are buyable at the next open.
-  const fired = (st: string) => ({ firedStatus: st, firedAt: "2026-08-14" });
-  const mixed = [
-    { ...cand({ ticker: "PENDING" }) },
-    { ...cand({ ticker: "CONFIRMED" }), ...fired("confirmed") },
-    { ...cand({ ticker: "LATE" }), ...fired("late") },
-    { ...cand({ ticker: "RESOLVED" }), ...fired("resolved") },
-    { ...cand({ ticker: "OWNEDFIRED" }), ...fired("confirmed"), userAction: "TRADED", userExitPrice: null },
-    { ...cand({ ticker: "EXITEDFIRED" }), ...fired("confirmed"), userAction: "TRADED", userExitPrice: 120 },
-    { ...cand({ ticker: "Q1FIRED", tier: "Q1", sizeBucket: "skip" }), ...fired("confirmed") },
-    { ...cand({ ticker: "Q2FIRED", tier: "Q2", sizeBucket: null }), ...fired("confirmed") },
-  ];
+  // A board row as getCurrentBoard() returns it: `section` is the DB section, and a
+  // fired pending row is promoted for display. The basket must mirror that grouping.
+  const board = (p: Partial<BasketCandidate> & { ticker: string; section: "live" | "pending" } & Record<string, unknown>) => ({
+    ...cand({ ticker: p.ticker }),
+    ...p,
+  });
 
-  const picked = selectBasketCandidates(mixed).map((r) => r.ticker).sort();
-  check("only fired-actionable + tradeable + non-owned survive",
-    picked.join(",") === "CONFIRMED,EXITEDFIRED,LATE", picked.join(","));
-  check("  un-fired pending is excluded", !picked.includes("PENDING"));
-  check("  fired-but-RESOLVED is excluded", !picked.includes("RESOLVED"));
-  check("  an owned (held) setup is excluded", !picked.includes("OWNEDFIRED"));
-  check("  a traded-then-EXITED setup is buyable again", picked.includes("EXITEDFIRED"));
-  check("  Q1 SKIP is excluded even though it fired", !picked.includes("Q1FIRED"));
-  check("  Q2 SKIP is excluded even though it fired", !picked.includes("Q2FIRED"));
+  const rows = [
+    // THE REGRESSION: validated-LIVE, no fired_at at all. Must appear.
+    board({ ticker: "UMBF", section: "live", firedStatus: null, firedAt: null }),
+    board({ ticker: "THC", section: "live", firedStatus: null, firedAt: null }),
+    board({ ticker: "TRGP", section: "live", firedStatus: null, firedAt: null }),
+    // A fired-promoted PENDING row — also in the LIVE group.
+    board({ ticker: "MDLZ", section: "pending", firedStatus: "confirmed", firedAt: "2026-08-14" }),
+    board({ ticker: "LATEFIRE", section: "pending", firedStatus: "late", firedAt: "2026-08-12" }),
+    // Not in the group: un-fired pending, and a fired-but-resolved one.
+    board({ ticker: "STILLPENDING", section: "pending", firedStatus: null }),
+    board({ ticker: "RESOLVED", section: "pending", firedStatus: "resolved", firedAt: "2026-08-10" }),
+    // Excluded by the basket's own gates even though they ARE in the LIVE group.
+    board({ ticker: "OWNEDLIVE", section: "live", userAction: "TRADED", userExitPrice: null }),
+    board({ ticker: "Q1LIVE", section: "live", tier: "Q1", sizeBucket: "skip" }),
+    board({ ticker: "Q2LIVE", section: "live", tier: "Q2", sizeBucket: null }),
+    board({ ticker: "RETIRED", section: "live", retiredAt: "2026-08-01" }),
+    // Traded-then-EXITED is not owned — buyable again.
+    board({ ticker: "REENTRY", section: "live", userAction: "TRADED", userExitPrice: 130 }),
+  ] as unknown as BasketCandidate[];
 
-  check("isBasketEligible: confirmed -> true", isBasketEligible({ firedStatus: "confirmed", sizeBucket: "full", tier: "Q5" }));
-  check("isBasketEligible: late -> true", isBasketEligible({ firedStatus: "late", sizeBucket: "full", tier: "Q5" }));
-  check("isBasketEligible: resolved -> false", !isBasketEligible({ firedStatus: "resolved", sizeBucket: "full", tier: "Q5" }));
-  check("isBasketEligible: null firedStatus -> false", !isBasketEligible({ firedStatus: null, sizeBucket: "full", tier: "Q5" }));
-  check("isBasketEligible: owned -> false", !isBasketEligible({ firedStatus: "confirmed", sizeBucket: "full", userAction: "TRADED", userExitPrice: null }));
+  const picked = selectBasketCandidates(rows as never).map((r) => (r as unknown as { ticker: string }).ticker).sort();
 
-  const t = computeBasket(selectBasketCandidates(mixed), [], opts());
-  check("the sized basket holds exactly the eligible rows",
-    t.rows.map((r) => r.ticker).sort().join(",") === "CONFIRMED,EXITEDFIRED,LATE", t.rows.map((r) => r.ticker).join(","));
-  check("  every sized row is a fired one", t.rows.length === 3);
-  check("  and the empty case is empty, not everything",
-    computeBasket(selectBasketCandidates([cand({ ticker: "NOTFIRED" })]), [], opts()).rows.length === 0);
+  check("a validated-LIVE setup with fired_at NULL IS in the basket (the exact miss)",
+    picked.includes("UMBF") && picked.includes("THC") && picked.includes("TRGP"), picked.join(","));
+  check("a fired-promoted PENDING setup is also in the basket",
+    picked.includes("MDLZ") && picked.includes("LATEFIRE"), picked.join(","));
+  check("un-fired pending is NOT", !picked.includes("STILLPENDING"));
+  check("fired-but-RESOLVED is NOT", !picked.includes("RESOLVED"));
+  check("an owned live setup is NOT (it belongs in OPEN POSITIONS)", !picked.includes("OWNEDLIVE"));
+  check("Q1 SKIP is NOT", !picked.includes("Q1LIVE"));
+  check("Q2 SKIP is NOT", !picked.includes("Q2LIVE"));
+  check("a retired setup is NOT", !picked.includes("RETIRED"));
+  check("a traded-then-EXITED live setup IS (re-entry is buyable)", picked.includes("REENTRY"));
+  check("the basket set is exactly the expected six",
+    picked.join(",") === "LATEFIRE,MDLZ,REENTRY,THC,TRGP,UMBF", picked.join(","));
+
+  // Per-row predicate, matching the board's grouping rule.
+  check("isBasketEligible: validated-live, no fire -> true",
+    isBasketEligible({ section: "live", sizeBucket: "full", tier: "Q5" }));
+  check("isBasketEligible: pending + confirmed -> true",
+    isBasketEligible({ section: "pending", firedStatus: "confirmed", sizeBucket: "full", tier: "Q5" }));
+  check("isBasketEligible: pending, no fire -> false",
+    !isBasketEligible({ section: "pending", firedStatus: null, sizeBucket: "full", tier: "Q5" }));
+  check("isBasketEligible: pending + resolved -> false",
+    !isBasketEligible({ section: "pending", firedStatus: "resolved", sizeBucket: "full", tier: "Q5" }));
+  check("isBasketEligible: already-promoted row (dbSection pending, section live) -> true",
+    isBasketEligible({ section: "live", dbSection: "pending", firedStatus: "confirmed", sizeBucket: "full", tier: "Q5" }));
+  check("isBasketEligible: owned -> false",
+    !isBasketEligible({ section: "live", sizeBucket: "full", userAction: "TRADED", userExitPrice: null }));
+  check("isBasketEligible: retired -> false",
+    !isBasketEligible({ section: "live", sizeBucket: "full", retiredAt: "2026-08-01" }));
+
+  // ACCEPTANCE: basket row count == board LIVE-group count, minus owned and SKIP.
+  const liveGroup = (rows as unknown as Array<Parameters<typeof isInLiveDisplayGroup>[0]>).filter(isInLiveDisplayGroup);
+  const ownedOrSkip = liveGroup.filter((r) => {
+    const x = r as { userAction?: string | null; userExitPrice?: number | null; tier?: string | null; sizeBucket?: string | null; retiredAt?: string | null };
+    return (x.userAction === "TRADED" && x.userExitPrice == null) || x.retiredAt != null ||
+      !isTradeableSetup({ sizeBucket: x.sizeBucket, tier: x.tier });
+  }).length;
+  check("basket count == LIVE-group count minus owned/SKIP/retired",
+    picked.length === liveGroup.length - ownedOrSkip, `${picked.length} vs ${liveGroup.length} - ${ownedOrSkip}`);
+
+  // And the sized basket actually produces numbers for a validated-live row.
+  const sized = computeBasket(selectBasketCandidates(rows as never) as unknown as BasketCandidate[], [], opts());
+  const umbf = sized.rows.find((r) => r.ticker === "UMBF")!;
+  check("a validated-live row is fully sized", umbf.shares > 0 && umbf.riskDollars > 0 && umbf.rr != null,
+    JSON.stringify({ shares: umbf.shares, risk: umbf.riskDollars, rr: umbf.rr }));
+  check("  and the basket is NOT the empty state", sized.rows.length === 6, String(sized.rows.length));
 }
 
 // ===========================================================================

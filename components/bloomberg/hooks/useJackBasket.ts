@@ -9,6 +9,8 @@ export interface JackBasketFeed {
   open?: OpenHolding[];
   /** Size of the un-narrowed pending pipeline, for the empty state. */
   pendingTotal?: number;
+  /** Size of the board's LIVE display group before the basket's filters. */
+  boardLiveTotal?: number;
   /** Per-feed failures — one half can fail while the other still returns data. */
   candidatesError?: string;
   openError?: string;

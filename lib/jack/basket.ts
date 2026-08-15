@@ -19,7 +19,7 @@
 import { computeSizing, isTradeableSetup, normalizeSizeBucket } from "@/lib/jack/handle-score";
 import {
   computePriorityRanks,
-  isFiredActionable,
+  isInLiveDisplayGroup,
   isOwnedPosition,
   rankKey,
   sortByRank,
@@ -69,37 +69,42 @@ export function riskPctFor(tier: string | null | undefined, scheme: RiskScheme):
 
 /** The minimum needed to decide whether a board row belongs in the basket. */
 export interface BasketEligibleInput {
+  section: "live" | "pending" | "open";
+  dbSection?: "live" | "pending" | "open" | null;
   firedStatus?: string | null;
   sizeBucket?: string | null;
   tier?: string | null;
   userAction?: string | null;
   userExitPrice?: number | null;
+  retiredAt?: string | null;
 }
 
 /**
  * Does this board row belong in the basket?
  *
- * The basket sizes what you would BUY AT THE NEXT OPEN — i.e. the board's LIVE
- * (fired) new-entry group, not the whole pending pipeline. Three gates, every one of
- * them the board's own rule rather than a re-derivation:
+ * The basket sizes what you would BUY AT THE NEXT OPEN — i.e. EXACTLY the board's LIVE
+ * display group, minus what you cannot or would not buy. Every gate is the board's own
+ * rule, never a re-derivation:
  *
- *   · FIRED and still actionable — isFiredActionable: 'confirmed' or 'late'. A setup
- *     that has not closed above its rim yet is not buyable, and a 'resolved' one has
- *     already hit its stop or target, so neither can be sized.
+ *   · IN THE LIVE GROUP — isInLiveDisplayGroup: validated-LIVE (dbSection 'live') OR a
+ *     fired-promoted pending row. Note it does NOT require fired_at: a validated-LIVE
+ *     setup never gets one, and gating on it is what previously emptied the basket
+ *     while the board showed LIVE (10).
  *   · TRADEABLE — isTradeableSetup: the frozen SIZE_MAP (Q1/Q2 = skip, never entered).
  *   · NOT OWNED — isOwnedPosition: something you already hold is a position to manage,
- *     not a new entry. getPendingSetups() already excludes these; this is the safety
- *     net that keeps the rule true even if the source changes.
+ *     so it belongs in OPEN POSITIONS, not in the basket rows.
+ *   · NOT RETIRED — a superseded setup is off the board entirely.
  */
 export function isBasketEligible(row: BasketEligibleInput): boolean {
   if (isOwnedPosition(row)) return false;
-  if (!isFiredActionable(row)) return false;
-  return isTradeableSetup(row);
+  if (row.retiredAt != null) return false;
+  if (!isTradeableSetup(row)) return false;
+  return isInLiveDisplayGroup(row);
 }
 
 /**
- * Narrow a board/pending row set down to the basket's LIVE (fired) candidates.
- * Generic so it can run on PendingSetupRow straight out of the accessor.
+ * Narrow the current board's rows down to the basket's candidates. Pass the WHOLE
+ * board (live + pending) — the LIVE-group rule decides what belongs.
  */
 export function selectBasketCandidates<T extends BasketEligibleInput>(rows: T[]): T[] {
   return rows.filter(isBasketEligible);

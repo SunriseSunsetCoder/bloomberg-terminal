@@ -5,15 +5,18 @@ import type { BasketCandidate, OpenHolding } from "@/lib/jack/basket";
 // The candidate gate is pure and shared — the basket sizes the board's LIVE (fired)
 // new-entry group, never the whole pending pipeline.
 import { selectBasketCandidates } from "@/lib/jack/basket";
+import { isInLiveDisplayGroup } from "@/lib/jack/combine-decisions";
 
 export const dynamic = "force-dynamic";
 
 // ============================================================
 // Basket Sizer feed — READ-ONLY. Two INDEPENDENT feeds:
 //
-//   · candidates — getPendingSetups() narrowed by selectBasketCandidates to the FIRED
-//     + tradeable + non-owned rows (the board's LIVE new-entry group). Un-fired and
-//     resolved setups are NOT basket rows.
+//   · candidates — getCurrentBoard() (the whole current run: live + pending) narrowed
+//     by selectBasketCandidates to the board's LIVE DISPLAY GROUP: validated-live rows
+//     PLUS fired-promoted pending ones, minus owned / retired / SKIP-tier. Sourcing
+//     from getPendingSetups() was the bug: it only ever returns section='pending', so
+//     validated-LIVE setups could never appear no matter what.
 //   · open — getOpenPositions(). Deliberately NOT run-scoped: an open position
 //     persists across validation runs, so the whole owned set rolls into the
 //     combined-book math (sector caps, buying power, heat, slots).
@@ -35,6 +38,8 @@ interface BasketFeedResponse {
   open?: OpenHolding[];
   /** Size of the un-narrowed pending pipeline, for the empty state. */
   pendingTotal?: number;
+  /** Size of the board's LIVE display group BEFORE the basket's own filters. */
+  boardLiveTotal?: number;
   /** Per-feed failures. Either can be set while the other half still returns data. */
   candidatesError?: string;
   openError?: string;
@@ -67,11 +72,14 @@ export async function GET() {
   // ---- feed 1: LIVE (fired) candidates -------------------------------------
   let candidates: BasketCandidate[] = [];
   let pendingTotal: number | undefined;
+  let boardLiveTotal: number | undefined;
   let candidatesError: string | undefined;
   try {
-    const pending = dbRead.getPendingSetups();
-    pendingTotal = pending.length;
-    candidates = selectBasketCandidates(pending).map((p) => ({
+    const board = dbRead.getCurrentBoard();
+    const all = [...board.live, ...board.pending];
+    pendingTotal = board.pending.length;
+    boardLiveTotal = all.filter(isInLiveDisplayGroup).length;
+    candidates = selectBasketCandidates(all).map((p) => ({
       setupId: p.setupId,
       ticker: p.ticker,
       handleLowDate: p.handleLowDate,
@@ -109,7 +117,8 @@ export async function GET() {
   }
 
   console.log(
-    `[jack-basket] ${candidates.length} live candidate(s) of ${pendingTotal ?? "?"} pending · ` +
+    `[jack-basket] ${candidates.length} basket row(s) of ${boardLiveTotal ?? "?"} in the board LIVE group · ` +
+      `${pendingTotal ?? "?"} pending · ` +
       `${open.length} open position(s)` +
       (candidatesError ? ` · candidates ERROR: ${candidatesError}` : "") +
       (openError ? ` · open ERROR: ${openError}` : "")
@@ -121,6 +130,7 @@ export async function GET() {
     candidates,
     open,
     pendingTotal,
+    boardLiveTotal,
     candidatesError,
     openError,
   });

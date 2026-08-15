@@ -135,7 +135,7 @@ async function main(): Promise<void> {
   console.log("\n[2] Open positions render even when the LIVE feed is empty");
   // =========================================================================
   const onlyOpen = await renderWithFeed({ ...FEED, candidates: [], pendingTotal: 4 });
-  check("empty-state copy is shown", onlyOpen.includes("No live (fired) setups right now"));
+  check("empty-state copy is shown", onlyOpen.includes("No setups in the board&#x27;s LIVE group right now"));
   check("  it names the waiting pipeline", onlyOpen.includes("4 setups still pending"));
   check("open positions STILL render with no basket rows", onlyOpen.includes("HELD1") && onlyOpen.includes("HELD2"));
   check("  and the tiles still render", onlyOpen.includes("buying power"));
@@ -152,7 +152,7 @@ async function main(): Promise<void> {
   check("persistence-off renders its notice", disabled.includes("Live pull disabled"));
 
   const empty = await renderWithFeed({ ok: true, persistenceAvailable: true, candidates: [], open: [], pendingTotal: 0 });
-  check("a genuinely empty feed renders the empty state", empty.includes("No live (fired) setups right now"));
+  check("a genuinely empty feed renders the empty state", empty.includes("No setups in the board&#x27;s LIVE group right now"));
   check("  and still renders the tiles", empty.includes("buying power"));
   check("  OPEN POSITIONS still renders its header when there are none", empty.includes("OPEN POSITIONS"));
   check("  labelled (0) — none held", empty.includes("(0)") && empty.includes("none held"));

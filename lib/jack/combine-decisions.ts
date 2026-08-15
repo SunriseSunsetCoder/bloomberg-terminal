@@ -67,7 +67,7 @@ export const isFiredActionable = (d: { firedStatus?: string | null }): boolean =
 function applyFiredDisplaySection(d: JackDecisionClient): JackDecisionClient {
   // `dbSection` preserves where the row actually lives in the DB, so the P-rank
   // populations stay stable across a display move (see computePriorityRanks).
-  if (d.section === "pending" && isFiredActionable(d) && isTradeableSetup(d)) {
+  if (d.section === "pending" && isInLiveDisplayGroup(d)) {
     return { ...d, section: "live" as const, dbSection: "pending" as const };
   }
   return d;
@@ -109,9 +109,38 @@ export interface RankableRow {
 /** Identity for rank lookup. NOT section-keyed — a row's section can change for display. */
 export const rankKey = (d: RankableRow): string => `${d.ticker}|${d.handleLowDate}`;
 
+/** The minimum needed to place a row in a display group. */
+export interface SectionedRow {
+  section: "live" | "pending" | "open";
+  dbSection?: "live" | "pending" | "open" | null;
+  firedStatus?: string | null;
+  sizeBucket?: string | null;
+  tier?: string | null;
+}
+
 /** Where the row lives in the DB, regardless of where it is being displayed. */
-export const dbSectionOf = (d: JackDecisionClient): "live" | "pending" | "open" =>
+export const dbSectionOf = (d: SectionedRow): "live" | "pending" | "open" =>
   d.dbSection ?? d.section;
+
+/**
+ * Is this row rendered under the board's LIVE group?
+ *
+ * THE definition of "live" for the whole app, and the reason the Basket Sizer can no
+ * longer drift from the board: the LIVE group is
+ *
+ *   · validated-LIVE rows — dbSection 'live', i.e. the scanner already had them firing
+ *     at validation time. These carry NO fired_at (the EOD pass only stamps pending
+ *     rows), so ANY gate on fired_at makes them invisible. That was the bug.
+ *   · fired-promoted pending rows — close-confirmed above the rim and still actionable
+ *     and tradeable, which applyFiredDisplaySection moves here for display.
+ *
+ * Resolved fires and un-fired pending rows are NOT in the group.
+ */
+export function isInLiveDisplayGroup(d: SectionedRow): boolean {
+  const from = dbSectionOf(d);
+  if (from === "live") return true;
+  return from === "pending" && isFiredActionable(d) && isTradeableSetup(d);
+}
 
 /**
  * Ordinal ranks (1..N) over ONE population, keyed by rankKey.

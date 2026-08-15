@@ -323,8 +323,17 @@ export function JackBasketView({ isDarkMode = true, onBack }: Props) {
 
         {/* The standing caveat */}
         <div className={`text-[10px] ${subFg} border ${border} ${cardBg} rounded px-2.5 py-1.5 mb-3`}>
-          Rows are the board's <b className={fg}>LIVE (fired)</b> new-entry group — close-confirmed above the rim,
-          tradeable (Q3–Q5), not already held. Un-fired pending and already-resolved setups are excluded.
+          Rows are the board's <b className={fg}>LIVE</b> group — validated-live setups plus close-confirmed fired
+          ones — filtered to tradeable (Q3–Q5) and not already held. Un-fired pending and already-resolved setups
+          are excluded.
+          {data?.boardLiveTotal != null && (
+            <>
+              {" "}
+              Board LIVE group: <b className={fg}>{data.boardLiveTotal}</b> · basket rows:{" "}
+              <b className={fg}>{totals.rows.length}</b>
+              {data.boardLiveTotal !== totals.rows.length ? " (difference = owned / SKIP-tier)" : ""}.
+            </>
+          )}
           <br />
           Frictionless — <b className={fg}>sizes are ceilings</b>, not instructions. Slippage, partial fills, and your own
           discretion all reduce them. Sector caps, buying power, heat and slots all include your OPEN positions.
@@ -514,7 +523,8 @@ export function JackBasketView({ isDarkMode = true, onBack }: Props) {
                       "LIVE pull is off."
                     ) : (
                       <>
-                        No live (fired) setups right now — the basket fills as setups fire and move to LIVE.
+                        No setups in the board's LIVE group right now — the basket fills as setups validate live
+                        or fire and move to LIVE.
                         {data?.pendingTotal ? (
                           <div className="mt-1 opacity-80">
                             {data.pendingTotal} setup{data.pendingTotal === 1 ? "" : "s"} still pending, waiting on a
