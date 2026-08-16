@@ -312,6 +312,25 @@ export function tradingDaysUntil(
   return count;
 }
 
+/**
+ * Add n TRADING days to a YYYY-MM-DD, skipping weekends + NYSE holidays. Used for the
+ * resting limit's cancel-by date, so the operator's GTC order expires exactly when the
+ * backtested window closes rather than n calendar days later.
+ */
+export function addTradingDaysISO(
+  iso: string,
+  n: number,
+  isTradingDayFn: (iso: string) => boolean = isTradingDayISO
+): string {
+  let cur = iso.slice(0, 10);
+  let added = 0;
+  for (let i = 0; i < 400 && added < n; i++) {
+    cur = stepISO(cur);
+    if (isTradingDayFn(cur)) added++;
+  }
+  return cur;
+}
+
 /** Add n calendar days to a YYYY-MM-DD (for the Finnhub window end). */
 export function addCalendarDaysISO(iso: string, n: number): string {
   const d = new Date(`${iso.slice(0, 10)}T00:00:00Z`);
@@ -345,9 +364,9 @@ export function entryMarkerKey(ticker: string, handleLowDate: string): string {
 
 /**
  * ONCE-PER-SETUP marker for the recovery re-entry. Same shape and discipline as
- * entryMarkerKey: setup identity, no ET date, no TTL. A setup gets at most ONE
- * recovery ping for its lifetime — if it pulls back, bounces and pulls back again we
- * do not re-spam, because the second pullback is not new information.
+ * entryMarkerKey: setup identity, no ET date, no TTL. A setup ARMS once — max-high-
+ * since-entry crosses the run-up threshold a single time and stays crossed — so this
+ * naturally maps to one ping per setup for its lifetime.
  */
 export function secondChanceMarkerKey(ticker: string, handleLowDate: string): string {
   return `jack:alert:second_chance:${T(ticker.trim())}:${handleLowDate.trim()}`;
@@ -646,12 +665,20 @@ async function evaluateEntryConfirmations(
 }
 
 /**
- * SECOND CHANCE — a missed setup has pulled back to its original entry.
+ * ARMED — a missed setup has banked its run-up and the pullback is still ahead.
  *
- * Pure message builder (the gate itself is evalSecondChance). SYSTEM tier: this is a
- * backtested signal, not a heads-up. The footer caveat is not decoration — re-entering
- * on a pullback RESTORES the original R:R, it does not improve it, and using it as a
- * substitute for the normal entry is a worse strategy. Say so every time.
+ * Pure message builder (the gate itself is evalSecondChance). SYSTEM tier: backtested,
+ * not a heads-up.
+ *
+ * The message is an INSTRUCTION TO PLACE A RESTING LIMIT, not a report that something
+ * happened. That is the entire reason this fires on arming rather than on the retest:
+ * the retest is an intraday event, and an EOD alert about it arrives a day late. A GTC
+ * limit at `entry`, placed tonight, fills at the exact backtested price whenever the
+ * pullback comes.
+ *
+ * The footer caveat is not decoration — re-entering on a pullback RESTORES the original
+ * R:R, it does not improve it, and using it as a substitute for the normal entry is a
+ * worse strategy. Say so every time.
  */
 export function evalSecondChanceAlert(args: {
   ticker: string;
@@ -661,30 +688,34 @@ export function evalSecondChanceAlert(args: {
   stop: number;
   t05: number;
   rr: number | null;
-  barsSinceEntry: number;
   runupPct: number | null;
+  /** entryDate + RETEST_WINDOW_BARS trading days — when the resting order should die. */
+  cancelBy: string | null;
 }): Alert {
   const head = [
-    `🔁 SECOND CHANCE — ${T(args.ticker)}`,
+    `🔫 ARMED — ${T(args.ticker)}`,
     args.pRank != null || args.tier ? `  (${[args.pRank != null ? `P${args.pRank}` : null, args.tier?.toUpperCase() ?? null].filter(Boolean).join(" · ")})` : "",
   ].join("");
 
   const text =
     `${head}\n` +
-    `Missed setup pulled back to entry — re-entry available.\n` +
-    `Entry (limit) ${p2(args.entry)}  ·  stop ${p2(args.stop)}  ·  t05 ${p2(args.t05)}\n` +
-    `R:R ${args.rr != null ? args.rr.toFixed(2) : "—"}` +
-    `  ·  ${args.barsSinceEntry} bar${args.barsSinceEntry === 1 ? "" : "s"} since fire` +
-    (args.runupPct != null ? `  ·  ran up ${args.runupPct.toFixed(0)}% toward t05, then retested` : "") +
-    `\n` +
-    `Never hit target, never stopped — still live.\n` +
-    `recovery of a missed entry — restores original R:R, doesn't improve it (backtested +0.32R / PF 1.83)`;
+    `Ran up ${args.runupPct != null ? `${args.runupPct.toFixed(0)}%` : `>=${RUNUP_FRAC * 100}%`} toward t05 since firing, still live + un-traded.\n` +
+    `Place a resting BUY limit: entry ${p2(args.entry)}  ·  stop ${p2(args.stop)}  ·  target(t05) ${p2(args.t05)}  ·  R:R ${args.rr != null ? args.rr.toFixed(2) : "—"}\n` +
+    (args.cancelBy ? `Cancel if unfilled by ${args.cancelBy}.\n` : "") +
+    `recovery of a missed entry; restores original R:R, doesn't improve it (backtested +0.33R / PF 1.93)`;
 
   return mk("second_chance", "system", args.ticker, text);
 }
 
 /**
- * EOD recovery pass. Runs after the entry confirmations, on the same 18:00 block.
+ * EOD recovery pass — fires on ARMING, not on the retest. Runs after the entry
+ * confirmations, on the same 18:00 block.
+ *
+ * A retest is an intraday event; an EOD alert about it lands a day late, after the fill
+ * it describes. Arming (max-high-since-entry crossing the run-up threshold) is a
+ * persistent state that is reliably visible at EOD, so THAT is what we alert on — and
+ * the operator answers it with a resting limit that catches the pullback at the exact
+ * backtested price.
  *
  * CANDIDATE POOL — the full run-scoped board (LIVE + pending), owned- and
  * retired-excluded, NOT getPendingSetups(). getPendingSetups() returns only
@@ -750,11 +781,11 @@ async function evaluateSecondChance(
         stop: res.stop as number,
         t05: res.t05 as number,
         rr: res.rr,
-        barsSinceEntry: res.barsSinceEntry as number,
         runupPct: res.runupPct,
+        cancelBy: res.entryDate ? addTradingDaysISO(res.entryDate, RETEST_WINDOW_BARS) : null,
       });
 
-      // No TTL — one recovery ping per setup, ever.
+      // No TTL — a setup ARMS once, so it pings once, ever.
       if (await fireOnce(alert, key)) fired++;
     } catch (err) {
       console.error(`JACK second-chance failed for ${s.ticker}:`, err);
@@ -770,8 +801,8 @@ async function evaluateSecondChance(
     );
   }
   console.log(
-    `JACK second chance: ${fired} fired · ${candidates.length} candidate(s) checked ` +
-      `(runup>=${RUNUP_FRAC * 100}% toward t05, <=${RETEST_WINDOW_BARS} bars) · ` +
+    `JACK second chance (armed): ${fired} fired · ${candidates.length} candidate(s) checked ` +
+      `(runup>=${RUNUP_FRAC * 100}% toward t05, <=${RETEST_WINDOW_BARS} bars, pullback still ahead) · ` +
       `${[...reasons.entries()].map(([r, n]) => `${r}:${n}`).join(" ") || "no evaluations"}` +
       (fetchFailures > 0 ? ` · ${fetchFailures} fetch failure(s)` : "")
   );
