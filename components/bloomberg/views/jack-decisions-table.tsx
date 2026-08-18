@@ -7,6 +7,7 @@ import { CandleThumbnail } from "@/components/bloomberg/ui/candle-thumbnail";
 import { CandleChartModal } from "@/components/bloomberg/ui/candle-chart-modal";
 import { classifyVerdict, signalsDisagree } from "@/lib/jack/verdict";
 import { computeSectionRanks, dbSectionOf, rankKey, sortByRank } from "@/lib/jack/combine-decisions";
+import { checkFills } from "@/lib/jack/fill-guard";
 
 // ============================================================================
 // JACK decision surface (UI v2). ONE expandable row per setup, in two preserved
@@ -35,6 +36,13 @@ interface RowState {
   fillsSave: SaveState;
   serverUserR: number | null;
   error?: string;
+  // UNSAVED local edit present. Re-seeds from the server (the 180s open-position
+  // poll, a window-focus refetch, the mount re-hydration) must NOT clobber it —
+  // see mergeSeeded. This is what made an owned position's fill uncorrectable.
+  dirty?: boolean;
+  // Fill-sanity warning awaiting confirmation ("check the decimal"). While set, the
+  // save button is an explicit "Save anyway"; a second click writes.
+  guardWarning?: string | null;
 }
 
 // Keep only digits and a single decimal point so the field stays a valid price
@@ -106,6 +114,29 @@ export function seedRows(decisions: JackDecisionClient[]): Record<string, RowSta
       fillsSave: hasFill ? "saved" : "idle",
     };
   });
+  return out;
+}
+
+// Re-seed WITHOUT destroying in-progress edits.
+//
+// THE OWNED-POSITION EDIT BUG: the open-position query refetches every 180s and on
+// window focus, which hands this table a new `decisions` array; both re-seed effects
+// then replaced row state wholesale. An owned position is the ONLY kind of row on that
+// poll, so correcting its logged entry fill was a race the user could not win — tab
+// away to check the real fill, tab back, and the field had snapped to the stored (bad)
+// value; saving then re-wrote the bad value.
+//
+// Rule: a row with unsaved edits (dirty) keeps its local state; every other row takes
+// the fresh server seed. Dirty rows the new seed no longer knows about are kept too,
+// so a row mid-edit can never disappear. PURE + exported for the self-test.
+export function mergeSeeded(
+  prev: Record<string, RowState>,
+  next: Record<string, RowState>
+): Record<string, RowState> {
+  const out: Record<string, RowState> = { ...next };
+  for (const [key, row] of Object.entries(prev)) {
+    if (row.dirty) out[key] = row;
+  }
   return out;
 }
 
@@ -223,7 +254,8 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   const [chartFor, setChartFor] = useState<JackDecisionClient | null>(null);
 
   useEffect(() => {
-    setRows(seedRows(decisions));
+    // Merge, never replace — the open-position poll re-fires this every 180s.
+    setRows((prev) => mergeSeeded(prev, seedRows(decisions)));
   }, [decisions]);
 
   // Re-hydration on mount / return-to-JACK: saving fills writes the DB but NOT the
@@ -240,8 +272,9 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
         // marks/fills only — the FIRE flags are polled by useJackFiredFlags in
         // jack-view and arrive on props, so combineJackDecisions can re-section on them.
         const json = (await res.json()) as { marks?: Record<string, MarkDto> };
-        if (cancelled || !json.marks) return;
-        setRows(seedRows(overlayMarks(decisions, json.marks)));
+        const marks = json.marks;
+        if (cancelled || !marks) return;
+        setRows((prev) => mergeSeeded(prev, seedRows(overlayMarks(decisions, marks))));
       } catch {
         // Non-fatal — the props-based seed still stands.
       }
@@ -301,12 +334,24 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
       patch(key, { fillsSave: "error", error: "no DB id for this setup — re-run VALIDATE first" });
       return;
     }
+    // DECIMAL GUARD — a fill far from the setup's own geometry (or implying an
+    // impossible same-day move) is a typo until the trader says otherwise. First
+    // click warns; the button becomes "Save anyway" and a second click writes.
+    if (row.guardWarning == null) {
+      const verdict = checkFills({ entry, exit }, d);
+      if (!verdict.ok) {
+        patch(key, { fillsSave: "idle", error: undefined, guardWarning: verdict.reason });
+        return;
+      }
+    }
     patch(key, { fillsSave: "saving", error: undefined });
     try {
       const r = await postDecision({ type: "user_fills", setupId: d.setupId, entry, entryDate, exit, exitDate });
       patch(
         key,
-        r.ok ? { fillsSave: "saved", serverUserR: r.userRRealized ?? null } : { fillsSave: "error", error: r.error }
+        r.ok
+          ? { fillsSave: "saved", serverUserR: r.userRRealized ?? null, dirty: false, guardWarning: null }
+          : { fillsSave: "error", error: r.error }
       );
       // Recorded an EXIT → the setup is now closed. Tell the parent so it re-routes
       // out of CURRENT POSITIONS immediately (patches the in-memory decision's exit).
@@ -700,11 +745,12 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
       </span>
     ) : null;
 
-  const renderSaveButton = (d: JackDecisionClient, key: string, state: SaveState) => {
+  const renderSaveButton = (d: JackDecisionClient, key: string, state: SaveState, guarded = false) => {
     const base =
       "flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold border transition-colors disabled:opacity-50";
-    const cls =
-      state === "saved"
+    const cls = guarded
+      ? "border-red-500 text-red-200 bg-red-800/60 hover:bg-red-700/70"
+      : state === "saved"
         ? "border-green-600 text-green-400 bg-green-950/30"
         : state === "error"
           ? "border-red-600 text-red-400 bg-red-950/30 hover:bg-red-950/50"
@@ -713,6 +759,8 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
       <button type="button" onClick={() => handleSaveFills(d, key)} disabled={state === "saving"} className={`${base} ${cls}`}>
         {state === "saving" ? (
           <><Loader2 size={12} className="animate-spin" /> Saving…</>
+        ) : guarded ? (
+          <><AlertTriangle size={12} /> Save anyway</>
         ) : state === "saved" ? (
           <><Check size={12} /> Saved</>
         ) : state === "error" ? (
@@ -754,16 +802,19 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
   const fillPanel = (d: JackDecisionClient, key: string) => {
     const row = getRow(key);
     const rPreview = row.serverUserR ?? previewR(d, row);
+    // Every keystroke marks the row DIRTY (survives a server re-seed — mergeSeeded)
+    // and clears any standing decimal warning so the guard re-judges the new value.
+    const editing = { fillsSave: "idle" as SaveState, guardWarning: null, dirty: true };
     return (
       <div className={`rounded border ${border} px-3 py-2 ${isDarkMode ? "bg-orange-950/20" : "bg-orange-50"}`}>
         <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
           <span className={`self-center text-[10px] font-bold tracking-widest ${fg}`}>FILLS</span>
           {(
             [
-              { lbl: "Entry price", val: row.entry, kind: "price", set: (v: string) => patch(key, { entry: sanitizePrice(v), fillsSave: "idle" }) },
-              { lbl: "Entry date", val: row.entryDate, kind: "date", set: (v: string) => patch(key, { entryDate: v, fillsSave: "idle" }) },
-              { lbl: "Exit price", val: row.exit, kind: "price", set: (v: string) => patch(key, { exit: sanitizePrice(v), fillsSave: "idle" }) },
-              { lbl: "Exit date", val: row.exitDate, kind: "date", set: (v: string) => patch(key, { exitDate: v, fillsSave: "idle" }) },
+              { lbl: "Entry price", val: row.entry, kind: "price", set: (v: string) => patch(key, { entry: sanitizePrice(v), ...editing }) },
+              { lbl: "Entry date", val: row.entryDate, kind: "date", set: (v: string) => patch(key, { entryDate: v, ...editing }) },
+              { lbl: "Exit price", val: row.exit, kind: "price", set: (v: string) => patch(key, { exit: sanitizePrice(v), ...editing }) },
+              { lbl: "Exit date", val: row.exitDate, kind: "date", set: (v: string) => patch(key, { exitDate: v, ...editing }) },
             ] as const
           ).map((f) => (
             <label key={f.lbl} className="flex flex-col gap-0.5">
@@ -794,9 +845,34 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
             {row.error && row.fillsSave === "error" && (
               <span className="text-red-400 text-[10px] max-w-40">{row.error}</span>
             )}
-            {renderSaveButton(d, key, row.fillsSave)}
+            {row.guardWarning && (
+              <button
+                type="button"
+                onClick={() => patch(key, { guardWarning: null })}
+                className={`px-2.5 py-1 rounded text-[11px] font-bold border ${
+                  isDarkMode ? "border-gray-600 text-gray-300 hover:border-gray-400" : "border-gray-400 text-gray-700 hover:border-gray-600"
+                }`}
+              >
+                Cancel
+              </button>
+            )}
+            {renderSaveButton(d, key, row.fillsSave, !!row.guardWarning)}
           </div>
         </div>
+        {/* DECIMAL GUARD — blocks the first click on an implausible fill. */}
+        {row.guardWarning && (
+          <div
+            className={`mt-2 rounded border px-2.5 py-1.5 text-[11px] flex items-start gap-1.5 ${
+              isDarkMode ? "border-red-600 bg-red-950/40 text-red-200" : "border-red-500 bg-red-50 text-red-800"
+            }`}
+          >
+            <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+            <span>
+              <b>Check the decimal.</b> {row.guardWarning} Fix the field, or click <b>Save anyway</b> if the fill is
+              really this.
+            </span>
+          </div>
+        )}
       </div>
     );
   };
@@ -954,7 +1030,14 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
               </p>
             </div>
 
-            {/* Exit fills — same write path as any TRADED row (updateUserFills) */}
+            {/* Fills — same write path as any TRADED row (updateUserFills upsert).
+                BOTH sides are editable here: the ENTRY fill of a position you already
+                own can be corrected (a mis-keyed cost basis poisons unrealized %, the
+                rules flag and user_R), and the EXIT closes the position. Edits survive
+                the 180s open-position poll — see mergeSeeded. */}
+            <div className={`text-[9px] uppercase tracking-widest ${subFg} mb-1`}>
+              Fills — correct the entry, or record the exit to close
+            </div>
             {fillPanel(d, key)}
           </div>
         )}
@@ -1162,7 +1245,8 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
           <div className={`text-[10px] ${subFg} mb-1 px-1`}>
             Open trades from any prior run — reachable until you record the exit, even if the ticker isn&apos;t in
             this week&apos;s scan. Each row shows the frozen entry thesis, live price (NOW / unrealized / days held),
-            and a fresh HOLD/EXIT/REDUCE re-read. Expand and Save the exit price/date to close it.
+            and a fresh HOLD/EXIT/REDUCE re-read. Expand to correct the logged entry fill, or Save the exit
+            price/date to close it.
           </div>
           {renderGroup("CURRENT POSITIONS", openDecisions, "text-amber-400")}
         </div>
