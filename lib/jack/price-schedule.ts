@@ -21,7 +21,7 @@ import { redis } from "@/lib/redis";
 import { isPersistenceAvailable } from "@/lib/db/env";
 import { runPriceRefresh, fetchIexQuotes, persistPrices, type StoredPrices } from "./price-refresh";
 import { isTradingDay, isMarketOpen, etParts, etDateISO } from "./market-hours";
-import { evaluateIntradayAlerts, evaluateEodAlerts, fireHealth } from "./alerts";
+import { evaluateIntradayAlerts, evaluateEodAlerts, fireHealth, selectLiveRows } from "./alerts";
 
 const EOD_SLOT = { hour: 18, minute: 0 };
 const WINDOW_MINUTES = 15;
@@ -40,8 +40,21 @@ async function runIntradayMonitor(now: Date): Promise<void> {
   const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
   const open = dbRead.getOpenPositions();
   const pending = dbRead.getPendingSetups();
+  // LIVE rows must be in the batch too. getPendingSetups() returns section='pending'
+  // rows ONLY, so a validated-LIVE setup was in neither list — no quote, therefore no
+  // possible intraday touch alert for exactly the setups most likely to hit t05. That
+  // is the second half of the missed-TP bug; selectLiveRows is the board's own feed.
+  const board = dbRead.getCurrentBoard();
+  const live = selectLiveRows([...board.live, ...board.pending]);
+  // The FETCH set stays a superset of the ALERT scope on purpose: pending tickers are
+  // refreshed so the board's NOW price stays live, but they are not alert-eligible
+  // (the scope is open ∪ live, asserted inside emitAlert).
   const tickers = Array.from(
-    new Set([...open.map((p) => p.ticker), ...pending.map((s) => s.ticker)].map((t) => t.toUpperCase()))
+    new Set(
+      [...open.map((p) => p.ticker), ...pending.map((s) => s.ticker), ...live.map((s) => s.ticker)].map((t) =>
+        t.toUpperCase()
+      )
+    )
   );
   if (tickers.length === 0) return;
 

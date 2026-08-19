@@ -81,6 +81,9 @@ async function fetchIexBatch(tickers: string[], token: string): Promise<Record<s
 const numOrNull = (v: unknown): number | null =>
   typeof v === "number" && Number.isFinite(v) ? v : null;
 
+const strOrNull = (v: unknown): string | null =>
+  typeof v === "string" && v.length > 0 ? v : null;
+
 // One IEX quote with tngoLast + prevClose kept SEPARATE (fetchIexBatch collapses to a
 // single price; the intraday alert monitor needs the live print AND the prior close to
 // evaluate approaching-stop/target, big moves, and same-day breakout crosses).
@@ -90,6 +93,16 @@ export interface IexQuote {
   last: number | null;
   prevClose: number | null;
   price: number | null; // pickIexPrice(q) — the board price (tngoLast→last→prevClose)
+  // RUNNING SESSION RANGE — the only intraday source for TP/SL TOUCH detection
+  // (lib/jack/alerts.ts). A touch that reverses before the close is invisible to any
+  // last/close-based field, which is exactly the bug these two carry. Same free IEX
+  // response as the fields above — NO new feed. Null when Tiingo omits them; the
+  // touch evaluator then falls back to tngoLast/last.
+  dayHigh: number | null;
+  dayLow: number | null;
+  // Print time, for the RTH gate (09:30–16:00 ET). IEX quotes can carry ext-hours
+  // prints, which would fake a touch. Null when absent → the gate fails OPEN and logs.
+  timestamp: string | null;
 }
 
 // Raw IEX batch (ONE request). Returns null on any permission/empty/malformed
@@ -110,6 +123,11 @@ export async function fetchIexQuotes(tickers: string[], token: string): Promise<
         last: numOrNull(q.last),
         prevClose: numOrNull(q.prevClose),
         price: pickIexPrice(q),
+        dayHigh: numOrNull(q.high),
+        dayLow: numOrNull(q.low),
+        // Tiingo spells the sale time either way depending on endpoint version; take
+        // whichever is a string, else null (the RTH gate fails open and logs).
+        timestamp: strOrNull(q.timestamp) ?? strOrNull(q.lastSaleTimeStamp) ?? strOrNull(q.quoteTimestamp),
       }));
   } catch {
     return null;
