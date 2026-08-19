@@ -43,6 +43,12 @@ import {
   evaluateLiveTouchBackstop,
   evalSecondChanceAlert,
   type TouchRow,
+  // Fix 3 — pending→live promotion
+  buildBoardScope,
+  evalPromotion,
+  promotionMarkerKey,
+  evaluatePendingPromotions,
+  evalEntryConfirmed,
 } from "@/lib/jack/alerts";
 import { parseEarningsCalendar } from "@/lib/jack/finnhub";
 import type { IexQuote } from "@/lib/jack/price-refresh";
@@ -444,6 +450,192 @@ async function asyncTests(): Promise<void> {
     check("no touch when the quote is missing entirely", buildIntradayTouchAlerts([{ ticker: "ABSENT", handleLowDate: HLD, stop: 95, target: 110, owned: true }], []).length === 0);
     check("no touch when neither level is reached", detectTouch({ dayHigh: 109, dayLow: 96, stop: 95, target: 110 }) === null);
     check("null geometry never fabricates a touch", detectTouch({ dayHigh: 109, dayLow: 96, stop: null, target: null }) === null);
+  }
+
+  // ==========================================================================
+  // FIX 3 — PENDING → LIVE PROMOTION (close-confirmed, EOD-only, once per setup)
+  //
+  // Plus the two things the widened lane repairs: the on-parity entry confirmation
+  // and the pending earnings advisory, both of which Fix 1 had suppressed.
+  // ==========================================================================
+
+  // A pending row as getPendingSetups() returns it (only the fields these passes read).
+  const pendingRow = (ticker: string, over: Record<string, unknown> = {}) => ({
+    ticker,
+    handleLowDate: HLD,
+    entry: 91.94, // GM's entry — the case that motivated this
+    stop: 86,
+    sizeBucket: "full",
+    tier: "Q5",
+    ...over,
+  });
+  const barsWith = (close: number, over: Partial<{ high: number; low: number }> = {}) => [
+    { date: "2026-08-18", open: 88, high: 89, low: 87, close: 88, volume: 1e6 },
+    { date: ET, open: 90, high: over.high ?? Math.max(close, 92), low: over.low ?? 89, close, volume: 1e6 },
+  ];
+
+  // ── scope: the third state ────────────────────────────────────────────────
+  {
+    const trade = buildAlertScope([{ ticker: "HELD" }], [boardRow("LIVEA")]);
+    const board = buildBoardScope(trade, [{ ticker: "GM" }, { ticker: "PENDB" }]);
+    check("boardScope keeps everything in the trade scope", board.has("HELD") && board.has("LIVEA"));
+    check("boardScope ADDS pending tickers", board.has("GM") && board.has("PENDB"));
+    check("…and the narrow trade scope still excludes them", !trade.has("GM"));
+    check("neither scope admits a ticker that LEFT the board (NOW)", !board.has("NOW") && !trade.has("NOW"));
+  }
+
+  // ── 10. pending, daily close >= entry → promotion fires once ──────────────
+  {
+    const { t, store, sent } = memTransport();
+    setAlertTransport(t);
+    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "GM" }]);
+    const stats = newEmitStats();
+    const res = await evaluatePendingPromotions([pendingRow("GM")], board, async () => ({ bars: barsWith(92.1) }), stats);
+    check("10. promotion fires on a close at/above entry", res.fired === 1 && sent.length === 1);
+    check("10. …as a SYSTEM signal, not a heads-up", sent[0].includes("PROMOTED") && !sent[0].includes("not a system signal"));
+    check("10. …naming the close, the entry, and what to do", sent[0].includes("92.10") && sent[0].includes("91.94") && sent[0].includes("tradeable from the next open"));
+    check("10. …keyed in the entry_trigger namespace, per setup", store.has(promotionMarkerKey("GM", HLD)) && promotionMarkerKey("GM", HLD) === `jack:alert:entry_trigger:GM:${HLD}`);
+    const again = await evaluatePendingPromotions([pendingRow("GM")], board, async () => ({ bars: barsWith(92.1) }), stats);
+    check("10. …and only once", again.fired === 0 && sent.length === 1);
+    check("10. a close exactly AT entry counts", evalPromotion("GM", 91.94, 91.94) !== null);
+  }
+
+  // ── 11. intraday high >= entry but close < entry → SILENT ─────────────────
+  {
+    const { t, sent } = memTransport();
+    setAlertTransport(t);
+    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "POKE" }]);
+    // High 93.20 pierced entry 91.94 during the session; the close gave it back.
+    const res = await evaluatePendingPromotions(
+      [pendingRow("POKE")],
+      board,
+      async () => ({ bars: barsWith(91.2, { high: 93.2 }) }),
+      newEmitStats()
+    );
+    check("11. an intraday poke above entry does NOT promote", res.fired === 0 && sent.length === 0);
+    check("11. evalPromotion is close-only, never a high", evalPromotion("POKE", 91.2, 91.94) === null);
+    check("11. …this is the opposite convention from a TP/SL touch", detectTouch({ dayHigh: 93.2, dayLow: 89, stop: 86, target: 110 }) === null && evalPromotion("POKE", 92.5, 91.94) !== null);
+  }
+
+  // ── 12. promoted, then the ticker legitimately shows up LIVE → no dup ─────
+  {
+    const { t, sent } = memTransport();
+    setAlertTransport(t);
+    const stats = newEmitStats();
+    const asPending = buildBoardScope(buildAlertScope([], []), [{ ticker: "GM" }]);
+    await evaluatePendingPromotions([pendingRow("GM")], asPending, async () => ({ bars: barsWith(92.1) }), stats);
+    check("12. promotion fired on the pending run", sent.length === 1);
+    // Next run: the setup is now in the LIVE display group (fired-promoted).
+    const asLive = buildAlertScope([], [boardRow("GM", { section: "pending", firedStatus: "confirmed" })]);
+    check("12. …and the ticker is now in the LIVE scope", asLive.has("GM"));
+    const dup = await evaluatePendingPromotions([pendingRow("GM")], buildBoardScope(asLive, []), async () => ({ bars: barsWith(93.0) }), stats);
+    check("12. no repeat 'it's live' ping", dup.fired === 0 && sent.length === 1);
+    check("12. the marker is lifetime-exempt from the Fix-1 purge", isLifetimeMarker(promotionMarkerKey("GM", HLD)));
+  }
+
+  // ── 13. pending dies below its stop pre-promotion → SILENT ───────────────
+  {
+    const { t, sent } = memTransport();
+    setAlertTransport(t);
+    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "DRIFT" }]);
+    // Closes 85.10, below the 86 stop; it never once closed above entry.
+    const res = await evaluatePendingPromotions(
+      [pendingRow("DRIFT")],
+      board,
+      async () => ({ bars: barsWith(85.1, { low: 84.5 }) }),
+      newEmitStats()
+    );
+    check("13. a pending setup dying pre-promotion is a NON-EVENT", res.fired === 0 && sent.length === 0);
+    check("13. …no setup_invalidated either (that is for promoted LIVE rows)", !sent.some((s) => s.includes("SETUP INVALIDATED")));
+  }
+
+  // ── 14. not on the board at all → the NOW guard still holds ──────────────
+  {
+    const { t, store, sent } = memTransport();
+    setAlertTransport(t);
+    // NOW is in NEITHER scope — it left the board entirely.
+    const board = buildBoardScope(buildAlertScope([{ ticker: "HELD" }], [boardRow("SPY")]), [{ ticker: "GM" }]);
+    const stats = newEmitStats();
+    const res = await evaluatePendingPromotions([pendingRow("NOW")], board, async () => ({ bars: barsWith(92.1) }), stats);
+    check("14. the promotion path suppresses an off-board ticker", res.fired === 0 && sent.length === 0);
+    check("14. …counted as a stale suppression", stats.suppressedOutOfScope === 1);
+    check("14. …and its lifetime marker is not purged", !store.has(promotionMarkerKey("NOW", HLD)));
+    check("14. the SAME pass fires for an on-board pending ticker", (await evaluatePendingPromotions([pendingRow("GM")], board, async () => ({ bars: barsWith(92.1) }), stats)).fired === 1);
+  }
+
+  // ── promotion: bar selection + the tradeable gate ─────────────────────────
+  {
+    const { t, sent } = memTransport();
+    setAlertTransport(t);
+    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "LAG" }, { ticker: "SKIPPY" }]);
+    // MOST-RECENT bar, not today's: at 18:00 ET Tiingo may not have published today yet.
+    const stale = await evaluatePendingPromotions(
+      [pendingRow("LAG")],
+      board,
+      async () => ({ bars: [{ date: "2026-08-18", open: 90, high: 93, low: 89, close: 92.5, volume: 1e6 }] }),
+      newEmitStats()
+    );
+    check("promotion reads the latest bar even if today's isn't published", stale.fired === 1);
+    // Q1/Q2 never gets entered, so it must never be announced as tradeable.
+    const skip = await evaluatePendingPromotions(
+      [pendingRow("SKIPPY", { tier: "Q2", sizeBucket: "skip" })],
+      board,
+      async () => ({ bars: barsWith(92.1) }),
+      newEmitStats()
+    );
+    check("a SKIP-bucket setup is never promoted", skip.fired === 0 && skip.skippedNotTradeable === 1);
+    check("a pending row with no entry level is skipped", (await evaluatePendingPromotions([pendingRow("NOENTRY", { entry: null })], board, async () => ({ bars: barsWith(92.1) }), newEmitStats())).fired === 0);
+    check("a bars-fetch failure is counted, not thrown", (await evaluatePendingPromotions([pendingRow("BAD")], buildBoardScope(new Set(), [{ ticker: "BAD" }]), async () => ({ bars: [], error: "HTTP 500" }), newEmitStats())).fetchFailures === 1);
+    check("only the promotion messages were sent", sent.every((s) => s.includes("PROMOTED")));
+  }
+
+  // ── the dormant intraday entry_trigger vs the live promotion ─────────────
+  {
+    const dormant = evalEntryTrigger("GM", 91.0, 92.5, 91.94)!;
+    const promo = evalPromotion("GM", 92.5, 91.94)!;
+    check("both carry the entry_trigger type (shared namespace)", dormant.type === "entry_trigger" && promo.type === "entry_trigger");
+    check("…but only the promotion is a SYSTEM signal", promo.kind === "system" && dormant.kind === "heads-up");
+    check("…and the dormant one reads the RIM intraday, not the close", dormant.text.includes("crossed breakout") && promo.text.includes("≥ entry"));
+  }
+
+  // ── PARITY REPAIR: entry confirmation on a first-detection pending row ────
+  {
+    const { t, sent } = memTransport();
+    setAlertTransport(t);
+    // The day GM first closes above its rim, fired_status is still NULL — the board
+    // flag is written AFTER the send. Under the narrow scope this was suppressed and
+    // came back the next evening as "LATE ENTRY — OFF-parity".
+    const firstDetection = boardRow("GM", { section: "pending", firedStatus: null });
+    const trade = buildAlertScope([], [firstDetection]);
+    check("parity: a first-detection pending row is NOT in the trade scope", !trade.has("GM"));
+    const board = buildBoardScope(trade, [{ ticker: "GM" }]);
+    check("parity: …but IS in the board scope", board.has("GM"));
+    const onParity = evalEntryConfirmed({
+      ticker: "GM", fireClose: 92.5, breakout: 91.5, fireBarIndex: 4, handleLowDate: HLD,
+      fireDate: ET, etDate: ET, sessionsAgo: 0, stop: 86, target: 105,
+      tier: "Q5", pRank: 3, sizeBucket: "full", resolved: null,
+    });
+    const fired = await fireOnce(onParity, entryMarkerKey("GM", HLD), board);
+    check("parity: ENTRY CONFIRMED fires the SAME evening", fired === true && sent.length === 1);
+    check("parity: …on-parity, not downgraded to LATE ENTRY", sent[0].includes("ENTRY CONFIRMED") && sent[0].includes("buy next session's OPEN") && !sent[0].includes("OFF-parity"));
+    // The stale guard is untouched for this family.
+    const stale = await fireOnce(onParity, entryMarkerKey("GONE", HLD), buildBoardScope(new Set(), []));
+    check("parity: an off-board ticker is still suppressed", stale === false && sent.length === 1);
+  }
+
+  // ── EARNINGS RESTORE: pending advisories fire again ──────────────────────
+  {
+    const { t, sent } = memTransport();
+    setAlertTransport(t);
+    const trade = buildAlertScope([{ ticker: "HELD" }], []);
+    const board = buildBoardScope(trade, [{ ticker: "GM" }]);
+    const held = await fireAlert(evalEarnings("HELD", "2026-08-21", 2)!, ET, board);
+    const pend = await fireAlert(evalEarnings("GM", "2026-08-21", 2)!, ET, board);
+    const gone = await fireAlert(evalEarnings("NOW", "2026-08-21", 2)!, ET, board);
+    check("earnings: a HELD ticker still alerts", held === true);
+    check("earnings: a PENDING ticker alerts again (Fix 1 had killed it)", pend === true);
+    check("earnings: an off-board ticker stays suppressed", gone === false && sent.length === 2);
+    check("earnings: pending would still be blocked by the narrow scope", (await fireAlert(evalEarnings("GM", "2026-08-21", 2)!, ET, trade)) === false);
   }
 
   setAlertTransport(null); // restore the real Redis + Telegram transport
