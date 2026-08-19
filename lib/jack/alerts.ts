@@ -11,11 +11,11 @@
 // orchestration (DB reads + Telegram + Redis) is exercised by the live selftests.
 // =============================================================================
 import { redis } from "@/lib/redis";
-import { isTradingDay, etDateISO } from "./market-hours";
+import { isTradingDay, isMarketOpen, etDateISO } from "./market-hours";
 import { computeDaysHeld } from "./position-mgmt";
 // The SHARED fire rule + the SAME daily-bar source the paper replay uses. The entry
 // alert must never re-derive either one — that is the parity mandate.
-import { detectFire, findTouchExit, fetchDailyBars, CONFIRM_WINDOW_BARS } from "./outcome-tracker";
+import { detectFire, findTouchExit, fetchDailyBars, CONFIRM_WINDOW_BARS, type Bar } from "./outcome-tracker";
 import { PRICES_KEY, type IexQuote, type StoredPrices } from "./price-refresh";
 import { sendTelegram, alertsEnabled } from "./telegram";
 import { fetchEarningsMap, earningsEnabled } from "./finnhub";
@@ -26,6 +26,10 @@ import { isTradeableSetup } from "./handle-score";
 import { evalSecondChance, RETEST_WINDOW_BARS, RUNUP_FRAC } from "./second-chance";
 // The board's LIVE-group rule, so the candidate pool matches what the board shows.
 import { isInLiveDisplayGroup, isOwnedPosition } from "./combine-decisions";
+// THE alert scope's live half is the Basket Sizer's own feed — not a re-derivation.
+// selectBasketCandidates = in the LIVE display group ∧ tradeable ∧ not owned ∧ not
+// retired, which is exactly what app/api/jack-basket/route.ts sizes.
+import { selectBasketCandidates, type BasketEligibleInput } from "./basket";
 
 // ---- Thresholds (named constants; the only knobs) --------------------------
 export const APPROACH_PCT = 0.03; // NOW within 3% of stop/target
@@ -58,7 +62,20 @@ export type AlertType =
   | "entry_resolved"
   // Recovery re-entry on a setup that fired, was never taken, and has pulled back to
   // its original entry while still live. SYSTEM tier — backtested, not a heads-up.
-  | "second_chance";
+  | "second_chance"
+  // INTRADAY/EOD TOUCH on a LIVE, NOT-OWNED setup. Deliberately distinct types from
+  // target_hit/stop_hit: reaching t05 with no entry taken is NOT a win, and a stop
+  // taken before entry is NOT a loss — they are "nothing was enterable" information.
+  | "ran_to_target"
+  | "setup_invalidated";
+
+/**
+ * The four TERMINAL hit semantics, each with its OWN Redis namespace. Never share a
+ * key across two of these: the not-owned→owned transition and the fill-lag case both
+ * depend on `ran_to_target` and `target_hit` being able to fire independently for the
+ * same setup (both stories told, honestly — see hitMarkerKey).
+ */
+export type HitKind = "target_hit" | "stop_hit" | "ran_to_target" | "setup_invalidated";
 
 export type HealthFailure =
   | "intraday_refresh"
@@ -180,6 +197,120 @@ export function evalTargetHit(ticker: string, close: number | null, target: numb
     ticker,
     `🟢 SYSTEM · ${T(ticker)} target hit\nclose ${p2(close)} ≥ target ${p2(target)}`
   );
+}
+
+// ============================================================
+// FIX 2 — TP/SL *TOUCH* DETECTION (intraday IEX range · EOD consolidated daily bar)
+//
+// The close-based evaluators above answer "did it END past the level". They cannot see
+// a level that was TOUCHED and given back before the close — which is the whole bug:
+// a live position reached take-profit intraday and nothing fired, because
+// evalApproachTarget bails at the hit and evalTargetHit needs a close.
+//
+// Touch is evaluated from a session RANGE: the running IEX day high/low intraday, the
+// consolidated daily bar at EOD. Same rule for both, so the EOD pass is a strict
+// backstop on the intraday one rather than a second opinion.
+// ============================================================
+
+/** Which level a session range touched. STOP-FIRST on a tie — see detectTouch. */
+export type TouchKind = "stop" | "target";
+
+/**
+ * Did this session's range touch the stop or the target?
+ *
+ * STOP-FIRST ON A TIE, matching the backtest's exit convention. A cumulative day
+ * high/low cannot order two events inside the same session, so this is a WHOLE-DAY
+ * rule: a day that ran to target and later broke the stop reports the STOP.
+ * Deliberately conservative — the alternative silently books wins that were given back.
+ */
+export function detectTouch(args: {
+  dayHigh: number | null;
+  dayLow: number | null;
+  stop: number | null;
+  target: number | null;
+}): TouchKind | null {
+  const { dayHigh, dayLow, stop, target } = args;
+  if (dayLow != null && stop != null && dayLow <= stop) return "stop";
+  if (dayHigh != null && target != null && dayHigh >= target) return "target";
+  return null;
+}
+
+/** The four (owned × touch) semantics. Owned and un-entered are NEVER the same story. */
+export function hitKindFor(owned: boolean, touch: TouchKind): HitKind {
+  if (owned) return touch === "stop" ? "stop_hit" : "target_hit";
+  return touch === "stop" ? "setup_invalidated" : "ran_to_target";
+}
+
+/**
+ * Build the alert for a touch. Labels are fixed by spec and carry DISTINCT semantics:
+ * an un-entered runner that reached t05 is NOT a win (nothing was enterable), and a
+ * stop taken before entry is NOT a loss.
+ */
+export function evalTouchAlert(args: {
+  ticker: string;
+  owned: boolean;
+  touch: TouchKind;
+  stop: number | null;
+  target: number | null;
+  /** intraday = provisional (live IEX); eod = confirmed (consolidated daily bar). */
+  source: "intraday" | "eod";
+}): Alert {
+  const kind = hitKindFor(args.owned, args.touch);
+  const tag = args.source === "intraday" ? "[intraday touch]" : "[daily bar]";
+  const t05 = args.target != null ? p2(args.target) : "—";
+  const stop = args.stop != null ? p2(args.stop) : "—";
+
+  const head =
+    kind === "target_hit"
+      ? `🎯 TARGET HIT — ${T(args.ticker)} reached t05 (${t05}) ${tag}`
+      : kind === "stop_hit"
+        ? `🛑 STOP HIT — ${T(args.ticker)} hit stop (${stop}) ${tag}`
+        : kind === "ran_to_target"
+          ? `⚠️ RAN TO TARGET UN-ENTERED — ${T(args.ticker)} reached t05 (${t05}) but no breakout entry was taken`
+          : `❌ SETUP INVALIDATED — ${T(args.ticker)} stop (${stop}) taken before entry`;
+
+  const body =
+    kind === "ran_to_target"
+      ? `Don't chase — the move happened without an enterable entry.`
+      : kind === "setup_invalidated"
+        ? `The setup is dead pre-entry; no position was at risk.`
+        : `exit per rules`;
+
+  const footer =
+    args.source === "intraday"
+      ? "provisional · live IEX range · reconciled against the daily bar at the close"
+      : "confirmed · consolidated daily bar";
+
+  return mk(kind, "system", args.ticker, `${head}\n${body}\n${footer}`);
+}
+
+/**
+ * The session range to judge a quote by, with the RTH gate.
+ *
+ * · RTH 09:30–16:00 ET. IEX quotes can carry extended-hours prints, and a thin
+ *   pre/post spike would fake a touch that never happened in the regular session.
+ * · Missing timestamp → FAIL OPEN (accept) and LOG. A silently self-disabling gate
+ *   that swallows every touch is far worse than a rare ext-hours print; the log line
+ *   is what makes the degradation visible.
+ * · Missing high/low → fall back to the last print, so a quote without a range can
+ *   still report a touch at the level it is trading through.
+ */
+export function quoteTouchRange(
+  q: { ticker: string; tngoLast: number | null; last: number | null; dayHigh: number | null; dayLow: number | null; timestamp: string | null },
+  isOpenFn: (d: Date) => boolean = isMarketOpen
+): { high: number | null; low: number | null; rejected: "ext_hours" | null } {
+  if (q.timestamp == null) {
+    console.log(`JACK touch: ${T(q.ticker)} quote has no timestamp — RTH gate failing OPEN for this quote`);
+  } else {
+    const d = new Date(q.timestamp);
+    if (Number.isNaN(d.getTime())) {
+      console.log(`JACK touch: ${T(q.ticker)} quote timestamp unparseable (${q.timestamp}) — RTH gate failing OPEN`);
+    } else if (!isOpenFn(d)) {
+      return { high: null, low: null, rejected: "ext_hours" };
+    }
+  }
+  const fallback = q.tngoLast ?? q.last;
+  return { high: q.dayHigh ?? fallback, low: q.dayLow ?? fallback, rejected: null };
 }
 
 /** Fire when held >= TIME_STOP_TRIGGER_DAYS (~110) CALENDAR days of the 120-day window. */
@@ -372,52 +503,187 @@ export function secondChanceMarkerKey(ticker: string, handleLowDate: string): st
   return `jack:alert:second_chance:${T(ticker.trim())}:${handleLowDate.trim()}`;
 }
 
+/**
+ * ONE TERMINAL MARKER PER (SEMANTICS, SETUP) — no ET date, no TTL.
+ *
+ * A hit is a TERMINAL EVENT, not an ongoing condition: it fires once, ever, per setup.
+ * (The old per-ET-day cadence is right for the APPROACH alerts — "you are near" is a
+ * persistent state that should re-arm daily — and wrong for a hit, which would then
+ * re-fire every day price sat below the stop.)
+ *
+ * The intraday touch and the EOD close/daily-bar backstop share THIS key, which is what
+ * makes the EOD pass idempotent against an intraday fire.
+ */
+export function hitMarkerKey(kind: HitKind, ticker: string, handleLowDate: string): string {
+  return `jack:alert:${kind}:${T(ticker.trim())}:${handleLowDate.trim()}`;
+}
+
+/**
+ * Markers that must SURVIVE a scope drop (never purged by the Fix-1 sweep).
+ *
+ * Purging a terminal marker when a ticker falls off the board lets a re-validated setup
+ * re-fire a hit it already reported. All four hit namespaces qualify, and so do the two
+ * other lifetime markers — entry_confirmed and second_chance are "once per setup, for
+ * its lifetime" by the same logic. Everything else is ET-day scoped and self-expires,
+ * so purging it only means "may alert again if it returns to the board", which is right.
+ */
+export function isLifetimeMarker(key: string): boolean {
+  return /^jack:alert:(target_hit|stop_hit|ran_to_target|setup_invalidated|entry_confirmed|second_chance):/.test(
+    key
+  );
+}
+
+// ============================================================
+// TRANSPORT SEAM — Redis + Telegram behind one injectable interface.
+//
+// Production uses the real clients (below). The selftest installs an in-memory
+// transport so the whole funnel — scope suppression, purge, dedup, send — is testable
+// with no network, no Redis and no Telegram. NOTHING else in this file touches redis
+// or sendTelegram directly; that is what makes emitAlert a real chokepoint.
+// ============================================================
+export interface AlertTransport {
+  enabled(): boolean;
+  get(key: string): Promise<unknown>;
+  set(key: string, ttlSeconds?: number): Promise<void>;
+  del(key: string): Promise<void>;
+  send(text: string): Promise<{ ok: boolean }>;
+}
+
+const defaultTransport: AlertTransport = {
+  enabled: () => alertsEnabled(),
+  get: (key) => redis.get(key),
+  set: async (key, ttlSeconds) => {
+    if (ttlSeconds != null) await redis.set(key, "1", { ex: ttlSeconds });
+    else await redis.set(key, "1");
+  },
+  del: async (key) => {
+    await redis.del(key);
+  },
+  send: (text) => sendTelegram(text),
+};
+
+let transport: AlertTransport = defaultTransport;
+
+/** Install a test transport; pass null to restore the real Redis + Telegram one. */
+export function setAlertTransport(t: AlertTransport | null): void {
+  transport = t ?? defaultTransport;
+}
+
 // Err toward SENDING on a Redis read failure (a rare dup beats a missed stop-hit).
 async function alreadySent(key: string): Promise<boolean> {
   try {
-    return (await redis.get(key)) != null;
+    return (await transport.get(key)) != null;
   } catch {
     return false;
   }
 }
-async function markSent(key: string): Promise<void> {
+async function markSent(key: string, ttlSeconds?: number): Promise<void> {
   try {
-    await redis.set(key, "1", { ex: 36 * 60 * 60 });
+    await transport.set(key, ttlSeconds);
   } catch {
     // non-fatal — worst case the alert can repeat; better than silent Redis coupling
   }
 }
 
-/** Send one alert with dedup. Marks sent ONLY on a successful send (else retries next cycle). */
-export async function fireAlert(a: Alert, etDate: string): Promise<boolean> {
-  const key = alertMarkerKey(a.type, a.ticker, etDate);
-  if (await alreadySent(key)) return false;
-  const res = await sendTelegram(a.text);
-  if (res.ok) {
-    await markSent(key);
-    return true;
+// ============================================================
+// THE EMISSION CHOKEPOINT
+// ============================================================
+
+export interface EmitOptions {
+  /** The current-validation in-scope ticker set (buildAlertScope). REQUIRED. */
+  scope: Set<string>;
+  /** Full Redis dedup key — per-ET-day (alertMarkerKey) or per-setup (hit/entry/second-chance). */
+  key: string;
+  /** Omitted → no expiry: fires exactly once for the lifetime of the key. */
+  ttlSeconds?: number;
+}
+
+/** Counters for the per-pass log line — how much staleness was actually suppressed. */
+export interface EmitStats {
+  sent: number;
+  suppressedOutOfScope: number;
+  purgedMarkers: number;
+  deduped: number;
+}
+export const newEmitStats = (): EmitStats => ({ sent: 0, suppressedOutOfScope: 0, purgedMarkers: 0, deduped: 0 });
+
+/**
+ * THE ONE WAY AN ALERT LEAVES THIS SYSTEM. Every path — approach, big move, entry
+ * confirmed/late/resolved, stop/target hit, ran-to-target, setup-invalidated, time
+ * stop, earnings, second chance — goes through here.
+ *
+ * Order matters:
+ *   1. SCOPE. Not in the latest validation's board (open ∪ live) → suppressed, full
+ *      stop, whatever markers a prior run left behind. This is Fix 1: the guard is
+ *      structural, not per-path, so a NEW alert path cannot be added that forgets it —
+ *      `scope` is a required argument and there is no other sender.
+ *   2. PURGE. A suppressed non-lifetime marker is deleted so it cannot resurrect a
+ *      stale dedup state; lifetime markers (hits, entry, second-chance) are exempt —
+ *      purging those would let a re-validated setup re-fire a hit it already sent.
+ *   3. DEDUP, then send, and mark ONLY on a successful send (a Telegram failure retries
+ *      on the next pass instead of silently swallowing the signal).
+ *
+ * `alertsEnabled()` is checked here too, so a disabled bot can never leave markers.
+ */
+export async function emitAlert(a: Alert, o: EmitOptions, stats?: EmitStats): Promise<boolean> {
+  const ticker = T(a.ticker);
+  if (!o.scope.has(ticker)) {
+    if (stats) stats.suppressedOutOfScope++;
+    console.log(
+      `JACK alert SUPPRESSED (stale — ${ticker} not in the latest validation board): ${a.type}`
+    );
+    if (!isLifetimeMarker(o.key)) {
+      try {
+        await transport.del(o.key);
+        if (stats) stats.purgedMarkers++;
+      } catch {
+        // non-fatal — the scope guard already stopped the send; the marker can TTL out
+      }
+    }
+    return false;
   }
-  return false;
+  if (!transport.enabled()) return false;
+  if (await alreadySent(o.key)) {
+    if (stats) stats.deduped++;
+    return false;
+  }
+  const res = await transport.send(a.text);
+  if (!res.ok) return false;
+  await markSent(o.key, o.ttlSeconds);
+  if (stats) stats.sent++;
+  return true;
 }
 
 /**
- * Send an alert deduped on an EXPLICIT key (not the per-day one). Same discipline as
- * fireAlert: the marker is set ONLY after a successful send, so a Telegram failure
- * retries on the next pass instead of silently swallowing the signal.
- *
- * `ttlSeconds` omitted → no expiry, i.e. fires exactly once for the lifetime of the key.
+ * Send one alert deduped PER ET-DAY. Thin wrapper over emitAlert — `scope` is required
+ * so this cannot be used to bypass the funnel.
  */
-export async function fireOnce(a: Alert, key: string, ttlSeconds?: number): Promise<boolean> {
-  if (await alreadySent(key)) return false;
-  const res = await sendTelegram(a.text);
-  if (!res.ok) return false;
+export async function fireAlert(a: Alert, etDate: string, scope: Set<string>, stats?: EmitStats): Promise<boolean> {
+  return emitAlert(a, { scope, key: alertMarkerKey(a.type, a.ticker, etDate), ttlSeconds: 36 * 60 * 60 }, stats);
+}
+
+/**
+ * Send an alert deduped on an EXPLICIT key (per-setup rather than per-day). Same
+ * funnel, same discipline; `ttlSeconds` omitted → fires exactly once for the lifetime
+ * of the key.
+ */
+export async function fireOnce(
+  a: Alert,
+  key: string,
+  scope: Set<string>,
+  ttlSeconds?: number,
+  stats?: EmitStats
+): Promise<boolean> {
+  return emitAlert(a, { scope, key, ttlSeconds }, stats);
+}
+
+/** Clear a marker outright (reconciliation, not emission). Safe if Redis is down. */
+export async function purgeMarker(key: string): Promise<void> {
   try {
-    if (ttlSeconds != null) await redis.set(key, "1", { ex: ttlSeconds });
-    else await redis.set(key, "1");
+    await transport.del(key);
   } catch {
-    // non-fatal — worst case the alert can repeat; better than coupling to Redis
+    // best-effort
   }
-  return true;
 }
 
 const HEALTH_LABEL: Record<HealthFailure, string> = {
@@ -429,16 +695,74 @@ const HEALTH_LABEL: Record<HealthFailure, string> = {
   second_chance_bars_fetch: "second-chance daily bars fetch failed",
 };
 
+/**
+ * OPERATIONAL health — deliberately OUTSIDE the scope funnel. A health alert has no
+ * ticker and must still fire when the board is empty or every ticker is out of scope
+ * (that is precisely when the pipeline is broken and you need to hear about it).
+ */
 export async function fireHealth(failure: HealthFailure, detail: string, etDate: string): Promise<boolean> {
+  if (!transport.enabled()) return false;
   const key = healthMarkerKey(failure, etDate);
   if (await alreadySent(key)) return false;
   const text = `🚨 OPS · JACK pipeline issue\n${HEALTH_LABEL[failure]}: ${detail.slice(0, 200)}`;
-  const res = await sendTelegram(text);
+  const res = await transport.send(text);
   if (res.ok) {
-    await markSent(key);
+    await markSent(key, 36 * 60 * 60);
     return true;
   }
   return false;
+}
+
+// ============================================================
+// FIX 1 — THE IN-SCOPE SET (the latest validation's board)
+// ============================================================
+
+/** The minimum a row needs to contribute its ticker to the scope. */
+export interface ScopeRow extends BasketEligibleInput {
+  ticker: string;
+}
+
+/**
+ * inScope = openTickers ∪ liveTickers — PURE, so the whole guard is unit-testable.
+ *
+ *   · openTickers — getOpenPositions(): what you actually hold. Deliberately NOT
+ *     run-scoped; an open trade stays alertable even when its ticker left the scan.
+ *   · liveTickers — selectBasketCandidates() over the CURRENT board (live + pending):
+ *     the LIVE display group ∧ tradeable ∧ not owned ∧ not retired. This is the Basket
+ *     Sizer's own feed, NOT getPendingSetups() — that one returns section='pending'
+ *     rows only, so a validated-LIVE setup never appears in it (the documented feed
+ *     bug that also left the Sizer blank while the board showed LIVE).
+ *
+ * Anything else is stale by construction: it is not in the latest validation.
+ */
+export function buildAlertScope(open: Array<{ ticker: string }>, boardRows: ScopeRow[]): Set<string> {
+  const scope = new Set<string>();
+  for (const p of open) scope.add(T(p.ticker));
+  for (const r of selectBasketCandidates(boardRows)) scope.add(T(r.ticker));
+  return scope;
+}
+
+/** The live half alone — the rows (not just tickers) the touch passes iterate. */
+export function selectLiveRows<T extends ScopeRow>(boardRows: T[]): T[] {
+  return selectBasketCandidates(boardRows);
+}
+
+/**
+ * Read the board and build the scope. One place, called at the top of BOTH the
+ * intraday pass and the EOD pass, so the two can never disagree about what is current.
+ */
+export function readAlertScope(dbRead: typeof import("@/lib/db/read")): {
+  scope: Set<string>;
+  open: ReturnType<typeof import("@/lib/db/read").getOpenPositions>;
+  live: import("@/lib/db/read").CurrentBoardRow[];
+} {
+  const open = dbRead.getOpenPositions();
+  const board = dbRead.getCurrentBoard();
+  const live = selectLiveRows([...board.live, ...board.pending]);
+  const scope = new Set<string>();
+  for (const p of open) scope.add(T(p.ticker));
+  for (const r of live) scope.add(T(r.ticker));
+  return { scope, open, live };
 }
 
 // ============================================================
@@ -487,17 +811,76 @@ export function buildIntradayAlerts(
   return alerts;
 }
 
+/** A setup the touch pass judges: geometry + whether it is a position or a live idea. */
+export interface TouchRow {
+  ticker: string;
+  handleLowDate: string;
+  stop: number | null;
+  target: number | null;
+  owned: boolean;
+}
+
+/**
+ * PURE touch construction for the intraday pass — no Redis, no Telegram, no DB.
+ *
+ * Runs over BOTH open positions and live not-owned setups (the two halves of the alert
+ * scope). Each result carries its OWN namespaced lifetime key, so an un-entered
+ * ran_to_target and a later owned target_hit on the same setup are independent events.
+ */
+export function buildIntradayTouchAlerts(
+  rows: TouchRow[],
+  quotes: IexQuote[],
+  isOpenFn: (d: Date) => boolean = isMarketOpen
+): Array<{ alert: Alert; key: string; kind: HitKind; dayHigh: number | null }> {
+  const qmap = new Map(quotes.map((q) => [T(q.ticker), q]));
+  const out: Array<{ alert: Alert; key: string; kind: HitKind; dayHigh: number | null }> = [];
+  for (const r of rows) {
+    const q = qmap.get(T(r.ticker));
+    if (!q) continue;
+    const range = quoteTouchRange(q, isOpenFn);
+    if (range.rejected) continue; // ext-hours print — never a touch
+    const touch = detectTouch({ dayHigh: range.high, dayLow: range.low, stop: r.stop, target: r.target });
+    if (!touch) continue;
+    const kind = hitKindFor(r.owned, touch);
+    out.push({
+      alert: evalTouchAlert({ ticker: r.ticker, owned: r.owned, touch, stop: r.stop, target: r.target, source: "intraday" }),
+      key: hitMarkerKey(kind, r.ticker, r.handleLowDate),
+      kind,
+      dayHigh: range.high,
+    });
+  }
+  return out;
+}
+
 export async function evaluateIntradayAlerts(quotes: IexQuote[], now: Date): Promise<number> {
-  if (!alertsEnabled()) return 0;
+  if (!transport.enabled()) return 0;
   const etDate = etDateISO(now);
   const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
 
-  // OWNED POSITIONS ONLY — no pending loop. See the doc comment above.
-  const alerts = buildIntradayAlerts(dbRead.getOpenPositions(), quotes);
+  // FIX 1 — the authoritative in-scope set, built at the top of the pass.
+  const { scope, open, live } = readAlertScope(dbRead);
+  const stats = newEmitStats();
 
-  let fired = 0;
-  for (const a of alerts) if (a && (await fireAlert(a, etDate))) fired++;
-  return fired;
+  // HEADS-UP (approach stop/target, big move) — OWNED POSITIONS ONLY, unchanged.
+  for (const a of buildIntradayAlerts(open, quotes)) {
+    if (a) await fireAlert(a, etDate, scope, stats);
+  }
+
+  // FIX 2 — TP/SL touch over BOTH halves of the scope. Lifetime keys (no TTL): a hit
+  // is terminal, and the EOD pass dedups against these very keys.
+  const rows: TouchRow[] = [
+    ...open.map((p) => ({ ticker: p.ticker, handleLowDate: p.handleLowDate, stop: p.stop, target: p.target, owned: true })),
+    ...live.map((r) => ({ ticker: r.ticker, handleLowDate: r.handleLowDate, stop: r.stop, target: r.target, owned: false })),
+  ];
+  const touches = buildIntradayTouchAlerts(rows, quotes);
+  for (const t of touches) await emitAlert(t.alert, { scope, key: t.key }, stats);
+
+  console.log(
+    `JACK intraday alerts: ${stats.sent} sent · ${touches.length} touch(es) detected · ` +
+      `scope ${scope.size} (${open.length} open + ${live.length} live) · ` +
+      `${stats.suppressedOutOfScope} suppressed stale (${stats.purgedMarkers} marker(s) purged) · ${stats.deduped} deduped`
+  );
+  return stats.sent;
 }
 
 /**
@@ -523,8 +906,10 @@ export async function evaluateIntradayAlerts(quotes: IexQuote[], now: Date): Pro
 async function evaluateEntryConfirmations(
   now: Date,
   etDate: string,
-  tiingoBase: string,
-  dbRead: typeof import("@/lib/db/read")
+  scope: Set<string>,
+  fetchBars: BarFetcher,
+  dbRead: typeof import("@/lib/db/read"),
+  stats: EmitStats
 ): Promise<number> {
   const pending = dbRead.getPendingSetups();
   if (pending.length === 0) return 0;
@@ -568,7 +953,7 @@ async function evaluateEntryConfirmations(
       if (await alreadySent(key)) continue;
 
       // 2. Official DAILY bars, same source as runOutcomeTracker. NOT tngoLast.
-      const { bars, error } = await fetchDailyBars(tiingoBase, s.ticker, s.handleLowDate);
+      const { bars, error } = await fetchBars(s.ticker, s.handleLowDate);
       if (error || bars.length === 0) {
         fetchFailures++;
         continue;
@@ -617,7 +1002,7 @@ async function evaluateEntryConfirmations(
       });
 
       // No TTL — exactly once per setup, for the setup's lifetime.
-      if (await fireOnce(alert, key)) fired++;
+      if (await fireOnce(alert, key, scope, undefined, stats)) fired++;
 
       // BOARD FLAG — same detection that just fired the alert, persisted so the board
       // shows the fire without waiting for the weekly re-VALIDATE. Derived from the
@@ -731,8 +1116,10 @@ export function evalSecondChanceAlert(args: {
  */
 async function evaluateSecondChance(
   etDate: string,
-  tiingoBase: string,
-  dbRead: typeof import("@/lib/db/read")
+  scope: Set<string>,
+  fetchBars: BarFetcher,
+  dbRead: typeof import("@/lib/db/read"),
+  stats: EmitStats
 ): Promise<number> {
   const board = dbRead.getCurrentBoard();
   const candidates = [...board.live, ...board.pending].filter(
@@ -760,7 +1147,7 @@ async function evaluateSecondChance(
       const key = secondChanceMarkerKey(s.ticker, s.handleLowDate);
       if (await alreadySent(key)) continue;
 
-      const { bars, error } = await fetchDailyBars(tiingoBase, s.ticker, s.handleLowDate);
+      const { bars, error } = await fetchBars(s.ticker, s.handleLowDate);
       if (error || bars.length === 0) {
         fetchFailures++;
         continue;
@@ -785,8 +1172,10 @@ async function evaluateSecondChance(
         cancelBy: res.entryDate ? addTradingDaysISO(res.entryDate, RETEST_WINDOW_BARS) : null,
       });
 
-      // No TTL — a setup ARMS once, so it pings once, ever.
-      if (await fireOnce(alert, key)) fired++;
+      // No TTL — a setup ARMS once, so it pings once, ever. Routed through the SAME
+      // funnel as every other path: the second-chance gate lives in its own file, and
+      // this is what stops it firing on a ticker the latest validation dropped.
+      if (await fireOnce(alert, key, scope, undefined, stats)) fired++;
     } catch (err) {
       console.error(`JACK second-chance failed for ${s.ticker}:`, err);
       fetchFailures++;
@@ -809,12 +1198,100 @@ async function evaluateSecondChance(
   return fired;
 }
 
+/**
+ * PASS-SCOPED daily-bar memo. The EOD block now reads bars in three places (entry
+ * confirmations, second chance, and the live touch backstop) over heavily overlapping
+ * tickers; without this the same (ticker, handle_low_date) is fetched up to 3×.
+ * Keyed on setup identity, lives for ONE pass only — never a cross-pass cache, so a
+ * later pass can never see yesterday's bars.
+ */
+export type BarFetcher = (ticker: string, handleLowDate: string) => Promise<{ bars: Bar[]; error?: string }>;
+
+export function makeBarFetcher(tiingoBase: string): BarFetcher {
+  const memo = new Map<string, Promise<{ bars: Bar[]; error?: string }>>();
+  return (ticker, handleLowDate) => {
+    const k = `${T(ticker)}|${handleLowDate}`;
+    let p = memo.get(k);
+    if (!p) {
+      p = fetchDailyBars(tiingoBase, ticker, handleLowDate);
+      memo.set(k, p);
+    }
+    return p;
+  };
+}
+
+/**
+ * EOD BACKSTOP for LIVE, NOT-OWNED setups — the IEX-vs-consolidated reconciliation net.
+ *
+ * A close-based check cannot catch a runner that touched t05 and faded: it never
+ * *closes* above t05. So this reads the CONSOLIDATED daily bar (ground truth) and
+ * applies the same touch rule to today's high/low. If the intraday IEX pass already
+ * fired, the shared lifetime key makes this a no-op — that is the idempotency.
+ *
+ * This branch is the net for exactly the case that started this fix: a thin IEX feed
+ * missed the touch, and the daily bar proves it happened. Every such catch is LOGGED
+ * as a mismatch — a ticker that mismatches repeatedly has an IEX feed too thin to trust.
+ */
+export async function evaluateLiveTouchBackstop(
+  live: Array<{ ticker: string; handleLowDate: string; stop: number | null; target: number | null }>,
+  scope: Set<string>,
+  etDate: string,
+  fetchBars: BarFetcher,
+  stats: EmitStats
+): Promise<{ fired: number; mismatches: string[]; fetchFailures: number }> {
+  let fired = 0;
+  let fetchFailures = 0;
+  const mismatches: string[] = [];
+
+  for (const s of live) {
+    try {
+      if (s.stop == null && s.target == null) continue;
+      const { bars, error } = await fetchBars(s.ticker, s.handleLowDate);
+      if (error || bars.length === 0) {
+        fetchFailures++;
+        continue;
+      }
+      // TODAY's consolidated bar only. Falling back to the last bar would let a stale
+      // feed re-report an old day's touch as if it happened today.
+      const today = bars.find((b) => b.date.slice(0, 10) === etDate);
+      if (!today) continue;
+
+      const touch = detectTouch({ dayHigh: today.high, dayLow: today.low, stop: s.stop, target: s.target });
+      if (!touch) continue;
+
+      const kind = hitKindFor(false, touch);
+      const key = hitMarkerKey(kind, s.ticker, s.handleLowDate);
+      const alreadyKnown = await alreadySent(key);
+      const alert = evalTouchAlert({
+        ticker: s.ticker,
+        owned: false,
+        touch,
+        stop: s.stop,
+        target: s.target,
+        source: "eod",
+      });
+      if (await emitAlert(alert, { scope, key }, stats)) {
+        fired++;
+        // Fired HERE and not intraday → the live feed missed a touch the official bar
+        // shows. That is the signal-quality datum worth watching.
+        if (!alreadyKnown) mismatches.push(`${T(s.ticker)}:${kind}`);
+      }
+    } catch (err) {
+      console.error(`JACK live touch backstop failed for ${s.ticker}:`, err);
+      fetchFailures++;
+    }
+  }
+  return { fired, mismatches, fetchFailures };
+}
+
 export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise<number> {
-  if (!alertsEnabled()) return 0;
+  if (!transport.enabled()) return 0;
   const etDate = etDateISO(now);
   const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
 
-  const open = dbRead.getOpenPositions();
+  // FIX 1 — the same in-scope set the intraday pass builds, built here at the top too.
+  const { scope, open, live } = readAlertScope(dbRead);
+  const stats = newEmitStats();
   const held = new Set(open.map((p) => p.ticker.toUpperCase()));
 
   let store: StoredPrices | null = null;
@@ -825,13 +1302,25 @@ export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise
   }
   const closeFor = (t: string): number | null => store?.prices?.[t.toUpperCase()]?.price ?? null;
 
-  const alerts: Array<Alert | null> = [];
+  // OWNED, CLOSE-BASED hits. These now dedup on the SETUP-scoped hit key — the same
+  // key the intraday touch uses — so an intraday TARGET HIT is never repeated at the
+  // close, and a hit fires once per setup rather than once per ET-day.
+  let fired = 0;
   for (const p of open) {
     const close = closeFor(p.ticker);
-    if (close != null) {
-      alerts.push(evalStopHit(p.ticker, close, p.stop));
-      alerts.push(evalTargetHit(p.ticker, close, p.target));
+    if (close == null) continue;
+    for (const [kind, alert] of [
+      ["stop_hit", evalStopHit(p.ticker, close, p.stop)],
+      ["target_hit", evalTargetHit(p.ticker, close, p.target)],
+    ] as Array<[HitKind, Alert | null]>) {
+      if (!alert) continue;
+      if (await emitAlert(alert, { scope, key: hitMarkerKey(kind, p.ticker, p.handleLowDate) }, stats)) fired++;
     }
+  }
+
+  // Per-ET-day alerts (persistent conditions, right to re-arm daily).
+  const alerts: Array<Alert | null> = [];
+  for (const p of open) {
     alerts.push(evalTimeStop(p.ticker, computeDaysHeld(p.userEntryDate, now)));
   }
 
@@ -862,27 +1351,54 @@ export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise
     }
   }
 
-  let fired = 0;
-  for (const a of alerts) if (a && (await fireAlert(a, etDate))) fired++;
+  for (const a of alerts) if (a && (await fireAlert(a, etDate, scope, stats))) fired++;
 
   // NEW: close-confirmed entry pass over the PENDING set. Runs after the exit alerts
   // and is fully isolated — its failure can never suppress a stop/target/time-stop.
   if (tiingoBase) {
+    // ONE memo for the whole EOD block — the three bar-reading passes below overlap
+    // heavily on (ticker, handle_low_date).
+    const fetchBars = makeBarFetcher(tiingoBase);
     try {
-      fired += await evaluateEntryConfirmations(now, etDate, tiingoBase, dbRead);
+      fired += await evaluateEntryConfirmations(now, etDate, scope, fetchBars, dbRead, stats);
     } catch (err) {
       console.error("JACK entry-confirmation pass failed:", err);
     }
     // RECOVERY pass — isolated from the entry pass for the same reason the entry pass
     // is isolated from the exit alerts: one failing must never suppress the others.
     try {
-      fired += await evaluateSecondChance(etDate, tiingoBase, dbRead);
+      fired += await evaluateSecondChance(etDate, scope, fetchBars, dbRead, stats);
     } catch (err) {
       console.error("JACK second-chance pass failed:", err);
+    }
+    // LIVE not-owned touch backstop — the consolidated-daily-bar net under the IEX feed.
+    try {
+      const bs = await evaluateLiveTouchBackstop(live, scope, etDate, fetchBars, stats);
+      fired += bs.fired;
+      if (bs.mismatches.length > 0) {
+        console.warn(
+          `JACK touch reconciliation: ${bs.mismatches.length} touch(es) the intraday IEX feed MISSED, ` +
+            `caught by the consolidated daily bar — ${bs.mismatches.join(" ")} ` +
+            `(a ticker that repeats here has an IEX feed too thin to trust)`
+        );
+      }
+      if (bs.fetchFailures > 0) {
+        await fireHealth(
+          "entry_bars_fetch",
+          `${bs.fetchFailures}/${live.length} live setups could not be checked for a daily-bar touch`,
+          etDate
+        );
+      }
+    } catch (err) {
+      console.error("JACK live touch backstop failed:", err);
     }
   } else {
     console.warn("JACK entry confirmations skipped — no tiingoBase passed to evaluateEodAlerts");
   }
 
+  console.log(
+    `JACK eod alerts: ${stats.sent} sent · scope ${scope.size} (${open.length} open + ${live.length} live) · ` +
+      `${stats.suppressedOutOfScope} suppressed stale (${stats.purgedMarkers} marker(s) purged) · ${stats.deduped} deduped`
+  );
   return fired;
 }

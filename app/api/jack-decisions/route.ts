@@ -115,6 +115,27 @@ export async function POST(req: NextRequest) {
         body.exit ?? null,
         body.exitDate ?? null
       );
+
+      // FILL-WRITE RECONCILIATION. Logging an entry flips the setup not-owned → OWNED,
+      // so a "RAN TO TARGET UN-ENTERED" alert sent while it was still un-entered is now
+      // wrong-in-hindsight: the position exists and its own target_hit will fire from a
+      // DIFFERENT namespace. The namespace split is the load-bearing fix (the owned hit
+      // fires either way); this purge is cleanup, so the un-entered line doesn't linger
+      // beside the realized win. Deliberately here and NOT in updateUserFills — that is
+      // a synchronous better-sqlite3 writer and has no business awaiting Redis.
+      // Best-effort: a failure here must never fail the fill write.
+      if (body.entry != null) {
+        try {
+          const ident = dbRead.getSetupIdentity(body.setupId);
+          if (ident) {
+            const alerts = require("@/lib/jack/alerts") as typeof import("@/lib/jack/alerts");
+            await alerts.purgeMarker(alerts.hitMarkerKey("ran_to_target", ident.ticker, ident.handleLowDate));
+          }
+        } catch (err) {
+          console.warn("JACK fill reconcile: ran_to_target purge skipped:", err);
+        }
+      }
+
       // user_R_realized = (exit - entry) / (entry - stop) — the execution-quality R.
       return NextResponse.json({
         ok: true,

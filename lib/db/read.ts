@@ -613,3 +613,19 @@ export function markDecisionUserAction(
   });
   apply();
 }
+
+/**
+ * Setup identity (ticker + handle low date) for a setup id.
+ *
+ * Alert markers are keyed on setup IDENTITY, not on the numeric id, so any caller that
+ * needs to touch one — e.g. the fill-write reconciliation that clears a stale
+ * `ran_to_target` when a setup flips not-owned → owned — has to resolve it first.
+ * Read-only, single row, no joins.
+ */
+export function getSetupIdentity(setupId: number): { ticker: string; handleLowDate: string } | null {
+  const db = getDb();
+  const row = db
+    .prepare(`SELECT ticker AS ticker, handle_low_date AS handleLowDate FROM setups WHERE id = ?`)
+    .get(setupId) as { ticker: string; handleLowDate: string } | undefined;
+  return row ?? null;
+}
