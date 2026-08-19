@@ -156,6 +156,15 @@ export function evalBigMove(ticker: string, now: number | null, prevClose: numbe
  * rebuilt. Re-enabling means adding a pending loop back to evaluateIntradayAlerts.
  *
  * Same-day CROSS only: prevClose < level AND tngoLast >= level (not a standing "already above").
+ *
+ * ⚠️ SHARES THE "entry_trigger" AlertType WITH evalPromotion (below), which is the LIVE
+ * one. They are opposites and must never both be wired up:
+ *      this  — INTRADAY cross of the BREAKOUT rim, heads-up tier, dormant
+ *   evalPromotion — EOD CLOSE at/above ENTRY, system tier, the pending→live promotion
+ * The type string is shared because the promotion's Redis namespace is specified as
+ * `jack:alert:entry_trigger:{TICKER}:{handle_low_date}`. If this heads-up is ever
+ * re-enabled, give it its own type first — an intraday poke must never consume the
+ * promotion's once-per-setup marker.
  */
 export function evalEntryTrigger(
   ticker: string,
@@ -197,6 +206,43 @@ export function evalTargetHit(ticker: string, close: number | null, target: numb
     ticker,
     `🟢 SYSTEM · ${T(ticker)} target hit\nclose ${p2(close)} ≥ target ${p2(target)}`
   );
+}
+
+/**
+ * FIX 3 — PENDING → LIVE PROMOTION. The one pending event that must not be missed.
+ *
+ * A pending setup whose daily bar CLOSES at or above its entry has become tradeable:
+ * it is enterable at the next open. Without this the setup goes live silently and the
+ * operator only finds out at the next VALIDATE.
+ *
+ * CLOSE-CONFIRMED, EOD ONLY — the deliberate opposite convention from the TP/SL touch
+ * above, and for a reason: a hit IS a touch event, whereas an entry only ever counts on
+ * a close (the strategy's fill is the next open AFTER a daily close through the level).
+ * Price may cross entry intraday any number of times; every one of those is silent.
+ *
+ * SYSTEM tier, not heads-up: this is actionable and on-convention, so it carries no
+ * "not a system signal" footer.
+ */
+export function evalPromotion(ticker: string, close: number | null, entry: number | null): Alert | null {
+  if (close == null || entry == null || entry <= 0) return null;
+  if (close < entry) return null; // an intraday poke above entry is NOT a promotion
+  return mk(
+    "entry_trigger",
+    "system",
+    ticker,
+    `🚀 PROMOTED — ${T(ticker)} is now LIVE\n` +
+      `Close ${p2(close)} ≥ entry ${p2(entry)}  ·  the setup is tradeable from the next open\n` +
+      `close-confirmed · pending → live`
+  );
+}
+
+/**
+ * ONCE-PER-SETUP promotion marker. Setup identity, no ET date, no TTL — a setup is
+ * promoted once in its life, and the marker is what stops a repeat "it's live" ping on
+ * every later run once the ticker legitimately shows up in the live group.
+ */
+export function promotionMarkerKey(ticker: string, handleLowDate: string): string {
+  return `jack:alert:entry_trigger:${T(ticker.trim())}:${handleLowDate.trim()}`;
 }
 
 // ============================================================
@@ -528,7 +574,7 @@ export function hitMarkerKey(kind: HitKind, ticker: string, handleLowDate: strin
  * so purging it only means "may alert again if it returns to the board", which is right.
  */
 export function isLifetimeMarker(key: string): boolean {
-  return /^jack:alert:(target_hit|stop_hit|ran_to_target|setup_invalidated|entry_confirmed|second_chance):/.test(
+  return /^jack:alert:(target_hit|stop_hit|ran_to_target|setup_invalidated|entry_confirmed|second_chance|entry_trigger):/.test(
     key
   );
 }
@@ -748,13 +794,40 @@ export function selectLiveRows<T extends ScopeRow>(boardRows: T[]): T[] {
 }
 
 /**
+ * THE WIDER SET: everything present in the latest validation — open ∪ live ∪ PENDING.
+ *
+ * The guard has THREE states, not two:
+ *   · not on the board at all        → suppressed (the NOW stale-alert case, unchanged)
+ *   · on the board as open/live      → the full alert set, asserted against tradeScope
+ *   · on the board as PENDING        → the EOD close-based promotion lane ONLY,
+ *                                      asserted against THIS set
+ *
+ * "Present in the latest validation" is still required, so this does not reopen the
+ * stale-alert bug: NOW had LEFT the board, whereas a promoting pending setup is one of
+ * the rows the current run is showing — just not in the open∪live subset.
+ *
+ * Only three emissions may use this set: the promotion alert, the close-confirmed entry
+ * family (entry_confirmed / late_entry / entry_resolved — all EOD, all close-based), and
+ * the earnings advisory. Everything else keeps asserting against the narrow tradeScope.
+ */
+export function buildBoardScope(tradeScope: Set<string>, pending: Array<{ ticker: string }>): Set<string> {
+  const scope = new Set(tradeScope);
+  for (const s of pending) scope.add(T(s.ticker));
+  return scope;
+}
+
+/**
  * Read the board and build the scope. One place, called at the top of BOTH the
  * intraday pass and the EOD pass, so the two can never disagree about what is current.
  */
 export function readAlertScope(dbRead: typeof import("@/lib/db/read")): {
+  /** open ∪ live — the full-alert-set scope. */
   scope: Set<string>;
+  /** open ∪ live ∪ pending — the EOD close-based lane (promotion + entry family + earnings). */
+  boardScope: Set<string>;
   open: ReturnType<typeof import("@/lib/db/read").getOpenPositions>;
   live: import("@/lib/db/read").CurrentBoardRow[];
+  pending: ReturnType<typeof import("@/lib/db/read").getPendingSetups>;
 } {
   const open = dbRead.getOpenPositions();
   const board = dbRead.getCurrentBoard();
@@ -762,7 +835,9 @@ export function readAlertScope(dbRead: typeof import("@/lib/db/read")): {
   const scope = new Set<string>();
   for (const p of open) scope.add(T(p.ticker));
   for (const r of live) scope.add(T(r.ticker));
-  return { scope, open, live };
+  // getPendingSetups() is already owned- and retired-excluded and run-scoped.
+  const pending = dbRead.getPendingSetups();
+  return { scope, boardScope: buildBoardScope(scope, pending), open, live, pending };
 }
 
 // ============================================================
@@ -1284,13 +1359,79 @@ export async function evaluateLiveTouchBackstop(
   return { fired, mismatches, fetchFailures };
 }
 
+/**
+ * PENDING → LIVE PROMOTION pass (Fix 3). EOD only, close-based, once per setup.
+ *
+ * MOST-RECENT BAR, not today's. Promotion is a STATE ("the latest close is at or above
+ * entry"), not a per-day event, so this reads the last available daily bar. That is
+ * deliberate on two counts:
+ *   · Tiingo may not have published today's bar by the 18:00 ET pass. A today-only
+ *     match would miss the promotion permanently — tomorrow's pass looks for tomorrow's
+ *     date, and today's bar is never examined again.
+ *   · It matches how the entry family already reads bars (detectFire scans for the
+ *     state, it does not require a same-day bar).
+ * The once-per-setup lifetime marker is what makes re-reading the same bar harmless.
+ * (The TP/SL backstop stays today-only on purpose: a touch IS a per-day event.)
+ *
+ * TRADEABLE ONLY, same gate as the entry-confirmation pass: the frozen SIZE_MAP never
+ * enters Q1/Q2, so a SKIP-bucket setup closing above entry must not be announced as
+ * "tradeable from the next open".
+ */
+export async function evaluatePendingPromotions(
+  pending: Array<{
+    ticker: string;
+    handleLowDate: string;
+    entry: number | null;
+    sizeBucket?: string | null;
+    tier?: string | null;
+  }>,
+  boardScope: Set<string>,
+  fetchBars: BarFetcher,
+  stats: EmitStats
+): Promise<{ fired: number; fetchFailures: number; skippedNotTradeable: number }> {
+  let fired = 0;
+  let fetchFailures = 0;
+  let skippedNotTradeable = 0;
+
+  for (const s of pending) {
+    try {
+      if (s.entry == null) continue; // no entry level → nothing to promote against
+      if (!isTradeableSetup(s)) {
+        skippedNotTradeable++;
+        continue;
+      }
+      // Dedup BEFORE the fetch — an already-promoted setup costs no Tiingo call.
+      const key = promotionMarkerKey(s.ticker, s.handleLowDate);
+      if (await alreadySent(key)) continue;
+
+      const { bars, error } = await fetchBars(s.ticker, s.handleLowDate);
+      if (error || bars.length === 0) {
+        fetchFailures++;
+        continue;
+      }
+      const sorted = [...bars].sort((a, b) => a.date.localeCompare(b.date));
+      const latest = sorted[sorted.length - 1];
+
+      const alert = evalPromotion(s.ticker, latest.close, s.entry);
+      if (!alert) continue; // latest close still below entry — stay silent
+
+      if (await emitAlert(alert, { scope: boardScope, key }, stats)) fired++;
+    } catch (err) {
+      console.error(`JACK promotion check failed for ${s.ticker}:`, err);
+      fetchFailures++;
+    }
+  }
+  return { fired, fetchFailures, skippedNotTradeable };
+}
+
 export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise<number> {
   if (!transport.enabled()) return 0;
   const etDate = etDateISO(now);
   const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
 
   // FIX 1 — the same in-scope set the intraday pass builds, built here at the top too.
-  const { scope, open, live } = readAlertScope(dbRead);
+  // FIX 3 — plus the wider boardScope (adds PENDING) for the EOD close-based lane.
+  const { scope, boardScope, open, live, pending } = readAlertScope(dbRead);
   const stats = newEmitStats();
   const held = new Set(open.map((p) => p.ticker.toUpperCase()));
 
@@ -1324,8 +1465,11 @@ export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise
     alerts.push(evalTimeStop(p.ticker, computeDaysHeld(p.userEntryDate, now)));
   }
 
-  // Earnings — held + pending, one calendar call for the whole window.
-  const pending = dbRead.getPendingSetups();
+  // Earnings — held + pending, one calendar call for the whole window. These are
+  // PENDING-eligible (boardScope, below): an advisory on a setup you may buy tomorrow
+  // is exactly as useful as one on a position you hold. Fix 1 suppressed them as
+  // collateral damage; the widened lane restores them.
+  const earningsAlerts: Array<Alert | null> = [];
   const earningsTickers = new Set<string>([...held, ...pending.map((s) => s.ticker.toUpperCase())]);
   if (earningsEnabled() && earningsTickers.size > 0) {
     const fromISO = etDate;
@@ -1341,7 +1485,7 @@ export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise
           continue;
         }
         matched++;
-        alerts.push(evalEarnings(t, d, tradingDaysUntil(etDate, d)));
+        earningsAlerts.push(evalEarnings(t, d, tradingDaysUntil(etDate, d)));
       }
       console.log(
         `JACK earnings check: ${matched} matched / ${unmatched} unmatched of ${earningsTickers.size} tickers`
@@ -1351,18 +1495,46 @@ export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise
     }
   }
 
+  // Time stops concern OWNED positions only → the narrow scope.
   for (const a of alerts) if (a && (await fireAlert(a, etDate, scope, stats))) fired++;
+  // Earnings may name a pending ticker → the widened board scope.
+  for (const a of earningsAlerts) if (a && (await fireAlert(a, etDate, boardScope, stats))) fired++;
 
   // NEW: close-confirmed entry pass over the PENDING set. Runs after the exit alerts
   // and is fully isolated — its failure can never suppress a stop/target/time-stop.
   if (tiingoBase) {
-    // ONE memo for the whole EOD block — the three bar-reading passes below overlap
+    // ONE memo for the whole EOD block — the four bar-reading passes below overlap
     // heavily on (ticker, handle_low_date).
     const fetchBars = makeBarFetcher(tiingoBase);
     try {
-      fired += await evaluateEntryConfirmations(now, etDate, scope, fetchBars, dbRead, stats);
+      // BOARD SCOPE, not the narrow one. This pass iterates getPendingSetups(), and on
+      // the day a setup FIRST closes above its rim its fired_status is still NULL
+      // (markDecisionFired runs after the send) — so under the narrow open∪live scope
+      // the on-parity "ENTRY CONFIRMED · buy next session's open" was suppressed, the
+      // board flag was stamped anyway, and the next evening it re-fired as "LATE ENTRY
+      // — OFF-parity". Silently trading a parity signal for an off-parity one.
+      fired += await evaluateEntryConfirmations(now, etDate, boardScope, fetchBars, dbRead, stats);
     } catch (err) {
       console.error("JACK entry-confirmation pass failed:", err);
+    }
+    // FIX 3 — pending → live promotion. Close-confirmed, EOD-only, once per setup.
+    try {
+      const pr = await evaluatePendingPromotions(pending, boardScope, fetchBars, stats);
+      fired += pr.fired;
+      console.log(
+        `JACK promotions: ${pr.fired} fired · ${pending.length} pending checked · ` +
+          `${pr.skippedNotTradeable} skipped (SKIP bucket / Q1-Q2)` +
+          (pr.fetchFailures > 0 ? ` · ${pr.fetchFailures} fetch failure(s)` : "")
+      );
+      if (pr.fetchFailures > 0) {
+        await fireHealth(
+          "entry_bars_fetch",
+          `${pr.fetchFailures}/${pending.length} pending setups could not be checked for a promotion`,
+          etDate
+        );
+      }
+    } catch (err) {
+      console.error("JACK promotion pass failed:", err);
     }
     // RECOVERY pass — isolated from the entry pass for the same reason the entry pass
     // is isolated from the exit alerts: one failing must never suppress the others.
