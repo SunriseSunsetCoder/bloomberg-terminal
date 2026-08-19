@@ -74,6 +74,15 @@ Sweep of concurrent slots × per-trade risk (15.6yr):
 
 Backtested sector strength / rotation as a selection lever on 12,524 trades (11 SPDR ETFs + SPY, RS vs SPY at 1m/3m/6m at each entry). **Result: zero ranking power** (separation −0.02 vs tier +0.21, R:R +0.37). Weak-sector setups slightly *outperform* (bottom-decile +0.62R / PF 3.44 vs top-decile +0.47R / PF 2.47). Conclusion: the old sector-RS size-down was backwards. Removed it — sector is now a strictly-neutral, non-binding display note (no size-down on weak, no confirm on strong). The main-page sector-strength panel (F1, described in the Bloomberg doc) is context only, not a filter.
 
+## Volume — TESTED, NOT ADOPTED (2026-08-17)
+
+Tested whether volume WITHIN a setup improves the edge, full-universe (13,538 trades, Q3–Q5 = 7,676), via `volume_cell.py` / `volume_isoos_cell.py` added to `cup_handle_15yr_history_1.ipynb` (they re-read Volume from the per-ticker CSVs — Cell 2's `price_db` drops it). Two candidate features, both rejected:
+
+- **Breakout-day volume surge** (confirm-bar volume ÷ trailing-50d avg): **no edge — dropped.** rank-corr(surge, R) = −0.08, and the bins trend mildly AGAINST avg-R (<0.8× → +0.60R, 2×+ → +0.41R): a big-volume breakout wins slightly *more often* but is already extended, so less room to the target. The classic "wait for breakout volume confirmation" filter is worthless here — same outcome as the sector test.
+- **Handle dry-up** (handle avg-vol ÷ prior-60-bar base vol; <1 = lighter/drier): a strong IN-SAMPLE effect that **does NOT survive out-of-sample — shelved.** It IS independent of `handle_score` (rank-corr(dry, hscore) = −0.02, so genuinely new info, not redundant), and in-sample dry handles beat heavy (>1.25×) ones by **+0.23R in Q4 and Q5** (p<0.005). But split at 2024-12-31 the gap **collapses OOS to +0.02–0.07R (all p>0.7)** — Q4+Q5 OOS gap +0.036 (p=0.76), Q5 +0.017 (p=0.91), heavy ≈ dry live. Direction (drier better) stays weakly negative both halves, but the actionable dry-vs-heavy contrast is an in-sample artifact. Textbook overfit signature (big + significant IS, gone OOS). OOS heavy bins are thin (n=28–58); revisit only if a future OOS window resurrects the gap. Q3 shows no effect in either half.
+
+**Net: neither volume feature earns a place. `handle_score` stays 3 geometry features (days_since_handle_low, handle_dur_days, handle_depth_atr) — no volume.** Same discipline as the sector declaw and the R:R sweep: a lever must confirm OOS to ship.
+
 ## Exit / target (t05) — RE-EXAMINED, kept (2026-07-26)
 
 Tested whether the t05 half-target is the best exit by re-simulating all **7,605 traded setups (Q3–Q5)** over the 15yr set under alternative exits (no-target, trailing 8/12/20%), scored **IS vs OOS**, plus per-trade MFE. **Verdict: t05 is the best risk-adjusted exit — kept.**
