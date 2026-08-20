@@ -299,6 +299,37 @@ export function markDecisionFired(decisionId: number, mark: FiredMark): number {
   return apply();
 }
 
+/**
+ * Clear the fire/promotion flag on EVERY decision row of a setup.
+ *
+ * The counterpart to markDecisionFired, and the mechanism behind the promoter's
+ * current-geometry re-derivation: fired state is resolved per SETUP across runs (see
+ * getCurrentBoard), so a stamp left by an earlier run keeps a setup in the LIVE display
+ * group even after a re-scan revises its rim upward past the close that fired it. That
+ * would be a stale fire masquerading as a live idea — off-parity, and exactly what the
+ * "re-derive against the CURRENT run's geometry" rule exists to prevent.
+ *
+ * SAFE TO CLEAR: fired_at/fire_close/fire_bar/fired_status are DISPLAY STATUS ONLY
+ * (markDecisionFired's own contract). No outcome, R, or user fill is touched — the
+ * paper replay recomputes from bars, and `outcomes` is a separate table. The next pass
+ * re-stamps the setup the moment it qualifies again, so this is reversible, not
+ * destructive. Returns rows changed (0 when nothing was stamped).
+ */
+export function clearDecisionFired(setupId: number): number {
+  const db = getDb();
+  const apply = db.transaction(() =>
+    db
+      .prepare(
+        `UPDATE decisions
+            SET fired_at = NULL, fire_close = NULL, fire_bar = NULL, fired_status = NULL
+          WHERE setup_id = ?
+            AND fired_at IS NOT NULL`
+      )
+      .run(setupId).changes
+  );
+  return apply();
+}
+
 // ============================================================================
 // Watchlist retirement — keeps the pending set from accumulating stale ideas
 // ============================================================================

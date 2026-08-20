@@ -185,8 +185,18 @@ async function main(): Promise<void> {
     const newDecisionId = run3.ids[0].decisionId;
     check("the re-validated row is a NEW decision", newDecisionId !== decisionOf("FIRED"));
     check(
-      "the new current-run row has no flag of its own",
-      read.getPendingSetups().find((p) => p.ticker === "FIRED")!.firedAt === null
+      "the new current-run DB row has no flag of its own",
+      (db.prepare(`SELECT fired_at FROM decisions WHERE id = ?`).get(newDecisionId) as { fired_at: string | null })
+        .fired_at === null
+    );
+    // …but the BOARD READ resolves fired state per SETUP, across runs (the same join
+    // getFiredFlagsForSetups uses). That is the fix for "shows LIVE on the JACK tab,
+    // Basket Sizer won't size it": this read used to take the current run's own row,
+    // so re-pasting the weekly CSV silently un-promoted the setup for the Sizer while
+    // the tab kept showing it. Updated deliberately — the old expectation WAS the bug.
+    check(
+      "the board read still reports the fire after a re-VALIDATE (cross-run)",
+      read.getPendingSetups().find((p) => p.ticker === "FIRED")!.firedAt !== null
     );
     check(
       "but the per-setup lookup still reports the fire (badge survives)",

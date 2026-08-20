@@ -408,10 +408,19 @@ export function getCurrentBoard(): { runId: number | null; live: CurrentBoardRow
          s.size_bucket      AS sizeBucket,
          s.sector           AS sector,
          s.handle_score     AS handleScore,
-         d.fired_at         AS firedAt,
-         d.fire_close       AS fireClose,
-         d.fire_bar         AS fireBar,
-         d.fired_status     AS firedStatus,
+         -- FIRED STATE IS RESOLVED PER *SETUP*, ACROSS RUNS — not from this run's row.
+         --
+         -- This is the fix for the "shows LIVE on the JACK tab, Basket Sizer won't size
+         -- it" bug. The tab reads fired state through getFiredFlagsForSetups (cross-run,
+         -- latest fired decision for the setup); this read used to take d.fired_at from
+         -- the CURRENT run's row only. Re-pasting the weekly CSV inserts a fresh decision
+         -- row with fired_at NULL, so the two surfaces disagreed the moment you
+         -- re-validated: the tab kept showing LIVE, the Sizer silently dropped the row.
+         -- Same join as getFiredFlagsForSetups ⇒ the surfaces cannot diverge.
+         f.fired_at         AS firedAt,
+         f.fire_close       AS fireClose,
+         f.fire_bar         AS fireBar,
+         f.fired_status     AS firedStatus,
          um.user_action     AS userAction,
          o.user_exit_price  AS userExitPrice,
          s.retired_at       AS retiredAt
@@ -419,6 +428,23 @@ export function getCurrentBoard(): { runId: number | null; live: CurrentBoardRow
        JOIN setups s ON s.id = d.setup_id
        -- outcomes.setup_id is UNIQUE, so this can't fan out the row count.
        LEFT JOIN outcomes o ON o.setup_id = s.id
+       -- Latest FIRED decision per setup, across every run (see the column comment).
+       -- MAX(id) ⇒ the newest verdict wins, so a promoter re-derivation on a later run
+       -- supersedes an older stamp without rewriting it.
+       LEFT JOIN (
+              SELECT d2.setup_id   AS setup_id,
+                     d2.fired_at   AS fired_at,
+                     d2.fire_close AS fire_close,
+                     d2.fire_bar   AS fire_bar,
+                     d2.fired_status AS fired_status
+                FROM decisions d2
+                JOIN (
+                       SELECT setup_id, MAX(id) AS max_id
+                         FROM decisions
+                        WHERE fired_at IS NOT NULL
+                        GROUP BY setup_id
+                     ) lf ON lf.max_id = d2.id
+            ) f ON f.setup_id = s.id
        -- Latest non-null user mark per setup, across ALL runs (markDecisionUserAction
        -- keeps exactly one marked row per setup, but MAX(id) is the same rule the
        -- other readers use).

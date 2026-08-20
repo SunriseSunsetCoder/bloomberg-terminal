@@ -43,13 +43,14 @@ import {
   evaluateLiveTouchBackstop,
   evalSecondChanceAlert,
   type TouchRow,
-  // Fix 3 — pending→live promotion
+  // Fix 3 / promoter — pending→live promotion
   buildBoardScope,
-  evalPromotion,
+  evalPromotionAlert,
   promotionMarkerKey,
-  evaluatePendingPromotions,
+  promotePendingToLive,
   evalEntryConfirmed,
 } from "@/lib/jack/alerts";
+import { isPromotedToLive } from "@/lib/jack/promotion";
 import { parseEarningsCalendar } from "@/lib/jack/finnhub";
 import type { IexQuote } from "@/lib/jack/price-refresh";
 
@@ -453,149 +454,197 @@ async function asyncTests(): Promise<void> {
   }
 
   // ==========================================================================
-  // FIX 3 — PENDING → LIVE PROMOTION (close-confirmed, EOD-only, once per setup)
+  // PENDING → LIVE PROMOTION — the RIM predicate (strict close > rim, in-window)
   //
-  // Plus the two things the widened lane repairs: the on-parity entry confirmation
-  // and the pending earnings advisory, both of which Fix 1 had suppressed.
+  // Re-based from the original close-≥-entry rule: that one was looser in BOTH
+  // dimensions (wrong level, no window) and is the class of comparison that announced
+  // a breakout on a sub-rim close. One predicate now, shared with the board writer.
   // ==========================================================================
 
-  // A pending row as getPendingSetups() returns it (only the fields these passes read).
-  const pendingRow = (ticker: string, over: Record<string, unknown> = {}) => ({
+  // TTE, the acceptance case: rim 89.30, entry 89.39, handle low 2026-08-05.
+  const TTE_RIM = 89.3;
+  const promoRow = (ticker: string, over: Record<string, unknown> = {}) => ({
+    setupId: 302,
+    decisionId: 9001,
     ticker,
     handleLowDate: HLD,
-    entry: 91.94, // GM's entry — the case that motivated this
-    stop: 86,
+    breakout: TTE_RIM,
+    stop: 84.5,
+    target: 97.0,
     sizeBucket: "full",
-    tier: "Q5",
+    tier: "Q3",
     ...over,
   });
-  const barsWith = (close: number, over: Partial<{ high: number; low: number }> = {}) => [
-    { date: "2026-08-18", open: 88, high: 89, low: 87, close: 88, volume: 1e6 },
-    { date: ET, open: 90, high: over.high ?? Math.max(close, 92), low: over.low ?? 89, close, volume: 1e6 },
-  ];
+  // Bars from the handle low; `closes` are the post-handle-low session closes.
+  const barsFrom = (closes: number[], firstDate = "2026-08-06") => {
+    const out = [{ date: HLD, open: 88, high: 88.5, low: 87.5, close: 88, volume: 1e6 }];
+    const d = new Date(`${firstDate}T00:00:00Z`);
+    for (const c of closes) {
+      out.push({ date: d.toISOString().slice(0, 10), open: c - 0.2, high: c + 0.3, low: c - 0.5, close: c, volume: 1e6 });
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    return out;
+  };
+  // No-op writer for the alert-side tests (the DB path is covered in the promoter selftest).
+  const noopWriter = { markDecisionFired: () => 1, clearDecisionFired: () => 0 };
 
-  // ── scope: the third state ────────────────────────────────────────────────
-  {
-    const trade = buildAlertScope([{ ticker: "HELD" }], [boardRow("LIVEA")]);
-    const board = buildBoardScope(trade, [{ ticker: "GM" }, { ticker: "PENDB" }]);
-    check("boardScope keeps everything in the trade scope", board.has("HELD") && board.has("LIVEA"));
-    check("boardScope ADDS pending tickers", board.has("GM") && board.has("PENDB"));
-    check("…and the narrow trade scope still excludes them", !trade.has("GM"));
-    check("neither scope admits a ticker that LEFT the board (NOW)", !board.has("NOW") && !trade.has("NOW"));
-  }
-
-  // ── 10. pending, daily close >= entry → promotion fires once ──────────────
+  // ── 10. in-window close above the rim → promoted + alerted once ───────────
   {
     const { t, store, sent } = memTransport();
     setAlertTransport(t);
-    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "GM" }]);
+    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "TTE" }]);
     const stats = newEmitStats();
-    const res = await evaluatePendingPromotions([pendingRow("GM")], board, async () => ({ bars: barsWith(92.1) }), stats);
-    check("10. promotion fires on a close at/above entry", res.fired === 1 && sent.length === 1);
-    check("10. …as a SYSTEM signal, not a heads-up", sent[0].includes("PROMOTED") && !sent[0].includes("not a system signal"));
-    check("10. …naming the close, the entry, and what to do", sent[0].includes("92.10") && sent[0].includes("91.94") && sent[0].includes("tradeable from the next open"));
-    check("10. …keyed in the entry_trigger namespace, per setup", store.has(promotionMarkerKey("GM", HLD)) && promotionMarkerKey("GM", HLD) === `jack:alert:entry_trigger:GM:${HLD}`);
-    const again = await evaluatePendingPromotions([pendingRow("GM")], board, async () => ({ bars: barsWith(92.1) }), stats);
-    check("10. …and only once", again.fired === 0 && sent.length === 1);
-    check("10. a close exactly AT entry counts", evalPromotion("GM", 91.94, 91.94) !== null);
+    // 14 bars, the last one 90.07 — TTE's real close, decisively above the 89.30 rim.
+    const bars = barsFrom([88.4, 88.6, 88.9, 89.0, 89.1, 88.8, 89.2, 89.0, 89.25, 89.28, 89.29, 89.1, 89.2, 90.07]);
+    const r = await promotePendingToLive([promoRow("TTE")], board, ET, async () => ({ bars }), noopWriter, stats);
+    check("10. TTE promotes on a close above the rim", r.promoted === 1);
+    check("10. …and alerts once", r.alerted === 1 && sent.length === 1);
+    check("10. …naming rim + bar position, not entry", sent[0].includes("> rim 89.30") && sent[0].includes("since handle low") && !sent[0].includes("entry"));
+    check("10. …in the entry_trigger namespace, per setup", store.has(promotionMarkerKey("TTE", HLD)));
+    const again = await promotePendingToLive([promoRow("TTE")], board, ET, async () => ({ bars }), noopWriter, stats);
+    check("10. re-running does not re-alert", again.alerted === 0 && sent.length === 1);
+    check("10. …but still re-affirms the board (idempotent write)", again.promoted === 1);
   }
 
-  // ── 11. intraday high >= entry but close < entry → SILENT ─────────────────
+  // ── 11. the premature-fire bug cannot recur: sub-rim close stays silent ────
   {
     const { t, sent } = memTransport();
     setAlertTransport(t);
-    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "POKE" }]);
-    // High 93.20 pierced entry 91.94 during the session; the close gave it back.
-    const res = await evaluatePendingPromotions(
-      [pendingRow("POKE")],
-      board,
-      async () => ({ bars: barsWith(91.2, { high: 93.2 }) }),
-      newEmitStats()
+    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "SUB" }]);
+    // 89.2842 — the close that wrongly announced a breakout. Below the 89.30 rim.
+    const bars = barsFrom([88.4, 88.9, 89.1, 89.0, 89.2842]);
+    const r = await promotePendingToLive([promoRow("SUB")], board, ET, async () => ({ bars }), noopWriter, newEmitStats());
+    check("11. a SUB-RIM close does NOT promote", r.promoted === 0 && sent.length === 0);
+    check("11. strict >, so a close EXACTLY at the rim does not fire", isPromotedToLive({ handleLowDate: HLD, breakout: TTE_RIM }, barsFrom([89.3]), ET).promoted === false);
+    check("11. …one cent above does", isPromotedToLive({ handleLowDate: HLD, breakout: TTE_RIM }, barsFrom([89.31]), ET).promoted === true);
+    check(
+      "11. an intraday HIGH above the rim with a sub-rim close is silent",
+      isPromotedToLive(
+        { handleLowDate: HLD, breakout: TTE_RIM },
+        [
+          { date: HLD, open: 88, high: 88, low: 87, close: 88, volume: 1 },
+          { date: "2026-08-06", open: 89, high: 91.5, low: 88.9, close: 89.2, volume: 1 },
+        ],
+        ET
+      ).promoted === false
     );
-    check("11. an intraday poke above entry does NOT promote", res.fired === 0 && sent.length === 0);
-    check("11. evalPromotion is close-only, never a high", evalPromotion("POKE", 91.2, 91.94) === null);
-    check("11. …this is the opposite convention from a TP/SL touch", detectTouch({ dayHigh: 93.2, dayLow: 89, stop: 86, target: 110 }) === null && evalPromotion("POKE", 92.5, 91.94) !== null);
   }
 
-  // ── 12. promoted, then the ticker legitimately shows up LIVE → no dup ─────
+  // ── 12. outside the 15-bar confirm window → never promoted ────────────────
+  {
+    // 16 sub-rim bars, then a breakout on bar 17 — past the window.
+    const late = barsFrom([...Array(16).fill(88.9), 92.0]);
+    const v = isPromotedToLive({ handleLowDate: HLD, breakout: TTE_RIM }, late, ET);
+    check("12. a close above the rim AFTER the window does not promote", v.promoted === false && v.reason === "not_fired", v.reason);
+    // Inside the window but the window has not elapsed → deferred, not a denial.
+    const early = isPromotedToLive({ handleLowDate: HLD, breakout: TTE_RIM }, barsFrom([88.9, 89.0]), ET);
+    check("12. an open window with no fire yet is deferred, not not_fired", early.reason === "deferred" && early.promoted === false);
+  }
+
+  // ── 13. rimless fails closed — never promoted on a close-only comparison ──
   {
     const { t, sent } = memTransport();
     setAlertTransport(t);
+    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "NORIM" }]);
+    // A close far above the ENTRY (89.39) — the old rule would have promoted this.
+    const bars = barsFrom([88.4, 89.0, 95.0]);
+    const r = await promotePendingToLive([promoRow("NORIM", { breakout: null })], board, ET, async () => ({ bars }), noopWriter, newEmitStats());
+    check("13. the ~36 rimless cohort is never promoted", r.promoted === 0 && r.rimless === 1 && sent.length === 0);
+    check("13. …and never un-promoted either (a lost rim must not erase a valid stamp)", r.unpromoted === 0);
+    check("13. the predicate itself fails closed", isPromotedToLive({ handleLowDate: HLD, breakout: null }, bars, ET).reason === "no_rim");
+  }
+
+  // ── 14. quintile double-gate + off-board suppression ──────────────────────
+  {
+    const { t, sent } = memTransport();
+    setAlertTransport(t);
+    const bars = barsFrom([88.4, 89.0, 90.07]);
+    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "SKIPQ2" }, { ticker: "TTE" }]);
+    const q2 = await promotePendingToLive([promoRow("SKIPQ2", { tier: "Q2", sizeBucket: "skip" })], board, ET, async () => ({ bars }), noopWriter, newEmitStats());
+    check("14. a Q2 / skip-bucket setup is never promoted", q2.promoted === 0 && q2.notTradeable === 1 && sent.length === 0);
+    // Off the board entirely (the NOW case) — the board write still happens, but the
+    // ALERT is suppressed by the scope guard. Board and alert are independent.
+    const offBoard = buildBoardScope(buildAlertScope([], []), []);
     const stats = newEmitStats();
-    const asPending = buildBoardScope(buildAlertScope([], []), [{ ticker: "GM" }]);
-    await evaluatePendingPromotions([pendingRow("GM")], asPending, async () => ({ bars: barsWith(92.1) }), stats);
-    check("12. promotion fired on the pending run", sent.length === 1);
-    // Next run: the setup is now in the LIVE display group (fired-promoted).
-    const asLive = buildAlertScope([], [boardRow("GM", { section: "pending", firedStatus: "confirmed" })]);
-    check("12. …and the ticker is now in the LIVE scope", asLive.has("GM"));
-    const dup = await evaluatePendingPromotions([pendingRow("GM")], buildBoardScope(asLive, []), async () => ({ bars: barsWith(93.0) }), stats);
-    check("12. no repeat 'it's live' ping", dup.fired === 0 && sent.length === 1);
-    check("12. the marker is lifetime-exempt from the Fix-1 purge", isLifetimeMarker(promotionMarkerKey("GM", HLD)));
+    const nb = await promotePendingToLive([promoRow("TTE")], offBoard, ET, async () => ({ bars }), noopWriter, stats);
+    check("14. an off-board ticker's ALERT is suppressed", nb.alerted === 0 && stats.suppressedOutOfScope === 1);
+    check("14. …while the board write still happened (never gated by the alert)", nb.promoted === 1);
   }
 
-  // ── 13. pending dies below its stop pre-promotion → SILENT ───────────────
-  {
-    const { t, sent } = memTransport();
-    setAlertTransport(t);
-    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "DRIFT" }]);
-    // Closes 85.10, below the 86 stop; it never once closed above entry.
-    const res = await evaluatePendingPromotions(
-      [pendingRow("DRIFT")],
-      board,
-      async () => ({ bars: barsWith(85.1, { low: 84.5 }) }),
-      newEmitStats()
-    );
-    check("13. a pending setup dying pre-promotion is a NON-EVENT", res.fired === 0 && sent.length === 0);
-    check("13. …no setup_invalidated either (that is for promoted LIVE rows)", !sent.some((s) => s.includes("SETUP INVALIDATED")));
-  }
-
-  // ── 14. not on the board at all → the NOW guard still holds ──────────────
+  // ── the board write is NEVER gated by the Redis alert marker ──────────────
   {
     const { t, store, sent } = memTransport();
     setAlertTransport(t);
-    // NOW is in NEITHER scope — it left the board entirely.
-    const board = buildBoardScope(buildAlertScope([{ ticker: "HELD" }], [boardRow("SPY")]), [{ ticker: "GM" }]);
-    const stats = newEmitStats();
-    const res = await evaluatePendingPromotions([pendingRow("NOW")], board, async () => ({ bars: barsWith(92.1) }), stats);
-    check("14. the promotion path suppresses an off-board ticker", res.fired === 0 && sent.length === 0);
-    check("14. …counted as a stale suppression", stats.suppressedOutOfScope === 1);
-    check("14. …and its lifetime marker is not purged", !store.has(promotionMarkerKey("NOW", HLD)));
-    check("14. the SAME pass fires for an on-board pending ticker", (await evaluatePendingPromotions([pendingRow("GM")], board, async () => ({ bars: barsWith(92.1) }), stats)).fired === 1);
+    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "TTE" }]);
+    // Pre-seed the alert marker, as a premature alert would have.
+    store.set(promotionMarkerKey("TTE", HLD), "1");
+    let stamped = 0;
+    const writer = {
+      markDecisionFired: () => {
+        stamped++;
+        return 1;
+      },
+      clearDecisionFired: () => 0,
+    };
+    const bars = barsFrom([88.4, 89.0, 90.07]);
+    const r = await promotePendingToLive([promoRow("TTE")], board, ET, async () => ({ bars }), writer, newEmitStats());
+    check("marker set ⇒ alert suppressed", r.alerted === 0 && sent.length === 0);
+    check("…but the BOARD IS STILL STAMPED — the TTE bug, structurally prevented", stamped === 1 && r.promoted === 1);
   }
 
-  // ── promotion: bar selection + the tradeable gate ─────────────────────────
+  // ── current-geometry re-derivation: a stale fire is un-promoted ───────────
   {
-    const { t, sent } = memTransport();
+    const { t } = memTransport();
     setAlertTransport(t);
-    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "LAG" }, { ticker: "SKIPPY" }]);
-    // MOST-RECENT bar, not today's: at 18:00 ET Tiingo may not have published today yet.
-    const stale = await evaluatePendingPromotions(
-      [pendingRow("LAG")],
-      board,
-      async () => ({ bars: [{ date: "2026-08-18", open: 90, high: 93, low: 89, close: 92.5, volume: 1e6 }] }),
-      newEmitStats()
-    );
-    check("promotion reads the latest bar even if today's isn't published", stale.fired === 1);
-    // Q1/Q2 never gets entered, so it must never be announced as tradeable.
-    const skip = await evaluatePendingPromotions(
-      [pendingRow("SKIPPY", { tier: "Q2", sizeBucket: "skip" })],
-      board,
-      async () => ({ bars: barsWith(92.1) }),
-      newEmitStats()
-    );
-    check("a SKIP-bucket setup is never promoted", skip.fired === 0 && skip.skippedNotTradeable === 1);
-    check("a pending row with no entry level is skipped", (await evaluatePendingPromotions([pendingRow("NOENTRY", { entry: null })], board, async () => ({ bars: barsWith(92.1) }), newEmitStats())).fired === 0);
-    check("a bars-fetch failure is counted, not thrown", (await evaluatePendingPromotions([pendingRow("BAD")], buildBoardScope(new Set(), [{ ticker: "BAD" }]), async () => ({ bars: [], error: "HTTP 500" }), newEmitStats())).fetchFailures === 1);
-    check("only the promotion messages were sent", sent.every((s) => s.includes("PROMOTED")));
+    const board = buildBoardScope(buildAlertScope([], []), [{ ticker: "REVISED" }]);
+    let cleared = 0;
+    const writer = {
+      markDecisionFired: () => 1,
+      clearDecisionFired: () => {
+        cleared++;
+        return 1;
+      },
+    };
+    // The setup fired against an old rim of 89.30 — but a re-scan revised the rim to
+    // 91.00, which the same bars never clear.
+    const bars = barsFrom([88.4, 89.0, 90.07]);
+    const r = await promotePendingToLive([promoRow("REVISED", { breakout: 91.0 })], board, ET, async () => ({ bars }), writer, newEmitStats());
+    check("a stale fire on a REVISED rim does not stay promoted", r.promoted === 0 && r.unpromoted === 1 && cleared === 1);
+    check("…the same bars DO promote against the original rim", isPromotedToLive({ handleLowDate: HLD, breakout: TTE_RIM }, bars, ET).promoted === true);
+    // A transient fetch failure must never un-promote.
+    let cleared2 = 0;
+    const w2 = {
+      markDecisionFired: () => 1,
+      clearDecisionFired: () => {
+        cleared2++;
+        return 1;
+      },
+    };
+    const f = await promotePendingToLive([promoRow("REVISED")], board, ET, async () => ({ bars: [], error: "HTTP 500" }), w2, newEmitStats());
+    check("a bars-fetch failure never un-promotes", f.fetchFailures === 1 && cleared2 === 0);
+  }
+
+  // ── late vs confirmed vs resolved ─────────────────────────────────────────
+  {
+    const bars = barsFrom([88.4, 90.07, 90.5, 91.0]); // fired on bar 2, days ago
+    const late = isPromotedToLive({ handleLowDate: HLD, breakout: TTE_RIM }, bars, ET);
+    check("a fire dated before today is late, still promoted", late.promoted === true && late.firedStatus === "late");
+    const today = isPromotedToLive({ handleLowDate: HLD, breakout: TTE_RIM }, barsFrom([88.4, 90.07], "2026-08-18"), "2026-08-19");
+    check("a fire dated today is confirmed", today.firedStatus === "confirmed", String(today.firedStatus));
+    // Fired, then the trade hit its stop — history, not a live idea.
+    const resolvedBars = barsFrom([88.4, 90.07, 89.0, 84.0]);
+    const res = isPromotedToLive({ handleLowDate: HLD, breakout: TTE_RIM, stop: 84.5, target: 97 }, resolvedBars, ET);
+    check("a fire that already resolved is NOT promoted", res.promoted === false && res.reason === "resolved");
+    check("…and it is recorded as resolved (stays out of the LIVE group)", res.firedStatus === "resolved");
   }
 
   // ── the dormant intraday entry_trigger vs the live promotion ─────────────
   {
-    const dormant = evalEntryTrigger("GM", 91.0, 92.5, 91.94)!;
-    const promo = evalPromotion("GM", 92.5, 91.94)!;
+    const dormant = evalEntryTrigger("TTE", 89.0, 89.5, TTE_RIM)!;
+    const promo = evalPromotionAlert({ ticker: "TTE", fireClose: 90.07, rim: TTE_RIM, fireBar: 14, handleLowDate: HLD, late: false });
     check("both carry the entry_trigger type (shared namespace)", dormant.type === "entry_trigger" && promo.type === "entry_trigger");
     check("…but only the promotion is a SYSTEM signal", promo.kind === "system" && dormant.kind === "heads-up");
-    check("…and the dormant one reads the RIM intraday, not the close", dormant.text.includes("crossed breakout") && promo.text.includes("≥ entry"));
+    check("…and the dormant one is an INTRADAY cross, not a close", dormant.text.includes("NOW") && promo.text.includes("Close 90.07 > rim"));
   }
 
   // ── PARITY REPAIR: entry confirmation on a first-detection pending row ────

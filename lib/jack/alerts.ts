@@ -30,6 +30,8 @@ import { isInLiveDisplayGroup, isOwnedPosition } from "./combine-decisions";
 // selectBasketCandidates = in the LIVE display group ∧ tradeable ∧ not owned ∧ not
 // retired, which is exactly what app/api/jack-basket/route.ts sizes.
 import { selectBasketCandidates, type BasketEligibleInput } from "./basket";
+// THE promotion predicate — one rule, consumed by the board writer AND the alert.
+import { isPromotedToLive } from "./promotion";
 
 // ---- Thresholds (named constants; the only knobs) --------------------------
 export const APPROACH_PCT = 0.03; // NOW within 3% of stop/target
@@ -209,29 +211,41 @@ export function evalTargetHit(ticker: string, close: number | null, target: numb
 }
 
 /**
- * FIX 3 — PENDING → LIVE PROMOTION. The one pending event that must not be missed.
+ * PENDING → LIVE PROMOTION message (Fix 3, re-based onto the rim predicate).
  *
- * A pending setup whose daily bar CLOSES at or above its entry has become tradeable:
- * it is enterable at the next open. Without this the setup goes live silently and the
- * operator only finds out at the next VALIDATE.
+ * The CONDITION is not decided here — isPromotedToLive owns it (strict CLOSE > rim,
+ * inside the 15-bar confirm window). This is the message builder only, so the alert and
+ * the board writer are two consequences of ONE evaluation and cannot diverge.
+ *
+ * Re-based deliberately: the original Fix 3 condition was `close >= entry` with no
+ * window, which is looser than the board's rule in both dimensions and is the class of
+ * comparison that announced a breakout on a sub-rim close.
  *
  * CLOSE-CONFIRMED, EOD ONLY — the deliberate opposite convention from the TP/SL touch
- * above, and for a reason: a hit IS a touch event, whereas an entry only ever counts on
- * a close (the strategy's fill is the next open AFTER a daily close through the level).
- * Price may cross entry intraday any number of times; every one of those is silent.
+ * above: a hit IS a touch event, whereas an entry only ever counts on a close (the
+ * strategy's fill is the next open AFTER a daily close through the rim). Price may
+ * cross intraday any number of times; every one of those is silent.
  *
- * SYSTEM tier, not heads-up: this is actionable and on-convention, so it carries no
- * "not a system signal" footer.
+ * SYSTEM tier, not heads-up: actionable and on-convention, so no "not a signal" footer.
  */
-export function evalPromotion(ticker: string, close: number | null, entry: number | null): Alert | null {
-  if (close == null || entry == null || entry <= 0) return null;
-  if (close < entry) return null; // an intraday poke above entry is NOT a promotion
+export function evalPromotionAlert(args: {
+  ticker: string;
+  fireClose: number;
+  rim: number;
+  fireBar: number;
+  handleLowDate: string;
+  /** Fired on an earlier bar in the window, not today. */
+  late: boolean;
+}): Alert {
   return mk(
     "entry_trigger",
     "system",
-    ticker,
-    `🚀 PROMOTED — ${T(ticker)} is now LIVE\n` +
-      `Close ${p2(close)} ≥ entry ${p2(entry)}  ·  the setup is tradeable from the next open\n` +
+    args.ticker,
+    `🚀 PROMOTED — ${T(args.ticker)} is now LIVE\n` +
+      `Close ${p2(args.fireClose)} > rim ${p2(args.rim)}  (bar ${args.fireBar}/${CONFIRM_WINDOW_BARS} since handle low ${args.handleLowDate})\n` +
+      (args.late
+        ? `Fired earlier in the window — entering now is OFF-parity vs the backtest\n`
+        : `The setup is tradeable from the next open\n`) +
       `close-confirmed · pending → live`
   );
 }
@@ -1079,29 +1093,15 @@ async function evaluateEntryConfirmations(
       // No TTL — exactly once per setup, for the setup's lifetime.
       if (await fireOnce(alert, key, scope, undefined, stats)) fired++;
 
-      // BOARD FLAG — same detection that just fired the alert, persisted so the board
-      // shows the fire without waiting for the weekly re-VALIDATE. Derived from the
-      // SAME `resolved`/`late` branch evalEntryConfirmed used, so the badge and the
-      // Telegram text can never disagree.
+      // NO BOARD WRITE HERE — deliberately. promotePendingToLive owns the fired-state
+      // stamp and runs BEFORE this pass, with no Redis read at all.
       //
-      // Written AFTER the send and wrapped: a DB hiccup must never throw out of the
-      // EOD pass or block an alert. Set-once in SQL (fired_at IS NULL), and because
-      // the loop short-circuits on the Redis marker, fired_status is captured at FIRST
-      // detection and deliberately not chased afterwards — a 'confirmed' fire that
-      // later resolves stays 'confirmed' on the board until the next VALIDATE or until
-      // the user trades it. The entry_resolved alert and the outcome tracker cover
-      // true resolution; the board's job here is "this fired, act or not".
-      try {
-        const dbWrite = require("@/lib/db/write") as typeof import("@/lib/db/write");
-        dbWrite.markDecisionFired(s.decisionId, {
-          firedAt: etDate,
-          fireClose: fire.fireClose as number,
-          fireBar: fire.fireBarIndex as number,
-          firedStatus: resolved ? "resolved" : late ? "late" : "confirmed",
-        });
-      } catch (err) {
-        console.error(`JACK fired-flag persist failed for ${s.ticker} (alert already sent):`, err);
-      }
+      // This pass short-circuits on its once-per-setup alert marker (line ~48 above),
+      // which sits ABOVE everything. While the board write lived down here, that marker
+      // made the stamp unreachable forever after the first alert: TTE alerted on one
+      // day, and on the day it genuinely closed above its rim the pass skipped at the
+      // marker and never promoted. Alert dedup and board state are now co-equal
+      // consequences of ONE predicate; neither gates the other.
     } catch (err) {
       // A single bad setup must never take down the pass.
       console.error(`JACK entry-confirm failed for ${s.ticker}:`, err);
@@ -1377,51 +1377,128 @@ export async function evaluateLiveTouchBackstop(
  * enters Q1/Q2, so a SKIP-bucket setup closing above entry must not be announced as
  * "tradeable from the next open".
  */
-export async function evaluatePendingPromotions(
-  pending: Array<{
-    ticker: string;
-    handleLowDate: string;
-    entry: number | null;
-    sizeBucket?: string | null;
-    tier?: string | null;
-  }>,
+export interface PromotionRow {
+  setupId: number;
+  /** The CURRENT run's decision row — the one the stamp lands on. */
+  decisionId: number;
+  ticker: string;
+  handleLowDate: string;
+  breakout: number | null;
+  stop: number | null;
+  target: number | null;
+  sizeBucket?: string | null;
+  tier?: string | null;
+}
+
+export interface PromotionWriter {
+  markDecisionFired: (decisionId: number, mark: { firedAt: string; fireClose: number; fireBar: number; firedStatus: "confirmed" | "late" | "resolved" }) => number;
+  clearDecisionFired: (setupId: number) => number;
+}
+
+export interface PromotionPassResult {
+  promoted: number;
+  alerted: number;
+  unpromoted: number;
+  rimless: number;
+  notTradeable: number;
+  deferred: number;
+  resolved: number;
+  fetchFailures: number;
+}
+
+export async function promotePendingToLive(
+  pending: PromotionRow[],
   boardScope: Set<string>,
+  etDate: string,
   fetchBars: BarFetcher,
+  writer: PromotionWriter,
   stats: EmitStats
-): Promise<{ fired: number; fetchFailures: number; skippedNotTradeable: number }> {
-  let fired = 0;
-  let fetchFailures = 0;
-  let skippedNotTradeable = 0;
+): Promise<PromotionPassResult> {
+  const r: PromotionPassResult = {
+    promoted: 0, alerted: 0, unpromoted: 0, rimless: 0,
+    notTradeable: 0, deferred: 0, resolved: 0, fetchFailures: 0,
+  };
 
   for (const s of pending) {
     try {
-      if (s.entry == null) continue; // no entry level → nothing to promote against
-      if (!isTradeableSetup(s)) {
-        skippedNotTradeable++;
+      // Cheap gates first — neither costs a Tiingo call.
+      if (s.breakout == null) {
+        r.rimless++; // FAIL CLOSED. Never promoted on a close-only comparison.
         continue;
       }
-      // Dedup BEFORE the fetch — an already-promoted setup costs no Tiingo call.
-      const key = promotionMarkerKey(s.ticker, s.handleLowDate);
-      if (await alreadySent(key)) continue;
+      if (!isTradeableSetup(s)) {
+        r.notTradeable++;
+        continue;
+      }
 
       const { bars, error } = await fetchBars(s.ticker, s.handleLowDate);
       if (error || bars.length === 0) {
-        fetchFailures++;
-        continue;
+        r.fetchFailures++;
+        continue; // transient — never un-promote on a fetch failure
       }
-      const sorted = [...bars].sort((a, b) => a.date.localeCompare(b.date));
-      const latest = sorted[sorted.length - 1];
 
-      const alert = evalPromotion(s.ticker, latest.close, s.entry);
-      if (!alert) continue; // latest close still below entry — stay silent
+      // THE predicate, re-derived against the CURRENT run's geometry every pass.
+      const verdict = isPromotedToLive(
+        { handleLowDate: s.handleLowDate, breakout: s.breakout, stop: s.stop, target: s.target, sizeBucket: s.sizeBucket, tier: s.tier },
+        bars,
+        etDate
+      );
 
-      if (await emitAlert(alert, { scope: boardScope, key }, stats)) fired++;
+      // ---- BOARD WRITE. Deliberately BEFORE the alert and with NO Redis read of any
+      // kind: the alert marker must never gate the DB write. That ordering is what let
+      // TTE alert while the board stayed pending — one `if (alreadySent) continue`
+      // above markDecisionFired, and the stamp became unreachable forever after.
+      if (verdict.promoted) {
+        // Set-once in SQL, so a re-run is a no-op rather than a rewrite.
+        writer.markDecisionFired(s.decisionId, {
+          firedAt: etDate,
+          fireClose: verdict.fireClose as number,
+          fireBar: verdict.fireBar as number,
+          firedStatus: verdict.firedStatus as "confirmed" | "late",
+        });
+        r.promoted++;
+      } else if (verdict.reason === "resolved") {
+        // Fired but already played out: recorded for the badge, and excluded from the
+        // LIVE group by isFiredActionable. Not a live idea, not un-stamped either.
+        writer.markDecisionFired(s.decisionId, {
+          firedAt: etDate,
+          fireClose: verdict.fireClose as number,
+          fireBar: verdict.fireBar as number,
+          firedStatus: "resolved",
+        });
+        r.resolved++;
+      } else if (verdict.reason === "not_fired" || verdict.reason === "deferred") {
+        // CURRENT-GEOMETRY RE-DERIVATION. We have bars and a rim, and the setup does
+        // NOT clear it — so any stamp left by an earlier run was computed against
+        // geometry that no longer exists (a re-scan revised the rim upward past the
+        // close that fired it). Clearing is what stops a stale fire riding the
+        // cross-run read into the LIVE group. No-op when nothing was stamped.
+        const cleared = writer.clearDecisionFired(s.setupId);
+        if (cleared > 0) r.unpromoted++;
+        if (verdict.reason === "deferred") r.deferred++;
+      }
+
+      // ---- ALERT. A SEPARATE consequence of the same verdict. Its Redis dedup lives
+      // entirely on this side of the board write, so a suppressed alert can never
+      // suppress a promotion, and a failed write can never suppress an alert.
+      if (verdict.promoted) {
+        const alert = evalPromotionAlert({
+          ticker: s.ticker,
+          fireClose: verdict.fireClose as number,
+          rim: s.breakout,
+          fireBar: verdict.fireBar as number,
+          handleLowDate: s.handleLowDate,
+          late: verdict.firedStatus === "late",
+        });
+        const key = promotionMarkerKey(s.ticker, s.handleLowDate);
+        if (await emitAlert(alert, { scope: boardScope, key }, stats)) r.alerted++;
+      }
     } catch (err) {
       console.error(`JACK promotion check failed for ${s.ticker}:`, err);
-      fetchFailures++;
+      r.fetchFailures++;
     }
   }
-  return { fired, fetchFailures, skippedNotTradeable };
+  return r;
 }
 
 export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise<number> {
@@ -1506,6 +1583,41 @@ export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise
     // ONE memo for the whole EOD block — the four bar-reading passes below overlap
     // heavily on (ticker, handle_low_date).
     const fetchBars = makeBarFetcher(tiingoBase);
+
+    // BOARD FIRST. The promoter stamps fired-state before any alert pass runs, so the
+    // board is correct even if every alert below is suppressed, fails, or is deduped.
+    try {
+      const dbWrite = require("@/lib/db/write") as typeof import("@/lib/db/write");
+      const rows: PromotionRow[] = pending.map((s) => ({
+        setupId: s.setupId,
+        decisionId: s.decisionId,
+        ticker: s.ticker,
+        handleLowDate: s.handleLowDate,
+        breakout: s.breakout,
+        stop: s.stop,
+        target: s.target,
+        sizeBucket: s.sizeBucket,
+        tier: s.tier,
+      }));
+      const pr = await promotePendingToLive(rows, boardScope, etDate, fetchBars, dbWrite, stats);
+      fired += pr.alerted;
+      console.log(
+        `JACK promotions: ${pr.promoted} promoted (${pr.alerted} alerted) · ${pending.length} pending checked · ` +
+          `${pr.unpromoted} un-promoted (stale fire vs current rim) · ${pr.rimless} rimless (never promoted) · ` +
+          `${pr.notTradeable} SKIP bucket / Q1-Q2 · ${pr.deferred} window open · ${pr.resolved} already resolved` +
+          (pr.fetchFailures > 0 ? ` · ${pr.fetchFailures} fetch failure(s)` : "")
+      );
+      if (pr.fetchFailures > 0) {
+        await fireHealth(
+          "entry_bars_fetch",
+          `${pr.fetchFailures}/${pending.length} pending setups could not be checked for promotion`,
+          etDate
+        );
+      }
+    } catch (err) {
+      console.error("JACK promotion pass failed:", err);
+    }
+
     try {
       // BOARD SCOPE, not the narrow one. This pass iterates getPendingSetups(), and on
       // the day a setup FIRST closes above its rim its fired_status is still NULL
@@ -1516,25 +1628,6 @@ export async function evaluateEodAlerts(now: Date, tiingoBase?: string): Promise
       fired += await evaluateEntryConfirmations(now, etDate, boardScope, fetchBars, dbRead, stats);
     } catch (err) {
       console.error("JACK entry-confirmation pass failed:", err);
-    }
-    // FIX 3 — pending → live promotion. Close-confirmed, EOD-only, once per setup.
-    try {
-      const pr = await evaluatePendingPromotions(pending, boardScope, fetchBars, stats);
-      fired += pr.fired;
-      console.log(
-        `JACK promotions: ${pr.fired} fired · ${pending.length} pending checked · ` +
-          `${pr.skippedNotTradeable} skipped (SKIP bucket / Q1-Q2)` +
-          (pr.fetchFailures > 0 ? ` · ${pr.fetchFailures} fetch failure(s)` : "")
-      );
-      if (pr.fetchFailures > 0) {
-        await fireHealth(
-          "entry_bars_fetch",
-          `${pr.fetchFailures}/${pending.length} pending setups could not be checked for a promotion`,
-          etDate
-        );
-      }
-    } catch (err) {
-      console.error("JACK promotion pass failed:", err);
     }
     // RECOVERY pass — isolated from the entry pass for the same reason the entry pass
     // is isolated from the exit alerts: one failing must never suppress the others.
