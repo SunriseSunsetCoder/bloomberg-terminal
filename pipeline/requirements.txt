@@ -1,0 +1,18 @@
+# JACK daily pipeline — Python dependencies (VPS).
+#
+#   py -m pip install -r pipeline/requirements.txt
+#
+# Phase 1 (tiingo_pull.py) is standard-library only EXCEPT for the trading
+# calendar. If pandas_market_calendars is missing the pull still runs, degraded
+# to a weekend-only check (it says so in the log) — a holiday run simply finds
+# no new bars. Everything else is stdlib on purpose: fewer moving parts on an
+# unattended 19:00 job.
+pandas-market-calendars>=4.4.0
+
+# Phase 2 (run_detector.py) — NOT used by Phase 1. Listed here so the one-time
+# VPS environment setup is a single install. papermill pulls in its own
+# ipykernel/nbformat chain; pandas and numpy are what the notebooks themselves
+# import.
+papermill>=2.5.0
+pandas>=2.0.0
+numpy>=1.24.0
