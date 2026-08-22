@@ -24,6 +24,15 @@ CREATE TABLE IF NOT EXISTS setups (
     -- retireSupersededSetups in lib/db/write.ts.
     retired_at            TEXT,
     retired_reason        TEXT,
+    -- Phase 3 entry-freshness stamp, from the daily pipeline's watchlist CSV.
+    -- FRESH / AGING / STALE / PENDING / UNKNOWN. A SEPARATE axis from the
+    -- *_seen_status enum below, which is NOT extended: that enum describes what
+    -- the scanner classified the setup as, this describes how old a confirmed
+    -- breakout is. Intentionally unconstrained — see init.ts runMigrations for
+    -- why a CHECK here could not be applied to the existing VPS jack.db.
+    entry_status          TEXT,
+    confirmed_close_date  TEXT,
+    days_since_confirm    INTEGER,
     CHECK (first_seen_status IN ('just_fired', 'pending', 'recent_breakout', 'unknown')),
     CHECK (last_seen_status  IN ('just_fired', 'pending', 'recent_breakout', 'unknown')),
     UNIQUE (ticker, handle_low_date)

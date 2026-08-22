@@ -103,6 +103,28 @@ function runMigrations(database: Database.Database): void {
     // that was ever marked TRADED — see retireSupersededSetups in lib/db/write.ts.
     { name: "retired_at", def: "TEXT" },
     { name: "retired_reason", def: "TEXT" },
+    // Phase 3 entry-freshness stamp (additive), written by the daily pipeline's
+    // scripts/jack-stamp-entry-status.ts and carried on the watchlist CSV.
+    //
+    // entry_status is a SEPARATE column and is NOT part of the first_seen_status /
+    // last_seen_status CHECK enum — that enum is closed over
+    // ('just_fired','pending','recent_breakout','unknown') and stays untouched.
+    // These describe how OLD a confirmed breakout is, which is an orthogonal axis
+    // to what the scanner classified the setup as.
+    //
+    //   FRESH   confirmed on the most recent close -> next open takeable
+    //   AGING   confirmed earlier, inside the entry window -> pullback-to-entry only
+    //   STALE   entry window closed, or the confirm window elapsed unconfirmed
+    //   PENDING no confirming close yet, confirm window still open
+    //   UNKNOWN no rim or no bars — fail closed, never judged
+    //
+    // Deliberately NOT constrained by a CHECK: SQLite cannot add a CHECK via
+    // ALTER TABLE ADD COLUMN, so a constrained column here would apply only to
+    // freshly created DBs and not to the live VPS jack.db — the exact split that
+    // makes a constraint a lie. The writer is the single source of validity.
+    { name: "entry_status", def: "TEXT" },
+    { name: "confirmed_close_date", def: "TEXT" },
+    { name: "days_since_confirm", def: "INTEGER" },
   ]);
   // Reference-row support on validation_runs: a non-run bookkeeping row that stores
   // the FROZEN hscore_edges + size map as auditable JSON, so the thresholds behind

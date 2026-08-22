@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-pipeline/run_detector.py — JACK daily pipeline, PHASE 2: headless detector run.
+pipeline/run_detector.py — JACK daily pipeline, PHASE 2 + 3: headless detector run.
 
 Runs the validated Cup-with-Handle detector on the VPS via papermill, replacing
-the manual Colab session. Detection, scoring and exit logic are untouched — the
-only notebook changes are path/mount parameterization (see notebooks/README.md).
+the manual Colab session, then stamps each row with its entry freshness. Detection,
+scoring and exit logic are untouched — the only notebook changes are path/mount
+parameterization (see notebooks/README.md).
+
+    scanner.ipynb  ->  weekly.ipynb  ->  entry_status stamp  ->  watchlist CSV
+       (Phase 2)        (Phase 2)          (Phase 3)
 
     python pipeline/run_detector.py                    # full chain
     python pipeline/run_detector.py --check-only       # guards only, no execution
@@ -17,6 +21,7 @@ Exit codes:
     3  a notebook raised during execution
     4  SCORING DID NOT LAND — watchlist exists but every setup is unscored
     5  an expected output file was missing or stale after a notebook ran
+    6  the entry_status stamp failed
 
 =============================================================================
 WHY TWO papermill RUNS AND NOT ONE
@@ -280,6 +285,92 @@ def check_scoring_landed(watchlist: Path) -> Tuple[bool, str, Dict[str, int]]:
 
 
 # ============================================================================
+# Phase 3 — entry_status stamp (delegated to TypeScript, deliberately)
+# ============================================================================
+#
+# The stamp needs "did this setup confirm?", and that question already has ONE
+# answer in this codebase: detectFire in lib/jack/outcome-tracker.ts, which the
+# board-side promoter (lib/jack/promotion.ts isPromotedToLive) also calls.
+# lib/jack/promotion.ts is explicit that a second implementation must never
+# exist. A Python port would be that second implementation, and it would drift
+# the first time someone tuned the window or the strict-`>` on one side only —
+# re-creating the alert-vs-board divergence one layer up.
+#
+# So the stamper is TypeScript and imports the real function. This step shells
+# out to it rather than reimplementing it. That is the whole reason for the
+# language boundary here.
+
+STAMPER_TS = REPO_ROOT / "scripts" / "jack-stamp-entry-status.ts"
+STAMP_TIMEOUT_SECONDS = 900
+
+
+def _tsx_command() -> List[str]:
+    """Prefer a pinned local tsx; fall back to npx (which resolves+caches it).
+
+    On an unattended 19:00 job the local binary is the safer path — it needs no
+    registry round-trip. `npm i -D tsx` on the VPS installs it; until then npx
+    works but wants one warm-up run to populate its cache.
+    """
+    # On Windows these are .cmd shims; subprocess without shell=True will not find
+    # a bare "npx"/"tsx", so the extension has to be explicit. This is the VPS's
+    # platform, so getting it wrong would fail only in production.
+    local = REPO_ROOT / "node_modules" / ".bin" / ("tsx.cmd" if os.name == "nt" else "tsx")
+    if local.is_file():
+        return [str(local)]
+    return ["npx.cmd" if os.name == "nt" else "npx", "--yes", "tsx"]
+
+
+def stamp_entry_status(watchlist: Path, corpus: Path) -> Tuple[bool, str, Dict[str, int]]:
+    """Add confirmed_close_date / days_since_confirm / bars_since_confirm /
+    entry_status to the watchlist, in place. Returns (ok, detail, counts)."""
+    import subprocess
+
+    if not STAMPER_TS.is_file():
+        return False, f"stamper not found at {STAMPER_TS}", {}
+
+    cmd = _tsx_command() + [
+        str(STAMPER_TS),
+        "--watchlist", str(watchlist),
+        "--corpus", str(corpus),
+        "--date", datetime.now().strftime("%Y-%m-%d"),
+    ]
+    log(f"entry_status: {' '.join(cmd[:1])} … {STAMPER_TS.name}")
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(REPO_ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace",  # the stamper prints · and ⚠
+            timeout=STAMP_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return False, "neither node_modules/.bin/tsx nor npx is available on PATH", {}
+    except subprocess.TimeoutExpired:
+        return False, f"stamper timed out after {STAMP_TIMEOUT_SECONDS}s", {}
+
+    for line in (proc.stdout or "").splitlines():
+        if line.strip() and not line.startswith("STAMP_JSON"):
+            log(f"    {line.rstrip()}")
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return False, f"stamper exited {proc.returncode}: {err[-1] if err else 'no output'}", {}
+
+    counts: Dict[str, int] = {}
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("STAMP_JSON "):
+            try:
+                counts = json.loads(line[len("STAMP_JSON "):]).get("counts", {})
+            except ValueError:
+                counts = {}
+
+    if not counts:
+        return False, "stamper produced no STAMP_JSON summary — cannot confirm it ran", {}
+
+    ordered = ["FRESH", "AGING", "STALE", "PENDING", "UNKNOWN"]
+    detail = " · ".join(f"{k} {counts.get(k, 0)}" for k in ordered)
+    return True, detail, counts
+
+
+# ============================================================================
 # papermill
 # ============================================================================
 
@@ -403,11 +494,18 @@ def run(data_dir: Path, out_dir: Path, check_only: bool) -> int:
         return fail(4, "Detector FAILED — UNSCORED BOARD", detail)
     log(f"scoring OK: {detail}")
 
+    # ---- Phase 3: entry_status stamp --------------------------------------
+    ok, stamp_detail, stamp_counts = stamp_entry_status(watchlist_csv, data_dir)
+    if not ok:
+        return fail(6, "Detector FAILED — entry_status stamp", stamp_detail)
+    log(f"entry_status OK: {stamp_detail}")
+
     total = sum(counts.values())
     log(f"WATCHLIST: {watchlist_csv}")
     send_telegram(
         f"🔎 <b>Detector run complete</b>\n"
         f"{total} setups · {detail}\n"
+        f"{stamp_detail}\n"
         f"{watchlist_csv.name}\n\n"
         f"<i>Board not updated yet — ingest is Phase 4.</i>"
     )
