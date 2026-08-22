@@ -30,3 +30,25 @@ next-env.d.ts
 data/jack.db
 data/jack.db-shm
 data/jack.db-wal
+
+# JACK daily pipeline — VPS-only data. Never committed.
+# Per-ticker OHLCV corpus (~1,890 files, ~500MB), seeded once from Drive.
+data/corpus/
+# Failure ledger + digest state written by pipeline/tiingo_pull.py
+data/pipeline_state/
+# papermill-executed notebooks (Phase 2 run logs)
+pipeline/_out/
+# Any additional env file that could carry TIINGO_API_KEY / bot tokens
+# (.env.local.example is intentionally NOT matched — it holds no real values)
+.env
+.env.*.local
+pipeline/.env
+# Service-account key for the Drive backup (Phase 6)
+*.key.json
+service-account*.json
+telegram.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
