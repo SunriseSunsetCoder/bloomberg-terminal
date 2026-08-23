@@ -385,6 +385,27 @@ export function getCurrentRunId(): number | null {
  * the terminal is displaying as LIVE/PENDING (before combineJackDecisions moves the
  * owned ones into CURRENT POSITIONS). Empty when no run has produced decisions yet.
  */
+/**
+ * How many decision rows the CURRENT board is built from — the baseline for the
+ * pipeline's floor guard.
+ *
+ * Deliberately keyed to getCurrentRunId() (the latest run that actually produced
+ * decisions), NOT getLatestRunSummary() (the newest run, decisions or not). A
+ * parse-failed or refused run is not the board, and using it as the baseline
+ * would compare tonight's scan against a phantom.
+ *
+ * 0 means there is no board yet — the caller must treat that as "nothing to
+ * protect" and let the ingest through, or a first-ever run could never land.
+ */
+export function getCurrentBoardSetupCount(): number {
+  const runId = getCurrentRunId();
+  if (runId === null) return 0;
+  const row = getDb()
+    .prepare(`SELECT COUNT(*) AS n FROM decisions WHERE validation_run_id = ?`)
+    .get(runId) as { n: number } | undefined;
+  return row?.n ?? 0;
+}
+
 export function getCurrentBoard(): { runId: number | null; live: CurrentBoardRow[]; pending: CurrentBoardRow[] } {
   const runId = getCurrentRunId();
   if (runId === null) return { runId: null, live: [], pending: [] };
