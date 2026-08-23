@@ -85,7 +85,9 @@ data artifact below is seeded once onto the VPS by hand and is gitignored. None
 of it is expected to arrive from a `git pull`.
 
   <DATA_DIR>/<TICKER>.csv .................. ~1,890 files, ~500MB (Phase 1 corpus)
-  <DATA_DIR>/SPY.csv ....................... freshness check
+  <DATA_DIR>/SPY.csv ....................... REQUIRED — anchors ASOF_DATE, which
+                                             every pending setup's
+                                             days_since_handle_low is measured from
   <OUT_DIR>/handle_score_thresholds.json ... FROZEN seed — guard (a) above
   <OUT_DIR>/ticker_sectors.json ............ sector/tier/priority enrichment
                                              (take the results/ copy, 637KB —
@@ -440,6 +442,26 @@ def run(data_dir: Path, out_dir: Path, check_only: bool) -> int:
     for nb in (SCANNER_NB, WEEKLY_NB):
         if not nb.is_file():
             return fail(2, "Detector ABORTED — notebook missing", f"{nb} not found in the repo.")
+
+    # SPY.csv is a HARD precondition, not just a freshness nicety. The weekly
+    # notebook defines ASOF_DATE from its last bar, and every pending setup's
+    # days_since_handle_low is measured from that anchor — which is what keeps
+    # the value deterministic instead of drifting with wall-clock run time.
+    #
+    # Absent, the notebook raises NameError mid-run. papermill surfaces that and
+    # this script fails loud (exit 3), but only AFTER the scanner has already
+    # spent ~2 minutes on the full universe. Checking here turns a wasted run
+    # into an instant, actionable message, and puts it under --check-only where
+    # the rest of the seed verification lives.
+    spy_csv = data_dir / "SPY.csv"
+    if not spy_csv.is_file():
+        return fail(
+            2, "Detector ABORTED — SPY.csv missing",
+            f"{spy_csv} not found. It anchors ASOF_DATE, which every pending setup's "
+            f"days_since_handle_low is measured from. Seed it from Drive "
+            f"Bukowski/SPY.csv — see the VPS-ONLY SEED notes in this file.",
+        )
+    log(f"SPY.csv OK: {spy_csv.stat().st_size:,} bytes")
 
     # ---- GUARD (a): PRECONDITION ------------------------------------------
     ok, detail = validate_thresholds(out_dir)
