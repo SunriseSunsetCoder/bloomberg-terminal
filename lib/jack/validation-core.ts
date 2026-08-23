@@ -73,7 +73,58 @@ export interface ParsedSetup {
   sector?: string; // GICS sector name ("Financials" / "Industrials" / "Unknown")
   tier?: string; // handle quintile "Q3" / "Q4" / "Q5"
   priority?: number; // scanner rank, higher = take first (drives the LIVE sort)
+  // ---- Phase 3 entry-freshness stamp (daily pipeline only) -------------------
+  // Written onto the watchlist CSV by scripts/jack-stamp-entry-status.ts. A
+  // manually pasted (unstamped) CSV simply omits them and they parse as
+  // undefined — which CLEARS the stored stamp rather than preserving a stale
+  // one. See upsertSetup for why that is the safe direction.
+  entryStatus?: EntryStatus;
+  confirmedCloseDate?: string;
+  daysSinceConfirm?: number;
 }
+
+/**
+ * The entry-freshness labels the pipeline emits. FRESH/AGING describe how old a
+ * CONFIRMED breakout is; PENDING means no confirming close (window open OR
+ * elapsed unconfirmed); UNKNOWN means it could not be judged (no rim / no bars).
+ *
+ * There is deliberately no STALE — sub-rim fills validated better, so an aged
+ * fire is never expired. Kept in lockstep with EntryStatus in
+ * scripts/jack-stamp-entry-status.ts; anything outside this set is dropped on
+ * ingest rather than written.
+ */
+export type EntryStatus = "FRESH" | "AGING" | "PENDING" | "UNKNOWN";
+
+/**
+ * Phase 4 ingest mode.
+ *   "required"    — the UI default. A missing ANTHROPIC_API_KEY or a failed call
+ *                   is a hard error, exactly as before Phase 4.
+ *   "best_effort" — the nightly pipeline. The analysis is garnish: if it cannot
+ *                   be produced, the board is still built from the detector
+ *                   output and the rows land as UNREVIEWED.
+ *
+ * Lives here rather than in the route because route.ts may export ONLY handlers
+ * and config (Next 16) — and because pipeline/ingest.py's selftest imports it.
+ */
+export type AnalysisMode = "required" | "best_effort";
+
+/**
+ * The nightly floor guard's threshold: a run carrying under half the prior
+ * board's setups is treated as a broken scan, not a real shrink.
+ */
+export const FLOOR_GUARD_MIN_FRACTION = 0.5;
+
+/**
+ * The placeholder verdict for a row the analysis never graded.
+ *
+ * PINNED, and the token is load-bearing: classifyVerdict() in lib/jack/verdict.ts
+ * is a SUBSTRING match, so anything containing TRADE / SKIP / AVOID / PASS /
+ * WATCH / FIRED / EXTENDED classifies as that verdict. "NOT PASSED" would read as
+ * SKIP and render the row vetoed. "UNREVIEWED" matches none and falls to "other".
+ */
+export const UNREVIEWED_DECISION = "UNREVIEWED";
+
+const ENTRY_STATUSES = new Set<string>(["FRESH", "AGING", "PENDING", "UNKNOWN"]);
 
 export interface EnrichedSetup extends ParsedSetup {
   tiingo: {
@@ -291,6 +342,22 @@ function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: 
   const tier = (get("tier") ?? "").trim() || undefined;
   const priority = getNum("priority", "prio");
 
+  // Phase 3 freshness stamp. entry_status is validated against the closed label
+  // set — an unrecognised token is DROPPED, never written, so a typo or a future
+  // label from a newer stamper cannot land junk in the column. bars_since_confirm
+  // is deliberately not read: it is the stamper's decision variable, already
+  // reflected in entry_status, and derivable from confirmed_close_date.
+  const entryStatusRaw = (get("entry_status") ?? "").trim().toUpperCase();
+  const entryStatus = ENTRY_STATUSES.has(entryStatusRaw)
+    ? (entryStatusRaw as EntryStatus)
+    : undefined;
+  const confirmedCloseDate = normalizeIsoDate(get("confirmed_close_date") ?? "") ?? undefined;
+  const daysSinceConfirmRaw = getNum("days_since_confirm");
+  const daysSinceConfirm =
+    daysSinceConfirmRaw !== undefined && Number.isFinite(daysSinceConfirmRaw)
+      ? Math.round(daysSinceConfirmRaw)
+      : undefined;
+
   if (!ticker || !handleLowDateRaw) {
     return {
       raw: rowLine, rowCols: cols, ticker, status,
@@ -326,6 +393,7 @@ function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: 
     entry, stop, t05Target, breakoutLevel, cupDepthPct, handleRetrPct,
     handleScore, sizeBucket,
     sector, tier, priority,
+    entryStatus, confirmedCloseDate, daysSinceConfirm,
   };
 }
 

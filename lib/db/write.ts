@@ -20,6 +20,13 @@ export interface SetupSeen {
   sector?: string; // GICS sector name
   tier?: string; // handle quintile Q3/Q4/Q5
   priority?: number; // scanner rank, higher = take first
+  // Phase 3 entry-freshness stamp. TIME-DERIVED, so these REFRESH on every
+  // ingest — see the idiom note in upsertSetup. Undefined when the CSV was not
+  // stamped (a manual paste), which clears the column rather than preserving a
+  // stale label.
+  entryStatus?: string;
+  confirmedCloseDate?: string;
+  daysSinceConfirm?: number;
 }
 
 export interface ValidationRunRow {
@@ -93,7 +100,34 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
          size_bucket      = COALESCE(?, size_bucket),
          sector           = COALESCE(?, sector),
          tier             = COALESCE(?, tier),
-         priority         = COALESCE(?, priority)
+         priority         = COALESCE(?, priority),
+         -- ------------------------------------------------------------------
+         -- FRESHNESS COLUMNS: PLAIN OVERWRITE. Three idioms live in this one
+         -- statement and the difference is load-bearing:
+         --
+         --   COALESCE(existing, ?)  geometry — WRITE-ONCE. The stored rim/stop
+         --                          wins; a new value only backfills a NULL.
+         --   COALESCE(?, existing)  score/sector — new wins WHEN NON-NULL, the
+         --                          old value survives a null.
+         --   = ?                    freshness — NEW ALWAYS WINS, null included.
+         --
+         -- entry_status is time-derived: a setup that was FRESH last night is
+         -- AGING tonight (the capital-deferral case — a fire you could not fund
+         -- stays joinable-as-pullback). Either COALESCE would break that. The
+         -- write-once idiom would freeze the first stamp forever, so every row
+         -- would read FRESH until it fell off the watchlist. The
+         -- COALESCE(?, existing) idiom looks right and is subtly wrong: it
+         -- preserves the OLD stamp whenever the new value is null, which is
+         -- exactly what a manually pasted UNSTAMPED csv produces — leaving a
+         -- days-old FRESH on the board reading as "takeable at the next open".
+         --
+         -- A plain overwrite makes an unstamped ingest clear the label to NULL.
+         -- NULL is honest ("not stamped"); a stale FRESH is a false actionable.
+         -- On the nightly path the distinction never arises: the stamper is
+         -- total and always supplies a label for every row.
+         entry_status         = ?,
+         confirmed_close_date = ?,
+         days_since_confirm   = ?
        WHERE id = ?`
     ).run(
       seenAt,
@@ -109,6 +143,9 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
       setup.sector ?? null,
       setup.tier ?? null,
       setup.priority ?? null,
+      setup.entryStatus ?? null,
+      setup.confirmedCloseDate ?? null,
+      setup.daysSinceConfirm ?? null,
       existing.id
     );
     return existing.id;
@@ -123,8 +160,9 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
          entry, stop, t05_target, breakout_level,
          cup_depth_pct, handle_retr_pct,
          handle_score, size_bucket,
-         sector, tier, priority
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         sector, tier, priority,
+         entry_status, confirmed_close_date, days_since_confirm
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       setup.ticker,
@@ -144,7 +182,10 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
       setup.sizeBucket ?? null,
       setup.sector ?? null,
       setup.tier ?? null,
-      setup.priority ?? null
+      setup.priority ?? null,
+      setup.entryStatus ?? null,
+      setup.confirmedCloseDate ?? null,
+      setup.daysSinceConfirm ?? null
     );
 
   return Number(result.lastInsertRowid);

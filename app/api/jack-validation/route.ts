@@ -30,6 +30,9 @@ import {
   type JackDecisionClient,
   type ExtractedPayload,
   type ExtractedDecision,
+  type AnalysisMode,
+  FLOOR_GUARD_MIN_FRACTION,
+  UNREVIEWED_DECISION,
 } from "@/lib/jack/validation-core";
 
 export const maxDuration = 120; // longer for parallel Tiingo enrichment
@@ -88,7 +91,18 @@ interface JackValidationResponse {
   // flag so the UI knows whether row writes will land (VPS) or no-op (Vercel).
   decisions?: JackDecisionClient[];
   persistenceAvailable?: boolean;
+  // Phase 4 headless ingest. analysisMode echoes what the caller asked for;
+  // analysisSkipped is true when the board was built without a graded verdict.
+  analysisMode?: AnalysisMode;
+  analysisSkipped?: boolean;
+  unreviewedCount?: number;
+  // Set only when the floor guard rejected the ingest. The prior board is intact.
+  ingestRefused?: boolean;
+  priorCount?: number;
+  newCount?: number;
 }
+
+
 
 // ============================================================
 // Helpers
@@ -629,6 +643,161 @@ function buildSectionedPrompt(
 interface JackValidationRequest {
   csv: string;
   riskPerTrade?: number;
+  /** Defaults to "required" so the UI is byte-for-byte unchanged. */
+  analysis?: AnalysisMode;
+  /**
+   * Opt-in. OFF by default on purpose: an ad-hoc small VALIDATE that shrinks the
+   * board is INTENDED manual behaviour (see jack-state.md, alert pending-set
+   * scope). Only the unattended pipeline asks for the guard.
+   */
+  floorGuard?: boolean;
+}
+
+// ============================================================
+// BEST-EFFORT synthesis + the shared persist/respond path
+// ============================================================
+
+/**
+ * Build the decision payload from the DETECTOR OUTPUT alone, with no model
+ * involvement. One row per surviving setup, carrying only the join key; every
+ * commentary field is left undefined so nothing is invented.
+ *
+ * The sectioning is the same sectioning applyFilters produced before the analysis
+ * step was ever reached, so the resulting rows are indistinguishable — to the
+ * promoter, the Basket Sizer and the alert scope — from graded ones.
+ */
+function synthesizeUnreviewed(
+  live: EnrichedSetup[],
+  pending: EnrichedSetup[]
+): ExtractedPayload {
+  const toDecision = (s: EnrichedSetup): ExtractedDecision => ({
+    ticker: s.ticker,
+    handle_low_date: s.handleLowDate,
+    decision: UNREVIEWED_DECISION,
+  });
+  return {
+    schema_version: "1.3",
+    live_decisions: live.map(toDecision),
+    pending_decisions: pending.map(toDecision),
+  };
+}
+
+interface PersistAndRespondArgs {
+  timestamp: string;
+  riskPerTrade: number;
+  stats: FilterStats;
+  enrichedLive: EnrichedSetup[];
+  enrichedPending: EnrichedSetup[];
+  model: string;
+  rawMarkdown: string;
+  markdownForClient?: string;
+  tokensInput: number;
+  tokensOutput: number;
+  extracted: ExtractedPayload | null;
+  truncated: boolean;
+  incompleteCount?: number;
+  incompleteError?: string | null;
+  analysisMode: AnalysisMode;
+  analysisSkipped: boolean;
+  analysisNote?: string;
+}
+
+/**
+ * The ONE persist + response path, shared by the graded and the UNREVIEWED runs.
+ *
+ * Both go through the identical persistRun → upsertSetup / insertValidationRun /
+ * insertDecisions / retireSupersededSetups sequence. There is no second ingest
+ * route and no raw CSV→SQLite bypass: the only difference between an analysed
+ * run and an unattended one is the CONTENT of the decision rows.
+ */
+function persistAndRespond(args: PersistAndRespondArgs): NextResponse {
+  const {
+    timestamp, riskPerTrade, stats, enrichedLive, enrichedPending,
+    model, rawMarkdown, tokensInput, tokensOutput, analysisMode, analysisSkipped,
+  } = args;
+
+  // When the analysis produced nothing usable and we are allowed to proceed,
+  // build the board from the detector output.
+  const synthesized = args.extracted === null && analysisMode === "best_effort";
+  const extracted = synthesized
+    ? synthesizeUnreviewed(enrichedLive, enrichedPending)
+    : args.extracted;
+
+  const unreviewedCount = synthesized
+    ? enrichedLive.length + enrichedPending.length
+    : 0;
+
+  const persistResult = persistRun({
+    timestamp,
+    liveSetups: enrichedLive,
+    pendingSetups: enrichedPending,
+    stats,
+    riskPerTrade,
+    tokensInput,
+    tokensOutput,
+    model,
+    rawMarkdown,
+    extracted,
+    errorMsg: args.incompleteError ?? (synthesized ? "analysis skipped — UNREVIEWED" : undefined),
+  });
+
+  const persistNote = !isPersistenceAvailable()
+    ? `> **Persistence:** ${persistenceUnavailableReason()}\n`
+    : persistResult.error
+      ? `> ⚠ Persistence error: ${persistResult.error}\n`
+      : `> **Persistence:** run #${persistResult.runId ?? "?"} · ${persistResult.setupsUpserted} setups tracked · ${persistResult.decisionsInserted} decisions recorded${persistResult.decisionsSkipped > 0 ? ` · ${persistResult.decisionsSkipped} skipped (unmatched)` : ""}${persistResult.retired > 0 ? ` · ${persistResult.retired} stale setups retired` : ""}${persistResult.unretired > 0 ? ` · ${persistResult.unretired} returned to the watchlist` : ""}${persistResult.jsonParseSuccess ? "" : " · ⚠ JSON parse failed, only run metadata stored"}\n` +
+        (persistResult.setupsUpserted > 0 && persistResult.geometryOk === 0
+          ? `> ⚠️ **NO REPLAYABLE GEOMETRY** — 0/${persistResult.setupsUpserted} setups carried breakout_level + stop + t05_target. Outcome tracking (and the JSCORE paper arm) will stay EMPTY for this run. Check the scanner CSV's column names.\n`
+          : persistResult.geometryOk < persistResult.setupsUpserted
+            ? `> ⚠ Partial geometry — ${persistResult.geometryOk}/${persistResult.setupsUpserted} setups are replayable (need breakout_level + stop + t05_target).\n`
+            : "");
+
+  const analysisBanner = analysisSkipped
+    ? `> 🤖 **Analysis skipped** — ${unreviewedCount} setup${unreviewedCount === 1 ? "" : "s"} stored as ${UNREVIEWED_DECISION}. ` +
+      `The board, promotion and sizing are unaffected; only the verdict text is missing. ` +
+      `${args.analysisNote ?? ""}\n`
+    : "";
+
+  const preface =
+    `> **Filter pipeline:** ${stats.inputRowCount} input → ` +
+    `Live: ${stats.live.finalCount} (dropped ${stats.live.droppedHandleStale} stale, ${stats.live.droppedOverCap} over cap) · ` +
+    `Pending: ${stats.pending.finalCount} (dropped ${stats.pending.droppedHandleStale} stale, ${stats.pending.droppedOverCap} over cap)\n` +
+    `> **Tiingo enrichment:** ${stats.tiingoCallsSucceeded}/${stats.tiingoCallsAttempted} setups with live data\n` +
+    persistNote +
+    analysisBanner +
+    `> Handle-staleness filter validated May 2026 (drop >${MAX_HANDLE_DAYS}d).\n\n`;
+
+  const clientDecisions = buildClientDecisions(
+    extracted,
+    enrichedLive,
+    enrichedPending,
+    persistResult.decisionIds,
+    persistResult.userMarks,
+    riskPerTrade
+  );
+
+  const markdownBody = analysisSkipped
+    ? "_No analysis for this run._"
+    : args.markdownForClient || "**Warning:** Empty response.";
+
+  return NextResponse.json<JackValidationResponse>({
+    schemaVersion: "1.2", timestamp,
+    strategy: "Cup with Handle t05", riskPerTrade,
+    markdown: preface + markdownBody,
+    model, inputRowCount: stats.inputRowCount,
+    filterStats: stats,
+    tokens: { input: tokensInput, output: tokensOutput },
+    // A DELIBERATE skip is not a degraded result. `degraded` means real decision
+    // loss and drives the UI's warning banner; conflating the two would make the
+    // terminal cry wolf on every unattended run.
+    degraded: analysisSkipped ? false : isDegraded(!!args.markdownForClient, args.incompleteCount ?? 0),
+    error: args.incompleteError ?? null,
+    decisions: clientDecisions,
+    persistenceAvailable: isPersistenceAvailable(),
+    analysisMode,
+    analysisSkipped,
+    unreviewedCount,
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -660,6 +829,7 @@ export async function POST(req: NextRequest) {
 
   const rawCsv = (body.csv ?? "").trim();
   const riskPerTrade = body.riskPerTrade ?? DEFAULT_RISK_PER_TRADE;
+  const analysisMode: AnalysisMode = body.analysis === "best_effort" ? "best_effort" : "required";
 
   if (!rawCsv) {
     return NextResponse.json<JackValidationResponse>(
@@ -694,6 +864,58 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // 1b. FLOOR GUARD — before ANY external call.
+  //
+  // ORDERING IS THE POINT. This sits after applyFilters (so it compares the real
+  // post-filter count) and before enrichAllSetups (so a refused run costs zero
+  // Tiingo requests and zero Claude tokens). Crucially it also returns before
+  // persistRun, and retireSupersededSetups lives INSIDE persistRun — so a
+  // sub-floor run cannot retire anything. That is what makes "retirement still
+  // runs under best_effort" safe: retirement is gated on a scan that cleared the
+  // floor, not merely on decisions having been inserted.
+  //
+  // Nothing is written on refusal, so the prior board is preserved structurally
+  // rather than by a rollback: no run row, no decision rows, and getCurrentRunId()
+  // still resolves to the previous run.
+  if (body.floorGuard === true && isPersistenceAvailable()) {
+    let priorCount = 0;
+    try {
+      const dbRead = require("@/lib/db/read") as typeof import("@/lib/db/read");
+      priorCount = dbRead.getCurrentBoardSetupCount();
+    } catch {
+      priorCount = 0; // unreadable baseline → cannot judge → let it through
+    }
+    const newCount = stats.totalFinal;
+    // priorCount 0 = no board yet. Nothing to protect; a first-ever ingest must land.
+    if (priorCount > 0 && newCount < priorCount * FLOOR_GUARD_MIN_FRACTION) {
+      console.error(
+        `[jack-validation] INGEST REFUSED: count dropped ${priorCount}→${newCount} ` +
+          `(floor ${FLOOR_GUARD_MIN_FRACTION * 100}%). Prior board preserved; nothing written.`
+      );
+      return NextResponse.json<JackValidationResponse>(
+        {
+          schemaVersion: "1.2", timestamp,
+          strategy: "Cup with Handle t05", riskPerTrade,
+          markdown:
+            `**INGEST REFUSED: count dropped ${priorCount}→${newCount}.**
+
+` +
+            `This run carries under ${FLOOR_GUARD_MIN_FRACTION * 100}% of the prior board's setups, ` +
+            `which reads as a broken scan rather than a real shrink. Nothing was written and the ` +
+            `previous board is intact.`,
+          model: "n/a", inputRowCount: stats.inputRowCount,
+          filterStats: stats,
+          error: `INGEST REFUSED: count dropped ${priorCount}→${newCount}`,
+          ingestRefused: true, priorCount, newCount,
+          analysisMode, persistenceAvailable: true,
+        },
+        // 200, not 4xx/5xx: this is a policy decision, not a failure. The pipeline
+        // branches on ingestRefused and exits non-zero itself.
+        { status: 200 }
+      );
+    }
+  }
+
   // 2. Tiingo enrichment for survivors (parallel across both sections)
   const tiingoBase = tiingoBaseUrl(req);
   const allFinalSetups = [...liveSetups, ...pendingSetups];
@@ -704,9 +926,23 @@ export async function POST(req: NextRequest) {
   const enrichedLive = enriched.slice(0, liveSetups.length);
   const enrichedPending = enriched.slice(liveSetups.length);
 
-  // 3. Call Claude
+  // 3. Analysis — REQUIRED or BEST-EFFORT
+  //
+  // The LLM produces commentary only: decision / shares / notional / earnings_flag /
+  // live_close_delta_pct / pct_to_breakout / news_class / sector_rs / cross_asset /
+  // notes. It produces NO geometry — rim, entry, stop, t05, size_bucket, tier,
+  // priority and the Phase 3 freshness stamp all come from the CSV and are written by
+  // upsertSetup in persistRun STEP 1, which runs whether or not Claude was reached.
+  // `section` likewise comes from applyFilters above, not from the model.
+  //
+  // Nothing on the promote/size path reads `decisions.decision`: isPromotedToLive keys
+  // on setups geometry, isFiredActionable on fired_status (written by the promoter),
+  // isTradeableSetup on sizeBucket/tier. So under best_effort the board can be built
+  // from the detector output alone and the verdict backfilled later.
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+
+  if (!apiKey && analysisMode === "required") {
+    // Unchanged behaviour for the UI, which never sends best_effort.
     return NextResponse.json<JackValidationResponse>(
       {
         schemaVersion: "1.2", timestamp,
@@ -719,8 +955,20 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const client = new Anthropic({ apiKey });
   const model = "claude-sonnet-4-5";
+
+  if (!apiKey) {
+    // best_effort with no key at all — never touch the Anthropic client.
+    return persistAndRespond({
+      timestamp, riskPerTrade, stats, enrichedLive, enrichedPending,
+      model: "none", rawMarkdown: "", tokensInput: 0, tokensOutput: 0,
+      extracted: null, truncated: false,
+      analysisMode, analysisSkipped: true,
+      analysisNote: "ANTHROPIC_API_KEY not set — board built from detector output only.",
+    });
+  }
+
+  const client = new Anthropic({ apiKey });
 
   // Output-token handling. A live 75-setup run truncated a 30-setup LIVE pass at
   // ~6.3k out-tokens (real need >210/setup — the old 160 budget was far too low),
@@ -787,9 +1035,6 @@ export async function POST(req: NextRequest) {
     // SINGLE generous retry-on-truncation (handoff decision 2). temp 0 makes the
     // retry reproduce the same prefix; only the cap grows. Accumulate BOTH attempts'
     // tokens so cost accounting is honest (the prompt is re-sent, so input bills twice).
-    // TODO(cap-harden): if the RETRY still truncates, split this batch in half and
-    // re-run each half — NOT built. A single retry to ~16k suffices given the
-    // per-batch headroom (LIVE_BATCH=10 → ~7-8k realistic vs 16k retry ceiling).
     if (res.truncated) {
       const retryTokens = Math.min(RETRY_MAX_TOKENS, b.maxTokens * 2);
       if (retryTokens > b.maxTokens) {
@@ -809,29 +1054,20 @@ export async function POST(req: NextRequest) {
     // trailing markdown, not the decisions. But defend against ANY dropped/cut
     // setup: every input setup with no returned decision gets an explicit
     // INCOMPLETE placeholder — never a silent drop, never a confident-but-wrong
-    // verdict emitted as if valid (the reported "SIZE DOWN 50% at R/R 2.83" was a
-    // legitimate check-driven verdict, not a truncation artifact — see report).
+    // verdict emitted as if valid.
     const liveDecisions: ExtractedDecision[] = parsed.flatMap((p) => p.live_decisions ?? []);
     const pendingDecisions: ExtractedDecision[] = parsed.flatMap((p) => p.pending_decisions ?? []);
-    // Reconcile via the pure helper (unit-tested in jack-analysis-cap-selftest):
-    // every input setup with no returned decision gets an explicit INCOMPLETE
-    // placeholder. incompleteCount = REAL decision loss (drives degraded, below).
     const decidedKeys = buildDecidedKeys([...liveDecisions, ...pendingDecisions]);
     const liveIncomplete = incompleteForSetups(enrichedLive, decidedKeys, truncated);
     const pendingIncomplete = incompleteForSetups(enrichedPending, decidedKeys, truncated);
     liveDecisions.push(...liveIncomplete);
     pendingDecisions.push(...pendingIncomplete);
     const incompleteCount = liveIncomplete.length + pendingIncomplete.length;
-    // Error/degrade fire on REAL loss (INCOMPLETE setups), not raw stop_reason.
-    // A truncation that cut only trailing markdown (all decisions parsed) →
-    // incompleteCount 0 → NOT degraded. Kills the false-degrade churn.
     const incompleteError =
       incompleteCount > 0
         ? `${incompleteCount} setup${incompleteCount === 1 ? "" : "s"} INCOMPLETE — re-run${truncated ? " (output hit the token cap)" : ""}`
         : null;
 
-    // Merge into the SAME extracted shape persistence + client already consume.
-    // JSON CONTRACT UNCHANGED — Session C reads the identical decision columns.
     const extracted: ExtractedPayload | null =
       liveDecisions.length || pendingDecisions.length
         ? { schema_version: parsed[0]?.schema_version ?? "1.3", live_decisions: liveDecisions, pending_decisions: pendingDecisions }
@@ -840,80 +1076,49 @@ export async function POST(req: NextRequest) {
     const stripJson = (t: string) => t.replace(/```json\s*\n[\s\S]*?\n```/g, "").trim();
     const markdownForClient = results.map((r) => stripJson(r.text)).filter(Boolean).join("\n\n---\n\n");
     const fullResponse = results.map((r) => r.text).join("\n\n---\n\n");
-    const tokensInput = results.reduce((acc, r) => acc + r.inTok, 0);
-    const tokensOutput = results.reduce((acc, r) => acc + r.outTok, 0);
 
-    // Persist to SQLite — guarded (VPS only) and non-fatal (DB errors don't fail the HTTP response).
-    const persistResult = persistRun({
-      timestamp,
-      liveSetups: enrichedLive,
-      pendingSetups: enrichedPending,
-      stats,
-      riskPerTrade,
-      tokensInput,
-      tokensOutput,
+    return persistAndRespond({
+      timestamp, riskPerTrade, stats, enrichedLive, enrichedPending,
       model,
       rawMarkdown: fullResponse,
+      markdownForClient,
+      tokensInput: results.reduce((acc, r) => acc + r.inTok, 0),
+      tokensOutput: results.reduce((acc, r) => acc + r.outTok, 0),
       extracted,
-      errorMsg: incompleteError ?? undefined,
-    });
-
-    const persistNote = !isPersistenceAvailable()
-      ? `> **Persistence:** ${persistenceUnavailableReason()}\n`
-      : persistResult.error
-        ? `> ⚠ Persistence error: ${persistResult.error}\n`
-        : `> **Persistence:** run #${persistResult.runId ?? "?"} · ${persistResult.setupsUpserted} setups tracked · ${persistResult.decisionsInserted} decisions recorded${persistResult.decisionsSkipped > 0 ? ` · ${persistResult.decisionsSkipped} skipped (unmatched)` : ""}${persistResult.retired > 0 ? ` · ${persistResult.retired} stale setups retired` : ""}${persistResult.unretired > 0 ? ` · ${persistResult.unretired} returned to the watchlist` : ""}${persistResult.jsonParseSuccess ? "" : " · ⚠ JSON parse failed, only run metadata stored"}\n` +
-          (persistResult.setupsUpserted > 0 && persistResult.geometryOk === 0
-            ? `> ⚠️ **NO REPLAYABLE GEOMETRY** — 0/${persistResult.setupsUpserted} setups carried breakout_level + stop + t05_target. Outcome tracking (and the JSCORE paper arm) will stay EMPTY for this run. Check the scanner CSV's column names.\n`
-            : persistResult.geometryOk < persistResult.setupsUpserted
-              ? `> ⚠ Partial geometry — ${persistResult.geometryOk}/${persistResult.setupsUpserted} setups are replayable (need breakout_level + stop + t05_target).\n`
-              : "");
-
-    const preface =
-      `> **Filter pipeline:** ${stats.inputRowCount} input → ` +
-      `Live: ${stats.live.finalCount} (dropped ${stats.live.droppedHandleStale} stale, ${stats.live.droppedOverCap} over cap) · ` +
-      `Pending: ${stats.pending.finalCount} (dropped ${stats.pending.droppedHandleStale} stale, ${stats.pending.droppedOverCap} over cap)\n` +
-      `> **Tiingo enrichment:** ${stats.tiingoCallsSucceeded}/${stats.tiingoCallsAttempted} setups with live data\n` +
-      persistNote +
-      `> Handle-staleness filter validated May 2026 (drop >${MAX_HANDLE_DAYS}d).\n\n`;
-
-    // Structured decisions for the interactive table — from the JSON block,
-    // enriched with geometry + DB ids. Renders even on Vercel (ids null, writes no-op).
-    const clientDecisions = buildClientDecisions(
-      extracted,
-      enrichedLive,
-      enrichedPending,
-      persistResult.decisionIds,
-      persistResult.userMarks,
-      riskPerTrade
-    );
-
-    return NextResponse.json<JackValidationResponse>({
-      schemaVersion: "1.2", timestamp,
-      strategy: "Cup with Handle t05", riskPerTrade,
-      markdown: preface + (markdownForClient || "**Warning:** Empty response."),
-      model, inputRowCount: stats.inputRowCount,
-      filterStats: stats,
-      tokens: {
-        input: tokensInput,
-        output: tokensOutput,
-      },
-      degraded: isDegraded(!!markdownForClient, incompleteCount),
-      error: incompleteError,
-      decisions: clientDecisions,
-      persistenceAvailable: isPersistenceAvailable(),
+      truncated,
+      incompleteCount,
+      incompleteError,
+      analysisMode,
+      analysisSkipped: false,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json<JackValidationResponse>(
-      {
-        schemaVersion: "1.2", timestamp,
-        strategy: "Cup with Handle t05", riskPerTrade,
-        markdown: `**Anthropic API error:** ${msg}`,
-        model, inputRowCount: stats.inputRowCount,
-        filterStats: stats, error: msg,
-      },
-      { status: 502 }
-    );
+
+    if (analysisMode === "required") {
+      // Unchanged: the UI still sees a hard failure.
+      return NextResponse.json<JackValidationResponse>(
+        {
+          schemaVersion: "1.2", timestamp,
+          strategy: "Cup with Handle t05", riskPerTrade,
+          markdown: `**Anthropic API error:** ${msg}`,
+          model, inputRowCount: stats.inputRowCount,
+          filterStats: stats, error: msg,
+        },
+        { status: 502 }
+      );
+    }
+
+    // BEST-EFFORT: the API is down, timed out, rate-limited or returned garbage.
+    // The detector output is unaffected, so build the board from it and let the
+    // verdict be backfilled later. This is the 19:00-unattended case — an
+    // Anthropic outage must not cost a night's board.
+    console.warn(`[jack-validation] best_effort: analysis failed (${msg}) — persisting UNREVIEWED.`);
+    return persistAndRespond({
+      timestamp, riskPerTrade, stats, enrichedLive, enrichedPending,
+      model, rawMarkdown: "", tokensInput: 0, tokensOutput: 0,
+      extracted: null, truncated: false,
+      analysisMode, analysisSkipped: true,
+      analysisNote: `analysis unavailable (${msg.slice(0, 160)}) — board built from detector output only.`,
+    });
   }
 }
