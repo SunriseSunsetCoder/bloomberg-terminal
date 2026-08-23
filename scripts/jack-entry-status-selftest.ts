@@ -5,9 +5,10 @@
  *
  * Two halves:
  *
- *   1. BOUNDARIES — FRESH / AGING / STALE / PENDING / UNKNOWN against synthetic
- *      bar series, including the exact off-by-one edges (last AGING bar vs first
- *      STALE bar, bar 15 vs bar 16 of the confirm window).
+ *   1. BOUNDARIES — FRESH / AGING / PENDING / UNKNOWN against synthetic bar
+ *      series, including bar 15 vs bar 16 of the confirm window and the
+ *      assertion that AGING has NO upper bound (no STALE — sub-rim fills
+ *      validated better, 2026-08-22 handoff).
  *
  *   2. PARITY — the load-bearing half. For every fixture, the stamper's notion of
  *      "confirmed" is asserted IDENTICAL to what lib/jack/promotion.ts's
@@ -15,7 +16,7 @@
  *      Both call the same detectFire, so this is a regression net around that
  *      structural guarantee rather than a comparison of two rules.
  */
-import { classifyEntryStatus, stampCsv, ENTRY_WINDOW_BARS, calendarDaysBetween } from "./jack-stamp-entry-status";
+import { classifyEntryStatus, stampCsv, calendarDaysBetween } from "./jack-stamp-entry-status";
 import { detectFire, CONFIRM_WINDOW_BARS, type Bar } from "../lib/jack/outcome-tracker";
 import { isPromotedToLive } from "../lib/jack/promotion";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -86,38 +87,41 @@ console.log("\n=== 1. BOUNDARIES ===\n");
   check("AGING: bars_since_confirm = 3", s.barsSinceConfirm === 3, String(s.barsSinceConfirm));
   check("AGING: confirmed_close_date is the fire bar, not the last bar",
     s.confirmedCloseDate === bars[5].date, String(s.confirmedCloseDate));
-  check("AGING is flagged, never auto-skipped (status is AGING, not STALE)", s.entryStatus !== "STALE");
+  check("AGING is flagged, never auto-skipped", s.entryStatus === "AGING");
 }
 
-// --- the AGING -> STALE edge -------------------------------------------------
+// --- AGING is UNBOUNDED: no entry-window expiry -----------------------------
 {
-  // Fire on bar 1, then exactly ENTRY_WINDOW_BARS more bars -> last AGING bar.
-  const atEdge = series(1 + ENTRY_WINDOW_BARS, 1);
-  const a = classifyEntryStatus({ handleLowDate: HANDLE_LOW_DATE, breakout: RIM, bars: atEdge, today: lastDate(atEdge) });
-  check(`exactly ${ENTRY_WINDOW_BARS} bars since confirm -> still AGING`,
-    a.entryStatus === "AGING" && a.barsSinceConfirm === ENTRY_WINDOW_BARS,
-    `${a.entryStatus}/${a.barsSinceConfirm}`);
-
-  const past = series(2 + ENTRY_WINDOW_BARS, 1);
-  const b = classifyEntryStatus({ handleLowDate: HANDLE_LOW_DATE, breakout: RIM, bars: past, today: lastDate(past) });
-  check(`${ENTRY_WINDOW_BARS + 1} bars since confirm -> STALE`,
-    b.entryStatus === "STALE" && b.barsSinceConfirm === ENTRY_WINDOW_BARS + 1,
-    `${b.entryStatus}/${b.barsSinceConfirm}`);
+  // The old build turned this into STALE at 16 bars. Sub-rim fills validated
+  // BETTER (PF 2.65 vs 2.21), so an aged fire is never expired out of the book.
+  for (const age of [15, 16, 40, 120]) {
+    const bars = series(1 + age, 1);
+    const s = classifyEntryStatus({ handleLowDate: HANDLE_LOW_DATE, breakout: RIM, bars, today: lastDate(bars) });
+    check(`${age} sessions since confirm -> still AGING (no expiry)`,
+      s.entryStatus === "AGING" && s.barsSinceConfirm === age,
+      `${s.entryStatus}/${s.barsSinceConfirm}`);
+  }
+  const ancient = series(200, 1);
+  const a = classifyEntryStatus({ handleLowDate: HANDLE_LOW_DATE, breakout: RIM, bars: ancient, today: lastDate(ancient) });
+  check("a very old fire still carries its confirm date", a.confirmedCloseDate === ancient[1].date);
+  check("STALE is not a reachable label", (a.entryStatus as string) !== "STALE");
 }
 
-// --- STALE: confirm window closed with no confirming close -------------------
+// --- confirm window closed unconfirmed -> PENDING, not a third label --------
 {
   const bars = series(CONFIRM_WINDOW_BARS + 4, 0); // never clears, window fully elapsed
   const s = classifyEntryStatus({ handleLowDate: HANDLE_LOW_DATE, breakout: RIM, bars, today: lastDate(bars) });
-  check("confirm window elapsed, never cleared -> STALE", s.entryStatus === "STALE", s.entryStatus);
-  check("never-fired STALE has no confirm date", s.confirmedCloseDate === null);
+  check("confirm window elapsed, never cleared -> PENDING", s.entryStatus === "PENDING", s.entryStatus);
+  check("unconfirmed has no confirm date", s.confirmedCloseDate === null);
+  check("pending expiry is NOT this file's job (no STALE emitted)",
+    (s.entryStatus as string) !== "STALE");
 }
 
 // --- PENDING: window still open ----------------------------------------------
 {
   const bars = series(4, 0); // no clear yet, only 4 of 15 bars elapsed
   const s = classifyEntryStatus({ handleLowDate: HANDLE_LOW_DATE, breakout: RIM, bars, today: lastDate(bars) });
-  check("window still open, no clear -> PENDING (not STALE)", s.entryStatus === "PENDING", s.entryStatus);
+  check("window still open, no clear -> PENDING", s.entryStatus === "PENDING", s.entryStatus);
   check("PENDING has no confirm date", s.confirmedCloseDate === null);
 }
 
@@ -130,8 +134,8 @@ console.log("\n=== 1. BOUNDARIES ===\n");
 
   const outside = series(CONFIRM_WINDOW_BARS + 3, CONFIRM_WINDOW_BARS + 1);
   const t = classifyEntryStatus({ handleLowDate: HANDLE_LOW_DATE, breakout: RIM, bars: outside, today: lastDate(outside) });
-  check(`clear on bar ${CONFIRM_WINDOW_BARS + 1} (just outside) -> NOT a fire, STALE`,
-    t.entryStatus === "STALE" && t.confirmedCloseDate === null, `${t.entryStatus}/${t.confirmedCloseDate}`);
+  check(`clear on bar ${CONFIRM_WINDOW_BARS + 1} (just outside) -> NOT a fire, PENDING`,
+    t.entryStatus === "PENDING" && t.confirmedCloseDate === null, `${t.entryStatus}/${t.confirmedCloseDate}`);
 }
 
 // --- strict > , not >= -------------------------------------------------------
@@ -192,7 +196,7 @@ const parityCases: Array<{ name: string; bars: Bar[] }> = [
   { name: `clears on bar ${CONFIRM_WINDOW_BARS + 1} (out-of-window)`, bars: series(CONFIRM_WINDOW_BARS + 3, CONFIRM_WINDOW_BARS + 1) },
   { name: "never clears, window elapsed", bars: series(CONFIRM_WINDOW_BARS + 4, 0) },
   { name: "never clears, window still open", bars: series(4, 0) },
-  { name: "fires long ago (STALE by entry window)", bars: series(2 + ENTRY_WINDOW_BARS, 1) },
+  { name: "fires long ago (deep AGING, no expiry)", bars: series(40, 1) },
 ];
 
 for (const { name, bars } of parityCases) {

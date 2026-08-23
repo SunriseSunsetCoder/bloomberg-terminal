@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS setups (
     retired_at            TEXT,
     retired_reason        TEXT,
     -- Phase 3 entry-freshness stamp, from the daily pipeline's watchlist CSV.
-    -- FRESH / AGING / STALE / PENDING / UNKNOWN. A SEPARATE axis from the
+    -- FRESH / AGING / PENDING / UNKNOWN (no STALE — sub-rim fills validated
+    -- better, so an aged fire is never expired). A SEPARATE axis from the
     -- *_seen_status enum below, which is NOT extended: that enum describes what
     -- the scanner classified the setup as, this describes how old a confirmed
     -- breakout is. Intentionally unconstrained — see init.ts runMigrations for

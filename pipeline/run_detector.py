@@ -365,7 +365,7 @@ def stamp_entry_status(watchlist: Path, corpus: Path) -> Tuple[bool, str, Dict[s
     if not counts:
         return False, "stamper produced no STAMP_JSON summary — cannot confirm it ran", {}
 
-    ordered = ["FRESH", "AGING", "STALE", "PENDING", "UNKNOWN"]
+    ordered = ["FRESH", "AGING", "PENDING", "UNKNOWN"]
     detail = " · ".join(f"{k} {counts.get(k, 0)}" for k in ordered)
     return True, detail, counts
 

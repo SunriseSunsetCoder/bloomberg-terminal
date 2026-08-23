@@ -113,10 +113,15 @@ function runMigrations(database: Database.Database): void {
     // to what the scanner classified the setup as.
     //
     //   FRESH   confirmed on the most recent close -> next open takeable
-    //   AGING   confirmed earlier, inside the entry window -> pullback-to-entry only
-    //   STALE   entry window closed, or the confirm window elapsed unconfirmed
-    //   PENDING no confirming close yet, confirm window still open
+    //   AGING   confirmed earlier -> pullback-to-entry only, NO upper bound
+    //   PENDING no confirming close (window open OR elapsed unconfirmed)
     //   UNKNOWN no rim or no bars — fail closed, never judged
+    //
+    // There is deliberately no STALE: the 2026-08-22 backtest handoff validated
+    // that sub-rim fills OUTPERFORM (PF 2.65 vs 2.21), so an aged fire is never
+    // expired out of the pullback book, and nothing in the pipeline skips on
+    // price-vs-rim. Unconfirmed setups are governed by the dsl<=15 staleness
+    // filter upstream, not by a second expiry here.
     //
     // Deliberately NOT constrained by a CHECK: SQLite cannot add a CHECK via
     // ALTER TABLE ADD COLUMN, so a constrained column here would apply only to

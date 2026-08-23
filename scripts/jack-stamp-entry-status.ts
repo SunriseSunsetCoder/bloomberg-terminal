@@ -1,13 +1,14 @@
 /*
- * JACK daily pipeline, PHASE 3 — FRESH / AGING / STALE entry_status stamp.
+ * JACK daily pipeline, PHASE 3 — FRESH / AGING entry_status stamp.
  *
  * Post-processes the watchlist CSV the detector produced, adding four columns per
- * row so the alert can tell a takeable fresh breakout from a stale one:
+ * row so the alert can tell a breakout still at backtest parity from one that is
+ * only enterable on a pullback:
  *
  *     confirmed_close_date   the bar whose CLOSE first cleared the rim
  *     days_since_confirm     calendar days since that close
- *     bars_since_confirm     TRADING bars since that close  (the decision variable)
- *     entry_status           FRESH | AGING | STALE | PENDING | UNKNOWN
+ *     bars_since_confirm     TRADING bars since that close
+ *     entry_status           FRESH | AGING | PENDING | UNKNOWN
  *
  * Run:
  *   npx tsx scripts/jack-stamp-entry-status.ts --watchlist <csv> --corpus <dir>
@@ -46,32 +47,55 @@
  * THE STATUS RULES
  * =========================================================================
  *
- *   FRESH   fired on the MOST RECENT close in the corpus. The modeled fill —
- *           the next session's open — has not happened yet, so it is still
- *           takeable at backtest parity. The 2.24 book.
+ * The stamp answers exactly one question — HOW OLD IS THE CONFIRMATION? — and
+ * it is driven by DAYS SINCE CONFIRM. It never compares current price to the
+ * rim, to `entry`, or to anything else (see NO PRICE-VS-RIM LOGIC below).
  *
- *   AGING   fired earlier, still inside ENTRY_WINDOW_BARS. The modeled open has
- *           passed, so taking it now is off-parity: pullback-to-entry only,
- *           which restores the original R:R without improving it. The 1.83 book.
- *           FLAGGED, NEVER AUTO-SKIPPED — that call is the operator's.
+ *   FRESH   confirmed on the MOST RECENT close. The modeled fill — the next
+ *           session's open — has not happened yet, so the trade is still
+ *           available at backtest parity. The 2.24 book.
  *
- *   STALE   either the entry window closed on a fire, or the 15-bar confirm
- *           window elapsed with no confirming close at all. Skip.
+ *   AGING   confirmed earlier: the modeled open has passed. Off-parity, so
+ *           pullback-to-entry only, which restores the original R:R without
+ *           improving it. The 1.83 book. FLAGGED, NEVER AUTO-SKIPPED — that
+ *           call is the operator's, and there is no upper bound at which it
+ *           stops being offered.
  *
- *   PENDING no confirming close YET, and the confirm window is still open
- *           (detectFire -> "deferred"). This is the watchlist's normal resting
- *           state, not a fire, and emphatically not STALE — it is the freshest
- *           kind of not-yet. See the note on totality below.
+ *   PENDING no confirming close yet. Not a fire, so it has no entry age. This
+ *           covers BOTH detectFire outcomes that are not a fire — window still
+ *           open ("deferred") and window elapsed unconfirmed ("never_fired").
  *
  *   UNKNOWN cannot be evaluated: no rim, or no bars for the ticker. FAIL CLOSED,
  *           mirroring promotion.ts — a missing rim is NEVER substituted with
  *           `entry` or anything else, it just is not judged.
  *
- * TOTALITY NOTE: the brief specifies three values, for fires. The watchlist also
- * carries rows that have not fired, so the column would be undefined for them.
- * PENDING and UNKNOWN exist so every row gets an honest value and no consumer
- * has to interpret a blank. They are deliberately NOT part of the FRESH/AGING/
- * STALE triage.
+ * =========================================================================
+ * WHY THERE IS NO "STALE"  (validated FALSE, 2026-08-22 backtest handoff)
+ * =========================================================================
+ *
+ * An earlier revision of this file had a third label, STALE, covering a fire
+ * whose entry window had elapsed. It has been REMOVED, not renamed, because the
+ * premise under it was tested and did not hold:
+ *
+ *   Sub-rim fills are BETTER, not worse — below-rim PF 2.65 vs above-rim 2.21,
+ *   monotone across the sweep and holding out-of-sample.
+ *
+ * An aged setup trading back under its rim is therefore not a degraded entry to
+ * be skipped; it is the population the pullback book is built on. Expiring it
+ * would have discarded the better half of the distribution. So AGING has no
+ * upper bound and ENTRY_WINDOW_BARS is gone.
+ *
+ * NO PRICE-VS-RIM LOGIC ANYWHERE IN THIS FILE. The only close-vs-rim comparison
+ * in the whole path lives inside detectFire, and it answers "was there ever a
+ * confirming breakout?" — a historical fact about one past bar. Nothing here
+ * asks where price is trading NOW relative to the rim, and nothing skips on it.
+ *
+ * PENDING EXPIRY IS NOT THIS FILE'S JOB EITHER. A setup that never confirmed is
+ * governed upstream by the dsl<=15 staleness filter (MAX_HANDLE_DAYS in
+ * lib/jack/validation-core.ts, and apply_staleness_filter in the weekly
+ * notebook), which already drops the weak tail (dsl>15, PF 1.63). Adding a
+ * second, join-window expiry here would double-filter the same population on a
+ * rule nobody validated. So "never_fired" is PENDING, exactly like "deferred".
  *
  * FRESH depends on the corpus being current: "the most recent close" is the last
  * bar on disk. The Phase 1 Tiingo pull must have run before the detector, or
@@ -87,23 +111,13 @@ import { normKey, normNum, normPositive, normTicker, splitCsvLine, detectDelim }
 // Configuration
 // ============================================================
 
-/**
- * How long a CONFIRMED fire stays AGING before it goes STALE, in TRADING BARS
- * measured from the confirming close.
- *
- * Defaulted to CONFIRM_WINDOW_BARS (15) so this file introduces no new magic
- * number and "the window" means one thing across the system.
- *
- * OPEN QUESTION, flagged rather than silently decided: the second-chance study
- * (jack-state.md, 2026-08-15) measured the pullback-to-entry recovery over a
- * 20-bar window (+0.320R / PF 1.834 — the "1.83 book") and found the tighter
- * 10-bar window carried the better PF (1.926) at the cost of population. If the
- * AGING horizon should track that study rather than the confirm window, this is
- * the single constant to change.
- */
-export const ENTRY_WINDOW_BARS = CONFIRM_WINDOW_BARS;
+// There is deliberately NO entry-window constant here. AGING is unbounded: the
+// 2026-08-22 handoff validated that sub-rim fills outperform (PF 2.65 vs 2.21),
+// so an aged setup is never expired out of the pullback book. See WHY THERE IS
+// NO "STALE" above. CONFIRM_WINDOW_BARS still governs whether a breakout counts
+// as a confirmation at all, inside detectFire — that is a different question.
 
-export type EntryStatus = "FRESH" | "AGING" | "STALE" | "PENDING" | "UNKNOWN";
+export type EntryStatus = "FRESH" | "AGING" | "PENDING" | "UNKNOWN";
 
 export const STAMP_COLUMNS = [
   "confirmed_close_date",
@@ -177,8 +191,11 @@ export function classifyEntryStatus(input: StampInput): Stamp {
   }
 
   if (fire.status === "never_fired") {
+    // PENDING, not a third label. No confirmation means no entry age to report.
+    // Whether this setup should still be on the watchlist at all is the dsl<=15
+    // filter's call, upstream — not this file's.
     return {
-      entryStatus: "STALE",
+      entryStatus: "PENDING",
       confirmedCloseDate: null,
       daysSinceConfirm: null,
       barsSinceConfirm: null,
@@ -191,20 +208,17 @@ export function classifyEntryStatus(input: StampInput): Stamp {
   const barsSince = sorted.length - 1 - fireIndex;
   const daysSince = calendarDaysBetween(fireDate, input.today);
 
-  let entryStatus: EntryStatus;
-  let detail: string;
-  if (barsSince === 0) {
-    // The confirming close IS the latest close on disk, so the modeled fill (the
-    // next session's open) has not happened yet. Backtest parity intact.
-    entryStatus = "FRESH";
-    detail = "confirmed on the most recent close — next open is takeable (2.24 book)";
-  } else if (barsSince <= ENTRY_WINDOW_BARS) {
-    entryStatus = "AGING";
-    detail = `modeled next-open passed ${barsSince} bar(s) ago — pullback-to-entry only (1.83 book)`;
-  } else {
-    entryStatus = "STALE";
-    detail = `${barsSince} bars since confirm, past the ${ENTRY_WINDOW_BARS}-bar entry window`;
-  }
+  // A two-state split on TIME SINCE CONFIRM, with no upper bound. Note that at
+  // the only threshold that exists — zero — "days since" and "bars since" are
+  // the same statement: the confirming close either IS the most recent close or
+  // it is not. So the bars/calendar-days distinction cannot change a verdict.
+  const entryStatus: EntryStatus = barsSince === 0 ? "FRESH" : "AGING";
+  const detail =
+    barsSince === 0
+      ? // The confirming close IS the latest close, so the modeled fill (the next
+        // session's open) has not happened yet. Backtest parity intact.
+        "confirmed on the most recent close — next open is takeable (2.24 book)"
+      : `modeled next-open passed ${barsSince} session(s) ago — pullback-to-entry only (1.83 book)`;
 
   return {
     entryStatus,
@@ -277,7 +291,7 @@ export interface StampReport {
 }
 
 function emptyCounts(): Record<EntryStatus, number> {
-  return { FRESH: 0, AGING: 0, STALE: 0, PENDING: 0, UNKNOWN: 0 };
+  return { FRESH: 0, AGING: 0, PENDING: 0, UNKNOWN: 0 };
 }
 
 export function stampCsv(
@@ -423,7 +437,7 @@ function main(): number {
   const c = report.counts;
   console.log(
     `entry_status: ${report.rows} rows · FRESH ${c.FRESH} · AGING ${c.AGING} · ` +
-      `STALE ${c.STALE} · PENDING ${c.PENDING} · UNKNOWN ${c.UNKNOWN}` +
+      `PENDING ${c.PENDING} · UNKNOWN ${c.UNKNOWN}` +
       (dryRun ? "  (DRY RUN — not written)" : "")
   );
   if (report.rimless.length) {
