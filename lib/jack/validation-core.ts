@@ -274,6 +274,12 @@ function splitByDelimiter(line: string, delim: string): string[] {
   return line.split(delim).map((c) => c.trim());
 }
 
+/**
+ * One-shot guard so the wall-clock-fallback warning fires ONCE per applyFilters
+ * run rather than once per row. Reset at the top of applyFilters.
+ */
+let warnedStalenessFallback = false;
+
 function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: string): ParsedSetup {
   const cols = splitByDelimiter(rowLine, delim);
   // Match columns by a NORMALIZED header name, not exact indexOf. The scanner's
@@ -383,8 +389,38 @@ function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: 
     };
   }
 
+  // PREFER the CSV's own days_since_handle_low.
+  //
+  // The detector anchors it to the data's LAST BAR (ASOF_DATE in
+  // cup_handle_weekly.ipynb), which makes it deterministic — re-running the same
+  // scan yields the same number. Recomputing it here would re-anchor to JACK's
+  // wall clock and re-introduce exactly the drift the notebook fix removed: the
+  // two disagree whenever ingest and the last bar fall on different days, i.e.
+  // corpus lag, a retried run, or a weekend/holiday gap. Reading the column
+  // instead makes the CSV authoritative and the terminal agree with the file.
+  //
+  // The subtraction survives only as a fallback for a CSV that predates the fix
+  // or was hand-built without the column — and it warns when it fires, because
+  // silently substituting a different definition of staleness is precisely the
+  // kind of quiet degradation this codebase keeps paying for.
+  const csvDays = getNum("days_since_handle_low", "dsl");
   const msPerDay = 1000 * 60 * 60 * 24;
-  const days = Math.floor((today.getTime() - parsed.getTime()) / msPerDay);
+  let days: number;
+  if (csvDays !== undefined && Number.isFinite(csvDays)) {
+    days = Math.round(csvDays);
+  } else {
+    days = Math.floor((today.getTime() - parsed.getTime()) / msPerDay);
+    if (!warnedStalenessFallback) {
+      warnedStalenessFallback = true;
+      console.warn(
+        "[jack-validation] days_since_handle_low absent — falling back to a wall-clock " +
+          "recompute. Staleness values will NOT match the deterministic pipeline output " +
+          "(the detector anchors them to the data's last bar, ASOF_DATE), so the filter " +
+          "and the terminal may disagree with the CSV. Likely a hand-pasted pre-fix CSV; " +
+          "the nightly pipeline always emits the column."
+      );
+    }
+  }
 
   return {
     raw: rowLine, rowCols: cols, ticker, status,
@@ -426,6 +462,7 @@ export function applyFilters(rawCsv: string): { headerLine: string; sectioned: S
   const delim = detectDelimiter(headerLine);
   const headerCols = splitByDelimiter(headerLine, delim);
   const today = new Date();
+  warnedStalenessFallback = false; // one warning per run, not per row
 
   // Parse all rows
   const parsed = lines.slice(1).map((line) => parseCsvRow(headerCols, line, today, delim));
