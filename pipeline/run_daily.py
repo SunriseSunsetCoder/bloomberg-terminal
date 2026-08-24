@@ -814,17 +814,60 @@ def _num(val, digits: int = 2) -> str:
         return "-"
 
 
+TRUTH_TABLE_PATH = REPO_ROOT / "lib" / "jack" / "tradeable-truth-table.json"
+
+
+def is_tradeable_setup(row: dict) -> bool:
+    """MIRROR of isTradeableSetup() in lib/jack/handle-score.ts.
+
+    This CANNOT import the TypeScript one, so the rule is written twice. What stops
+    the two drifting is lib/jack/tradeable-truth-table.json — the shared fixture both
+    selftests read. Change the rule and both sides fail until both are updated.
+
+    Precedence order (the tier VETOES — see the TS docstring for why):
+      1. tier Q1/Q2      -> NOT tradeable, whatever the bucket claims
+      2. bucket 'skip'   -> NOT tradeable
+      3. anything else   -> tradeable; suppression needs POSITIVE evidence of a skip
+    """
+    tier = str(row.get("tier") or "").upper().strip()
+    if tier in ("Q1", "Q2"):
+        return False
+    bucket = str(row.get("sizeBucket") or "").lower().strip()
+    if bucket == "skip":
+        return False
+    return True
+
+
 def summarize_board(decisions: Sequence[dict]) -> dict:
     """Split the persisted board into the alert's buckets. Pure — unit-testable."""
     fresh: List[dict] = []
     aging: List[dict] = []
     pending = 0
     unreviewed = 0
+    skip_tier_fires = 0
 
     for d in decisions or []:
         status = str(d.get("entryStatus") or "UNKNOWN").upper()
         if str(d.get("decision") or "").strip().upper() == "UNREVIEWED":
             unreviewed += 1
+
+        # THE TRADEABLE GATE. entry_status is stamped by the Phase 3 detector for
+        # EVERY setup regardless of tier, so a Q1/Q2 row legitimately carries FRESH.
+        # Listing it would tell the operator to take a setup the strategy skips —
+        # exactly what happened on 2026-08-24 (SOLV Q2 and WELL Q1 listed as FRESH,
+        # ABBV/AHR/EFC/SFL Q1-Q2 as AGING).
+        #
+        # COUNTED, NOT DROPPED: a suppressed fire is reported as a number, so "no
+        # skip-tier fires" and "skip-tier fires were filtered out" stay
+        # distinguishable. Silent filtering is the failure mode this pipeline keeps
+        # removing.
+        if not is_tradeable_setup(d):
+            if status in ("FRESH", "AGING"):
+                skip_tier_fires += 1
+            else:
+                pending += 1
+            continue
+
         if status == "FRESH":
             fresh.append(d)
         elif status == "AGING":
@@ -839,7 +882,8 @@ def summarize_board(decisions: Sequence[dict]) -> dict:
 
     fresh.sort(key=rank)
     aging.sort(key=rank)
-    return {"fresh": fresh, "aging": aging, "pending": pending, "unreviewed": unreviewed}
+    return {"fresh": fresh, "aging": aging, "pending": pending,
+            "unreviewed": unreviewed, "skip_tier_fires": skip_tier_fires}
 
 
 def _fire_line(d: dict) -> str:
@@ -860,6 +904,7 @@ def format_fire_alert(summary: dict, run_id, run_note: str = "") -> str:
     """Build the Telegram HTML body. Pure, so every state is testable offline."""
     fresh, aging = summary["fresh"], summary["aging"]
     pending, unreviewed = summary["pending"], summary["unreviewed"]
+    skipped = summary.get("skip_tier_fires", 0)
     head_run = "run #" + str(run_id) if run_id is not None else "run #?"
 
     parts: List[str] = []
@@ -873,6 +918,11 @@ def format_fire_alert(summary: dict, run_id, run_note: str = "") -> str:
         parts.append("🎯 <b>JACK nightly — " + str(len(fresh)) + " FRESH · "
                      + str(len(aging)) + " AGING</b>")
         parts.append(head_run + " · " + str(pending) + " watching")
+
+    if skipped:
+        # Counted, never listed: these are Q1/Q2, which the strategy does not trade.
+        parts.append("· " + str(skipped) + " skip-tier (Q1/Q2) fire"
+                     + ("" if skipped == 1 else "s") + " suppressed")
 
     if run_note:
         parts.append("⚠ " + run_note)
@@ -1277,6 +1327,131 @@ def selftest() -> int:
           [l for l in out.splitlines() if "exit " in l][-1:] and
           [l for l in out.splitlines() if "exit " in l][-1] or "")
     check("  and never claims an orchestrator error", "orchestrator error" not in out)
+
+    print("\n[12] the SHARED truth table — is_tradeable_setup mirrors the TS gate")
+    # This reads lib/jack/tradeable-truth-table.json, the SAME fixture
+    # scripts/jack-entry-alert-selftest.ts reads. Neither side restates the cases,
+    # so the two implementations cannot drift: change the rule in one language and
+    # this fails until the other follows.
+    try:
+        with open(TRUTH_TABLE_PATH, "r", encoding="utf-8") as fh:
+            table = json.load(fh)
+        cases = table["cases"]
+        check("shared truth table loads", len(cases) > 0, str(TRUTH_TABLE_PATH))
+        bad = []
+        for c in cases:
+            got = is_tradeable_setup({"sizeBucket": c["sizeBucket"], "tier": c["tier"]})
+            if got != c["expected"]:
+                bad.append("bucket={!r} tier={!r} expected {} got {} ({})".format(
+                    c["sizeBucket"], c["tier"], c["expected"], got, c["why"]))
+        check("all {} shared cases pass on the PYTHON side".format(len(cases)),
+              not bad, " | ".join(bad[:3]))
+        # The regression that started this: a Q1 row carrying a full bucket.
+        check("  Q1 + full bucket is NOT tradeable (the veto)",
+              is_tradeable_setup({"tier": "Q1", "sizeBucket": "full"}) is False)
+        check("  Q2 + half bucket is NOT tradeable",
+              is_tradeable_setup({"tier": "Q2", "sizeBucket": "half"}) is False)
+        check("  Q5 + full bucket still IS tradeable",
+              is_tradeable_setup({"tier": "Q5", "sizeBucket": "full"}) is True)
+        # ---- POSITIVE PATH, asserted explicitly ---------------------------
+        # isTradeableSetup gates the Basket Sizer and the LIVE display group, so a
+        # reorder that broke the positive path would silently SHRINK the basket
+        # instead of failing loudly. Every Q3/Q4/Q5 row is checked by name.
+        pos = [c for c in cases if str(c["tier"] or "").upper().strip() in ("Q3", "Q4", "Q5")
+               and c["expected"]]
+        check("positive path: {} tradeable Q3/Q4/Q5 rows in the table".format(len(pos)),
+              len(pos) >= 10, str(len(pos)))
+        for tier in ("Q3", "Q4", "Q5"):
+            for bucket in ("full", "half"):
+                check("  {} + {} -> TRUE".format(tier, bucket),
+                      is_tradeable_setup({"tier": tier, "sizeBucket": bucket}) is True)
+            check("  {} + skip -> false".format(tier),
+                  is_tradeable_setup({"tier": tier, "sizeBucket": "skip"}) is False)
+            check("  {} + no bucket -> TRUE".format(tier),
+                  is_tradeable_setup({"tier": tier, "sizeBucket": None}) is True)
+        for tier in ("Q1", "Q2", "Q3", "Q4", "Q5", None):
+            check("  every tier + skip -> false (tier={})".format(tier),
+                  is_tradeable_setup({"tier": tier, "sizeBucket": "skip"}) is False)
+
+        # ---- BEHAVIOUR-NEUTRALITY, machine-checked ------------------------
+        # The OLD rule, restated ONLY here, so "the fix changes nothing for
+        # Q3/Q4/Q5" is proved rather than asserted.
+        def old_rule(row):
+            b = str(row.get("sizeBucket") or "").lower().strip()
+            if b == "skip":
+                return False
+            if b in ("full", "half"):
+                return True
+            t = str(row.get("tier") or "").upper().strip()
+            if t in ("Q1", "Q2"):
+                return False
+            return True
+
+        differ = []
+        for c in cases:
+            row = {"sizeBucket": c["sizeBucket"], "tier": c["tier"]}
+            if old_rule(row) != is_tradeable_setup(row):
+                differ.append(c)
+        check("exactly {} rows change behaviour".format(
+                  sum(1 for c in cases if c["changedByFix"])),
+              len(differ) == sum(1 for c in cases if c["changedByFix"]),
+              "{} differ, table claims {}".format(
+                  len(differ), sum(1 for c in cases if c['changedByFix'])))
+        check("  the table's changedByFix flags match reality",
+              all(c["changedByFix"] for c in differ)
+              and all(c in differ for c in cases if c["changedByFix"]))
+        check("  EVERY changed row is tier Q1/Q2",
+              all(str(c["tier"] or "").upper().strip() in ("Q1", "Q2") for c in differ),
+              str([(c["sizeBucket"], c["tier"]) for c in differ]))
+        check("  EVERY changed row had a full/half bucket",
+              all(str(c["sizeBucket"] or "").lower().strip() in ("full", "half")
+                  for c in differ))
+        check("  NOTHING on the Q3/Q4/Q5 positive path changed",
+              not any(str(c["tier"] or "").upper().strip() in ("Q3", "Q4", "Q5")
+                      for c in differ))
+
+    except FileNotFoundError:
+        check("shared truth table exists", False, str(TRUTH_TABLE_PATH))
+
+    print("\n[13] the digest never lists a skip-tier row as takeable")
+    # The 2026-08-24 leak, pinned: these six rows reached Telegram as FRESH/AGING.
+    leaked = [
+        {"ticker": "SOLV", "entryStatus": "FRESH", "tier": "Q2", "sizeBucket": "full"},
+        {"ticker": "WELL", "entryStatus": "FRESH", "tier": "Q1", "sizeBucket": "full"},
+        {"ticker": "ABBV", "entryStatus": "AGING", "tier": "Q1", "sizeBucket": "full"},
+        {"ticker": "AHR", "entryStatus": "AGING", "tier": "Q2", "sizeBucket": "full"},
+        {"ticker": "EFC", "entryStatus": "AGING", "tier": "Q2", "sizeBucket": "half"},
+        {"ticker": "SFL", "entryStatus": "AGING", "tier": "Q1", "sizeBucket": "full"},
+        {"ticker": "NVDA", "entryStatus": "FRESH", "tier": "Q5", "sizeBucket": "full"},
+    ]
+    s2 = summarize_board(leaked)
+    check("only the Q5 row survives as FRESH",
+          [d["ticker"] for d in s2["fresh"]] == ["NVDA"], str([d["ticker"] for d in s2["fresh"]]))
+    check("  no AGING rows survive", s2["aging"] == [], str(s2["aging"]))
+    check("  all six skip-tier fires are COUNTED", s2["skip_tier_fires"] == 6,
+          str(s2["skip_tier_fires"]))
+    check("  and none of them leaked into 'watching' either", s2["pending"] == 0,
+          str(s2["pending"]))
+
+    msg = format_fire_alert(s2, 420)
+    for t in ("SOLV", "WELL", "ABBV", "AHR", "EFC", "SFL"):
+        check("  {} never appears in the message".format(t), t not in msg)
+    check("  NVDA does appear", "NVDA" in msg)
+    check("  the suppression is stated, not silent",
+          "6 skip-tier (Q1/Q2) fires suppressed" in msg, msg[:200])
+
+    one = summarize_board([{"ticker": "X", "entryStatus": "FRESH", "tier": "Q1"}])
+    check("singular wording for one suppressed fire",
+          "1 skip-tier (Q1/Q2) fire suppressed" in format_fire_alert(one, 421))
+    check("  a night with zero suppressions says nothing about it",
+          "suppressed" not in format_fire_alert(
+              summarize_board([{"ticker": "Y", "entryStatus": "FRESH", "tier": "Q5"}]), 422))
+
+    check("a skip BUCKET on a good tier is also suppressed",
+          summarize_board([{"ticker": "Z", "entryStatus": "FRESH", "tier": "Q5",
+                            "sizeBucket": "skip"}])["skip_tier_fires"] == 1)
+    check("an untiered row is still listed (no positive skip evidence)",
+          len(summarize_board([{"ticker": "U", "entryStatus": "FRESH"}])["fresh"]) == 1)
 
     print(f"\n{'ALL PASS' if failed == 0 else 'FAILURES'} — {passed} passed, {failed} failed\n")
     return 0 if failed == 0 else 1

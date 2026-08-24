@@ -88,21 +88,37 @@ export function normalizeSizeBucket(v: string | null | undefined): SizeBucket | 
  * Q1/Q2 setup closing above its rim would be advertised as "buy next open", flatly
  * contradicting the size map.
  *
- * Rules, in order:
- *   · an explicit SKIP bucket   → NOT tradeable
- *   · full or half              → tradeable (half is a reduced size, still a trade)
- *   · no bucket, tier Q1 or Q2  → NOT tradeable (the tier maps to skip)
- *   · anything else / unknown   → tradeable
+ * Rules, in PRECEDENCE order:
+ *   · tier Q1 or Q2           → NOT tradeable. The tier VETOES.
+ *   · an explicit SKIP bucket → NOT tradeable
+ *   · anything else / unknown → tradeable
  *
  * That last rule is deliberate: we only suppress on POSITIVE evidence of a skip. An
  * unclassified setup keeps its prior behaviour rather than silently losing a signal.
+ *
+ * WHY THE TIER IS CHECKED FIRST (changed — this used to be last)
+ * -------------------------------------------------------------
+ * The order was previously: skip → false, full/half → TRUE, then the tier. That
+ * `full/half → true` short-circuited before the tier was ever read, so a setup
+ * carrying tier Q1 with a full bucket — contradictory data the scanner can emit —
+ * was reported TRADEABLE. It could then raise a "PROMOTED · tradeable from the next
+ * open" or "ENTRY CONFIRMED" alert for a tier that never trades, and sit in the
+ * Basket Sizer and the LIVE display group.
+ *
+ * jack-state.md is absolute on this: "Q1/Q2 are never traded — breakout or not. A
+ * SKIP setup that closes above its rim is still a SKIP." So when the bucket and the
+ * tier disagree, the tier wins: it is derived from handle_score against the frozen
+ * HSCORE_EDGES, whereas the bucket can arrive from a CSV column.
+ *
+ * THE RULE IS MIRRORED IN PYTHON — is_tradeable_setup() in pipeline/run_daily.py,
+ * which cannot import this module. lib/jack/tradeable-truth-table.json is the shared
+ * fixture BOTH selftests read, so the two implementations cannot drift.
  */
 export function isTradeableSetup(s: { sizeBucket?: string | null; tier?: string | null }): boolean {
-  const bucket = normalizeSizeBucket(s.sizeBucket);
-  if (bucket === "skip") return false;
-  if (bucket === "full" || bucket === "half") return true;
   const tier = (s.tier ?? "").toUpperCase().trim();
   if (tier === "Q1" || tier === "Q2") return false;
+  const bucket = normalizeSizeBucket(s.sizeBucket);
+  if (bucket === "skip") return false;
   return true;
 }
 
