@@ -73,13 +73,13 @@ console.log("\n[1] Tier-risk map + the Q5 hard cap");
 {
   check("balanced Q3 0.30%", riskPctFor("Q3", "balanced") === 0.3);
   check("balanced Q4 0.50%", riskPctFor("Q4", "balanced") === 0.5);
-  check("balanced Q5 0.75%", riskPctFor("Q5", "balanced") === 0.75);
+  check("balanced Q5 1.00%", riskPctFor("Q5", "balanced") === 1.0);
   check("aggressive Q3 0.35%", riskPctFor("Q3", "aggressive") === 0.35);
   check("aggressive Q4 0.55%", riskPctFor("Q4", "aggressive") === 0.55);
   check("aggressive Q5 0.85%", riskPctFor("Q5", "aggressive") === 0.85);
-  check("lowercase tier normalizes", riskPctFor("q5", "balanced") === 0.75);
+  check("lowercase tier normalizes", riskPctFor("q5", "balanced") === 1.0);
   check("unknown tier falls back to the conservative Q3", riskPctFor(null, "balanced") === 0.3);
-  check("every scheme's Q5 sits under the 1.0% cap", Object.values(TIER_RISK_PCT).every((t) => t.Q5 <= Q5_RISK_CAP_PCT));
+  check("every scheme's Q5 sits at or under the 1.0% cap", Object.values(TIER_RISK_PCT).every((t) => t.Q5 <= Q5_RISK_CAP_PCT));
   check(
     "the Q5 cap is enforced, not merely respected by the table",
     riskPctFor("Q5", "aggressive") === Math.min(TIER_RISK_PCT.aggressive.Q5, Q5_RISK_CAP_PCT)
@@ -90,17 +90,17 @@ console.log("\n[1] Tier-risk map + the Q5 hard cap");
 console.log("\n[2] Per-row sizing math");
 // ===========================================================================
 {
-  // $70k × 0.75% = $525 risk; stop distance 5 → floor(525/5) = 105 shares.
+  // $70k × 1.0% = $700 risk; stop distance 5 → floor(700/5) = 140 shares.
   const t = computeBasket([cand({ ticker: "AAA" })], [], opts());
   const r = t.rows[0];
-  check("risk$ = account × risk%", near(r.riskDollars, 525), String(r.riskDollars));
-  check("shares = floor(risk$ / stop distance)", r.shares === 105, String(r.shares));
-  check("position$ = shares × entry", near(r.positionDollars, 10_500), String(r.positionDollars));
-  check("reward$ = shares × (target − entry)", near(r.rewardDollars, 1575), String(r.rewardDollars));
+  check("risk$ = account × risk%", near(r.riskDollars, 700), String(r.riskDollars));
+  check("shares = floor(risk$ / stop distance)", r.shares === 140, String(r.shares));
+  check("position$ = shares × entry", near(r.positionDollars, 14_000), String(r.positionDollars));
+  check("reward$ = shares × (target − entry)", near(r.rewardDollars, 2100), String(r.rewardDollars));
   check("R:R = (target − entry)/(entry − stop) = 3.00", near(r.rr, 3));
   check("stop% = (entry − stop)/entry", near(r.stopPct, 5));
-  check("%acct = position$/account", near(r.pctOfAccount, 15));
-  check("totals mirror the single row", near(t.positionDollars, 10_500) && near(t.riskDollars, 525));
+  check("%acct = position$/account", near(r.pctOfAccount, 20));
+  check("totals mirror the single row", near(t.positionDollars, 14_000) && near(t.riskDollars, 700));
   check("reward:risk on the basket = 3.00×", near(t.rewardToRisk, 3));
 }
 {
@@ -136,9 +136,9 @@ console.log("\n[3] Filters — R:R floor, $5, Q1/Q2");
   check("R:R below floor is flagged", low.flags.includes("rr_below_floor"));
   check("  but NOT hidden", !low.hidden);
   check("  and stays in the basket", t.included.length === 2);
-  check("  Σ risk$ still counts it", near(t.riskDollars, 1050), String(t.riskDollars));
-  check("  Σ shares still counts it", t.shares === 210, String(t.shares));
-  check("  Σ reward$ still counts it", near(t.rewardDollars, 1575 + 210), String(t.rewardDollars));
+  check("  Σ risk$ still counts it", near(t.riskDollars, 1400), String(t.riskDollars));
+  check("  Σ shares still counts it", t.shares === 280, String(t.shares));
+  check("  Σ reward$ still counts it", near(t.rewardDollars, 2100 + 280), String(t.rewardDollars));
 
   // A row at exactly 0.75 is NOT below the floor (strict <).
   const atFloor = computeBasket([cand({ ticker: "EXACT", target: 103.75 })], [], opts());
@@ -147,7 +147,7 @@ console.log("\n[3] Filters — R:R floor, $5, Q1/Q2");
   // Opt-in hide reproduces the old behaviour, explicitly.
   const hidden = computeBasket(rows, [], opts({ hideBelowFloor: true }));
   check("hideBelowFloor=true drops it from the basket", hidden.included.length === 1 && hidden.included[0].ticker === "GOODRR");
-  check("  and from the totals", near(hidden.riskDollars, 525));
+  check("  and from the totals", near(hidden.riskDollars, 700));
   check("  the flag is still reported on the hidden row", hidden.rows.find((r) => r.ticker === "LOWRR")!.flags.includes("rr_below_floor"));
 }
 {
@@ -161,7 +161,7 @@ console.log("\n[3] Filters — R:R floor, $5, Q1/Q2");
   check("floor 0 flags nothing", t.rows.every((r) => !r.flags.includes("rr_below_floor")));
   check("  keeps every row", t.included.length === 3, String(t.included.length));
   check("  excludes none from the totals", t.hidden.length === 0);
-  check("  Σ risk$ covers all three", near(t.riskDollars, 1575), String(t.riskDollars));
+  check("  Σ risk$ covers all three", near(t.riskDollars, 2100), String(t.riskDollars));
   check("  and even hideBelowFloor can drop nothing at floor 0",
     computeBasket(rows, [], opts({ rrFloor: 0, hideBelowFloor: true })).included.length === 3);
 
@@ -186,7 +186,7 @@ console.log("\n[3] Filters — R:R floor, $5, Q1/Q2");
   check("Q1 is flagged skip-tier", t.rows.find((r) => r.ticker === "Q1X")!.flags.includes("skip_tier"));
   check("Q2 is flagged skip-tier", t.rows.find((r) => r.ticker === "Q2X")!.flags.includes("skip_tier"));
   check("both hidden by default", t.included.length === 1 && t.included[0].ticker === "Q5X");
-  check("hidden rows contribute nothing to totals", near(t.riskDollars, 525) && near(t.positionDollars, 10_500));
+  check("hidden rows contribute nothing to totals", near(t.riskDollars, 700) && near(t.positionDollars, 14_000));
   const shown = computeBasket(rows, [], opts({ hideSkipTier: false }));
   check("un-hiding shows them but keeps the flag", shown.included.length === 3 && shown.rows[0].flags.includes("skip_tier") === shown.rows[0].flags.includes("skip_tier"));
 }
@@ -244,23 +244,23 @@ console.log("\n[5] Buying power = account − open notional");
   check("open notional prefers the user fill", near(t.openNotional, 6000), String(t.openNotional));
 }
 {
-  // 6 × $10,500 = $63,000 of basket against $60,000 available → over.
+  // 6 × $14,000 = $84,000 of basket against $60,000 available → over.
   const open = [hold({ ticker: "H1" }), hold({ ticker: "H2" })];
   const rows = Array.from({ length: 6 }, (_, i) => cand({ ticker: `T${i}`, sector: `S${i}`, priority: 9 - i }));
   const t = computeBasket(rows, open, opts());
   check("basket over available buying power is flagged", t.overBuyingPower, `${t.positionDollars} vs ${t.buyingPower}`);
-  check("  remaining goes negative by the overage", near(t.buyingPowerRemaining, -3000), String(t.buyingPowerRemaining));
+  check("  remaining goes negative by the overage", near(t.buyingPowerRemaining, -24_000), String(t.buyingPowerRemaining));
 }
 
 // ===========================================================================
 console.log("\n[6] Heat and slots count the open book too");
 // ===========================================================================
 {
-  // Open risk: 100 sh × (50 − 45) = $500 each → $1,000. New: 1 × $525.
+  // Open risk: 100 sh × (50 − 45) = $500 each → $1,000. New: 1 × $700.
   const open = [hold({ ticker: "H1" }), hold({ ticker: "H2" })];
   const t = computeBasket([cand({ ticker: "NEW1" })], open, opts());
   check("open risk$ summed", near(t.openRiskDollars, 1000), String(t.openRiskDollars));
-  check("heat = (open risk + new risk)/account", near(t.heatPct, ((1000 + 525) / DEFAULT_ACCOUNT_SIZE) * 100), String(t.heatPct));
+  check("heat = (open risk + new risk)/account", near(t.heatPct, ((1000 + 700) / DEFAULT_ACCOUNT_SIZE) * 100), String(t.heatPct));
   check("slots used = open + new", t.slotsUsed === 3, String(t.slotsUsed));
   check("slots remaining counts down from 12", t.slotsRemaining === MAX_SLOTS - 3);
   check("not over slots", !t.overSlots);
@@ -290,7 +290,8 @@ console.log("\n[7] Duplicate-of-open guard");
 console.log("\n[8] Trim to fit — sheds the LOWEST P-rank first");
 // ===========================================================================
 {
-  // 6 rows × $10,500 = $63,000 against $60,000 available.
+  // 6 rows × $14,000 = $84,000 against $60,000 available. 5 rows = $70,000 (still over),
+  // 4 rows = $56,000 (fits) → worst-first has to shed TWO.
   const open = [hold({ ticker: "H1" }), hold({ ticker: "H2" })];
   const rows = Array.from({ length: 6 }, (_, i) => cand({ ticker: `T${i}`, sector: `S${i}`, priority: 100 - i }));
   const before = computeBasket(rows, open, opts());
@@ -298,9 +299,11 @@ console.log("\n[8] Trim to fit — sheds the LOWEST P-rank first");
 
   const res = trimToFit(rows, open, opts());
   check("trim makes it fit", res.fits, JSON.stringify(res.reasons));
-  check("  exactly one row was dropped", res.trimmed.length === 1, String(res.trimmed.length));
-  check("  and it was the WORST P-rank (T5, P6)", res.trimmed[0].ticker === "T5", res.trimmed[0].ticker);
-  check("  the survivors are the best five", res.totals.included.map((r) => r.ticker).join(",") === "T0,T1,T2,T3,T4");
+  check("  exactly two rows were dropped", res.trimmed.length === 2, String(res.trimmed.length));
+  check("  worst-first order: T5 (P6) then T4 (P5)",
+    res.trimmed.map((r) => r.ticker).join(",") === "T5,T4", res.trimmed.map((r) => r.ticker).join(","));
+  check("  the survivors are the best four", res.totals.included.map((r) => r.ticker).join(",") === "T0,T1,T2,T3",
+    res.totals.included.map((r) => r.ticker).join(","));
   check("  and now inside buying power", !res.totals.overBuyingPower);
   check("  the reason is reported", res.reasons.some((r) => r.includes("buying power")));
 }
@@ -358,7 +361,7 @@ console.log("\n[9] Order list + P-rank ordering");
   const lines = list.split("\n");
   check("order list has a header + one line per included row", lines.length === 4, String(lines.length));
   check("  header is tab-separated", lines[0] === "TICKER\tSHARES\tSTOP\tENTRY\tTARGET");
-  check("  first data line is the best setup", lines[1].startsWith("HIGH\t105\t95.00\t100.00\t115.00"), lines[1]);
+  check("  first data line is the best setup", lines[1].startsWith("HIGH\t140\t95.00\t100.00\t115.00"), lines[1]);
   check("  hidden rows are excluded from the order list", !buildOrderList(computeBasket([cand({ ticker: "CHEAP", entry: 4, stop: 3.5, target: 6 })], [], opts())).includes("CHEAP"));
 }
 
@@ -481,7 +484,7 @@ console.log("\n[12] Open positions are run-INDEPENDENT and all roll in");
   check("  buying power subtracts all of them", near(t.buyingPower, 45_000), String(t.buyingPower));
   check("  open risk sums every holding", near(t.openRiskDollars, 2500), String(t.openRiskDollars));
   check("  slots count all open + new", t.slotsUsed === 6, String(t.slotsUsed));
-  check("  heat includes all open risk", near(t.heatPct, ((2500 + 525) / DEFAULT_ACCOUNT_SIZE) * 100), String(t.heatPct));
+  check("  heat includes all open risk", near(t.heatPct, ((2500 + 700) / DEFAULT_ACCOUNT_SIZE) * 100), String(t.heatPct));
 
   const secNames = t.sectors.map((x) => x.sector).sort().join(",");
   check("every open sector appears in the panel",
@@ -514,10 +517,11 @@ console.log("\n[13] Account size is a live parameter, not a constant");
   check("halving the account halves risk$", near(at35.riskDollars, at70.riskDollars / 2),
     at35.riskDollars + " vs " + at70.riskDollars);
   check("  and halves the share count", at35.rows[0].shares === Math.floor(at70.rows[0].shares / 2), String(at35.rows[0].shares));
-  // NOT exactly half: shares are FLOORED, so $262.50 / $5 = 52 shares, not 52.5.
-  check("  position$ follows the floored share count", near(at35.positionDollars, 52 * 100), String(at35.positionDollars));
+  // At 1.0% the halved account divides evenly ($350 / $5 = 70 shares exactly), so this
+  // case no longer exercises the floor — the odd-account case below does.
+  check("  position$ follows the share count", near(at35.positionDollars, 70 * 100), String(at35.positionDollars));
   check("  which is within one share of half", Math.abs(at35.positionDollars - at70.positionDollars / 2) <= 100);
-  check("  reward$ likewise follows the floored shares", near(at35.rewardDollars, 52 * 15), String(at35.rewardDollars));
+  check("  reward$ likewise follows the shares", near(at35.rewardDollars, 70 * 15), String(at35.rewardDollars));
   check("doubling the account doubles risk$", near(at140.riskDollars, at70.riskDollars * 2));
 
   const openBook = [hold({ ticker: "H1" })];
@@ -528,11 +532,13 @@ console.log("\n[13] Account size is a live parameter, not a constant");
   // Heat RISES as the account shrinks, but not by exactly 2x: the OPEN risk is a fixed
   // dollar amount while the new-basket risk scales with the account.
   check("heat rises when the account halves", bp35.heatPct > bp70.heatPct, bp35.heatPct + " vs " + bp70.heatPct);
-  check("  heat at 70k = (525 new + 500 open)/70k", near(bp70.heatPct, (1025 / 70_000) * 100), String(bp70.heatPct));
-  check("  heat at 35k = (262.50 new + 500 open)/35k", near(bp35.heatPct, (762.5 / 35_000) * 100), String(bp35.heatPct));
+  check("  heat at 70k = (700 new + 500 open)/70k", near(bp70.heatPct, (1200 / 70_000) * 100), String(bp70.heatPct));
+  check("  heat at 35k = (350 new + 500 open)/35k", near(bp35.heatPct, (850 / 35_000) * 100), String(bp35.heatPct));
 
   const odd = computeBasket(rows, [], opts({ accountSize: 12_345 }));
-  check("an arbitrary account size flows through", near(odd.riskDollars, 12_345 * 0.0075), String(odd.riskDollars));
+  check("an arbitrary account size flows through", near(odd.riskDollars, 12_345 * 0.01), String(odd.riskDollars));
+  // $123.45 risk / $5 stop = 24.69 shares → FLOORED to 24. Keeps floor coverage here.
+  check("  and shares stay floored, never rounded up", odd.rows[0].shares === 24, String(odd.rows[0].shares));
 }
 
 console.log(`\n${failed === 0 ? "✅ ALL PASS" : "❌ FAILURES"} — ${passed} passed, ${failed} failed\n`);

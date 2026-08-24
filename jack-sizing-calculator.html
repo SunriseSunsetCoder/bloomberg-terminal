@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JACK t05 — Position Sizing Calculator</title>
+<style>
+  :root{
+    --bg:#0b1220; --card:#131c2e; --card2:#0f1728; --line:#243349;
+    --fg:#e6edf7; --mut:#8ba0bd; --accent:#3b82f6; --accent2:#60a5fa;
+    --good:#22c55e; --warn:#f59e0b; --bad:#ef4444; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.45}
+  .wrap{max-width:960px;margin:0 auto;padding:24px 18px 60px}
+  h1{font-size:20px;margin:0 0 2px;letter-spacing:.3px}
+  .sub{color:var(--mut);font-size:12.5px;margin-bottom:20px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--mut);margin:0 0 14px;font-weight:600}
+  label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
+  input,select{width:100%;background:var(--card2);border:1px solid var(--line);color:var(--fg);
+    border-radius:8px;padding:9px 11px;font-size:15px;font-family:var(--mono)}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  .row{display:flex;gap:12px}.row>div{flex:1}
+  .seg{display:flex;gap:8px;margin-top:4px}
+  .seg button{flex:1;background:var(--card2);border:1px solid var(--line);color:var(--mut);
+    padding:8px;border-radius:8px;cursor:pointer;font-size:12.5px;font-weight:600}
+  .seg button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .tiers{display:flex;gap:8px;margin-top:4px}
+  .tiers button{flex:1;background:var(--card2);border:1px solid var(--line);color:var(--mut);
+    padding:10px 6px;border-radius:8px;cursor:pointer;font-weight:700}
+  .tiers button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .out{background:linear-gradient(180deg,#16233b,#111a2b);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .big{font-family:var(--mono);font-size:44px;font-weight:700;line-height:1;color:var(--accent2);margin:2px 0}
+  .big small{font-size:15px;color:var(--mut);font-weight:500}
+  .kv{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px dashed var(--line);font-size:14px}
+  .kv:last-child{border-bottom:none}
+  .kv b{font-family:var(--mono);font-weight:600}
+  .flags{margin-top:12px;display:flex;flex-direction:column;gap:7px}
+  .flag{font-size:12.5px;padding:8px 11px;border-radius:8px;display:flex;gap:8px;align-items:flex-start}
+  .flag.ok{background:rgba(34,197,94,.10);color:#86efac;border:1px solid rgba(34,197,94,.3)}
+  .flag.w{background:rgba(245,158,11,.10);color:#fcd34d;border:1px solid rgba(245,158,11,.3)}
+  .flag.e{background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.35)}
+  table{width:100%;border-collapse:collapse;margin-top:6px;font-size:13px}
+  th,td{text-align:right;padding:8px 6px;border-bottom:1px solid var(--line);font-family:var(--mono)}
+  th{color:var(--mut);font-weight:600;font-family:inherit;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  th:first-child,td:first-child{text-align:left}
+  tr.hl td{color:var(--accent2);font-weight:700}
+  .rules{margin-top:16px;font-size:12.5px;color:var(--mut)}
+  .rules li{margin:5px 0}
+  .foot{margin-top:20px;font-size:11px;color:#5f728c}
+  code{font-family:var(--mono);color:var(--accent2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>JACK&nbsp;t05 — Position Sizing Calculator</h1>
+  <div class="sub">Conviction-tiered sizing off the frozen edge. Enter a setup, get share count + dollar position, with the rules enforced. <b>Frictionless model — real fills cost more; size conservatively.</b></div>
+
+  <div class="grid">
+    <!-- INPUTS -->
+    <div class="card">
+      <h2>Setup</h2>
+      <label>Account size ($)</label>
+      <input id="acct" type="number" value="350000" step="1000">
+
+      <label>Risk scheme</label>
+      <div class="seg" id="scheme">
+        <button data-s="bal" class="on">Balanced&nbsp;· same heat<br><small>0.30 / 0.50 / 1.00%</small></button>
+        <button data-s="agg">Aggressive<br><small>0.35 / 0.55 / 0.85%</small></button>
+      </div>
+
+      <label>Tier (handle_score quintile)</label>
+      <div class="tiers" id="tiers">
+        <button data-q="3">Q3</button>
+        <button data-q="4">Q4</button>
+        <button data-q="5" class="on">Q5</button>
+      </div>
+
+      <label>Risk per trade (% of account) — auto from tier, editable</label>
+      <input id="riskpct" type="number" value="1.0" step="0.05">
+
+      <div class="row">
+        <div><label>Entry ($)</label><input id="entry" type="number" placeholder="e.g. 42.50" step="0.01"></div>
+        <div><label>Stop ($)</label><input id="stop" type="number" placeholder="e.g. 39.10" step="0.01"></div>
+      </div>
+      <label>t05 target ($) — optional (breakout + ½ cup depth)</label>
+      <input id="target" type="number" placeholder="optional, for R:R" step="0.01">
+    </div>
+
+    <!-- OUTPUT -->
+    <div class="out">
+      <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--mut);margin:0 0 10px;font-weight:600">Order</h2>
+      <div class="big" id="shares">—<small> shares</small></div>
+      <div class="kv"><span>Position</span><b id="posn">—</b></div>
+      <div class="kv"><span>% of account</span><b id="pospct">—</b></div>
+      <div class="kv"><span>Risk (loss at stop)</span><b id="riskd">—</b></div>
+      <div class="kv"><span>Stop distance</span><b id="stopd">—</b></div>
+      <div class="kv" id="rrRow" style="display:none"><span>R:R to t05</span><b id="rr">—</b></div>
+      <div class="kv" id="tpRow" style="display:none"><span>Profit at target</span><b id="tp">—</b></div>
+      <div class="flags" id="flags"></div>
+    </div>
+  </div>
+
+  <!-- COMPARE -->
+  <div class="card" style="margin-top:16px">
+    <h2>Same setup, all tiers (scheme rates)</h2>
+    <table id="cmp">
+      <thead><tr><th>Tier</th><th>Risk %</th><th>$ Risk</th><th>Shares</th><th>Position $</th><th>% Acct</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="rules">
+      <ul>
+        <li><b>Only trade Q3–Q5.</b> Q1/Q2 are SKIP — no size, breakout or not.</li>
+        <li><b>Price ≥ $5</b> (liquidity floor). <b>Max 3 open per sector.</b> Run ~12–16 concurrent slots.</li>
+        <li><b>Q5 hard cap 1.0% risk</b> — never more, no matter how good it looks.</li>
+        <li>Entry = next open after a <b>daily close above the rim</b>. Stop = handle low. Target = breakout + ½ cup depth (t05).</li>
+        <li>Watch buying power: ~12 positions at these sizes can exceed a cash account — capital, not just risk, caps your slots.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="foot" id="foot"></div>
+</div>
+
+<script>
+const SCHEMES = { bal:{3:0.30,4:0.50,5:1.00}, agg:{3:0.35,4:0.55,5:0.85} };
+const CAP = { 3:0.60, 4:0.80, 5:1.00 };      // hard caps (% risk) per tier
+let scheme='bal', tier=5;
+
+const $=id=>document.getElementById(id);
+const money=n=>'$'+Math.round(n).toLocaleString();
+const pct=n=>n.toFixed(2)+'%';
+
+function setScheme(s){scheme=s;[...$('scheme').children].forEach(b=>b.classList.toggle('on',b.dataset.s===s));syncRisk();calc();}
+function setTier(q){tier=q;[...$('tiers').children].forEach(b=>b.classList.toggle('on',+b.dataset.q===q));syncRisk();calc();}
+function syncRisk(){$('riskpct').value = SCHEMES[scheme][tier];}
+
+$('scheme').addEventListener('click',e=>{const b=e.target.closest('button');if(b)setScheme(b.dataset.s);});
+$('tiers').addEventListener('click',e=>{const b=e.target.closest('button');if(b)setTier(+b.dataset.q);});
+['acct','riskpct','entry','stop','target'].forEach(id=>$(id).addEventListener('input',calc));
+
+function sizeFor(acct, riskPct, entry, stop){
+  const rps = entry - stop;
+  const riskD = acct * riskPct/100;
+  const shares = Math.max(0, Math.floor(riskD / rps));
+  return {rps, riskD, shares, actualRisk:shares*rps, posn:shares*entry};
+}
+
+function calc(){
+  const acct=+$('acct').value||0, riskPct=+$('riskpct').value||0;
+  const entry=+$('entry').value||0, stop=+$('stop').value||0, target=+$('target').value||0;
+  const flags=[];
+  const ok = acct>0 && entry>0 && stop>0 && stop<entry;
+
+  if(!ok){
+    $('shares').innerHTML='—<small> shares</small>';
+    ['posn','pospct','riskd','stopd'].forEach(id=>$(id).textContent='—');
+    $('rrRow').style.display='none';$('tpRow').style.display='none';
+    if(entry>0&&stop>0&&stop>=entry) flags.push(['e','Stop must be below entry (long setup).']);
+    renderFlags(flags); renderCompare(acct,entry,stop); return;
+  }
+
+  const r = sizeFor(acct, riskPct, entry, stop);
+  $('shares').innerHTML = r.shares.toLocaleString()+'<small> shares</small>';
+  $('posn').textContent = money(r.posn);
+  $('pospct').textContent = pct(r.posn/acct*100);
+  $('riskd').textContent = money(r.actualRisk)+'  ('+pct(r.actualRisk/acct*100)+')';
+  $('stopd').textContent = pct(r.rps/entry*100);
+
+  if(target>entry){
+    $('rrRow').style.display='flex'; $('tpRow').style.display='flex';
+    $('rr').textContent = (( target-entry)/r.rps).toFixed(2)+' : 1';
+    $('tp').textContent = money(r.shares*(target-entry));
+  } else {$('rrRow').style.display='none';$('tpRow').style.display='none';}
+
+  // guardrails
+  if(entry<5) flags.push(['e','Price below $5 liquidity floor — skip this one.']);
+  if(riskPct>CAP[tier]) flags.push(['w','Risk '+pct(riskPct)+' is above the Q'+tier+' cap of '+pct(CAP[tier])+'. Dial it back.']);
+  if(tier===5 && riskPct>1.0) flags.push(['e','Q5 hard cap is 1.0% ('+money(acct*0.01)+'). Never risk more on one name.']);
+  if(r.posn>acct) flags.push(['w','Position '+money(r.posn)+' exceeds account — needs margin, or the stop is very tight. Check buying power.']);
+  else if(r.posn/acct>0.20) flags.push(['w','Position is '+pct(r.posn/acct*100)+' of the account — heavy for one name; fine only if few slots are open.']);
+  if(r.rps/entry>0.10) flags.push(['w','Stop is '+pct(r.rps/entry*100)+' wide — bigger than the strategy’s ~10% cap; double-check the levels.']);
+  if(r.shares===0) flags.push(['e','Zero shares — risk budget too small for this stop distance.']);
+  if(flags.length===0) flags.push(['ok','Clean: within tier, liquidity, and cap rules.']);
+  renderFlags(flags);
+  renderCompare(acct,entry,stop);
+}
+
+function renderFlags(flags){
+  $('flags').innerHTML = flags.map(([c,t])=>`<div class="flag ${c}">${c==='e'?'⛔':c==='w'?'⚠️':'✅'} <span>${t}</span></div>`).join('');
+}
+
+function renderCompare(acct,entry,stop){
+  const tb=$('cmp').querySelector('tbody');
+  if(!(acct>0&&entry>0&&stop>0&&stop<entry)){tb.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--mut)">enter a valid entry & stop</td></tr>';return;}
+  tb.innerHTML=[3,4,5].map(q=>{
+    const rp=SCHEMES[scheme][q]; const r=sizeFor(acct,rp,entry,stop);
+    return `<tr class="${q===tier?'hl':''}"><td>Q${q}</td><td>${rp.toFixed(2)}%</td><td>${money(r.actualRisk)}</td><td>${r.shares.toLocaleString()}</td><td>${money(r.posn)}</td><td>${(r.posn/acct*100).toFixed(1)}%</td></tr>`;
+  }).join('');
+}
+
+$('foot').textContent='Model is frictionless (no commission/slippage) and assumes clean fills — real-world costs are largest on small/microcap names, so treat these as ceilings. Not financial advice.';
+syncRisk(); calc();
+</script>
+</body>
+</html>

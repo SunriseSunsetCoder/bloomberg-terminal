@@ -49,7 +49,7 @@ export type RiskScheme = "balanced" | "aggressive";
 
 /** Conviction-tier risk, in PERCENT of account. */
 export const TIER_RISK_PCT: Record<RiskScheme, Record<"Q3" | "Q4" | "Q5", number>> = {
-  balanced: { Q3: 0.3, Q4: 0.5, Q5: 0.75 },
+  balanced: { Q3: 0.3, Q4: 0.5, Q5: 1.0 },
   aggressive: { Q3: 0.35, Q4: 0.55, Q5: 0.85 },
 };
 

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JACK t05 — Weekly Basket Sizing (V2)</title>
+<style>
+  :root{
+    --bg:#0b1220;--card:#131c2e;--card2:#0f1728;--line:#243349;--fg:#e6edf7;--mut:#8ba0bd;
+    --accent:#3b82f6;--accent2:#60a5fa;--good:#22c55e;--warn:#f59e0b;--bad:#ef4444;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.4}
+  .wrap{max-width:1240px;margin:0 auto;padding:22px 16px 60px}
+  h1{font-size:20px;margin:0 0 2px}
+  .sub{color:var(--mut);font-size:12.5px;margin-bottom:16px}
+  .bar{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:16px}
+  .bar .fld label{display:block;font-size:11px;color:var(--mut);margin-bottom:4px}
+  .bar input{background:var(--card2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:8px 10px;font-family:var(--mono);font-size:15px;width:160px}
+  .seg{display:flex;gap:6px}
+  .seg button{background:var(--card2);border:1px solid var(--line);color:var(--mut);padding:8px 12px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600}
+  .seg button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn{background:var(--card2);border:1px solid var(--line);color:var(--mut);padding:8px 12px;border-radius:8px;cursor:pointer;font-size:12px}
+  .btn:hover{border-color:var(--accent);color:var(--fg)}
+  .tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+  table{border-collapse:collapse;width:100%;min-width:1120px}
+  th,td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px;text-align:right;white-space:nowrap}
+  th{color:var(--mut);font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;font-weight:600;text-align:right;background:var(--card2);position:sticky;top:0}
+  th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+  td input,td select{background:var(--card2);border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:6px 7px;font-family:var(--mono);font-size:13px}
+  td input{width:82px}td input.tick{width:66px;text-transform:uppercase}td select{font-family:inherit}
+  td.calc{font-family:var(--mono);color:var(--fg)}
+  td.dim{color:var(--mut)}
+  .sep{border-left:2px solid var(--line)}
+  tr.bad td{background:rgba(239,68,68,.06)}
+  tfoot td{border-top:2px solid var(--line);border-bottom:none;font-weight:700;font-family:var(--mono);background:var(--card2);font-size:14px}
+  tfoot td:first-child{font-family:inherit;text-transform:uppercase;font-size:11px;letter-spacing:.5px;color:var(--mut)}
+  .totrow{display:flex;flex-wrap:wrap;gap:14px;margin-top:16px}
+  .tile{flex:1;min-width:150px;background:linear-gradient(180deg,#16233b,#111a2b);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .tile .lab{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px}
+  .tile .val{font-family:var(--mono);font-size:26px;font-weight:700;color:var(--accent2);margin-top:4px}
+  .tile .sub2{font-size:11.5px;color:var(--mut);margin-top:2px}
+  .flags{margin-top:14px;display:flex;flex-direction:column;gap:7px}
+  .flag{font-size:12.5px;padding:8px 11px;border-radius:8px}
+  .flag.ok{background:rgba(34,197,94,.10);color:#86efac;border:1px solid rgba(34,197,94,.3)}
+  .flag.w{background:rgba(245,158,11,.10);color:#fcd34d;border:1px solid rgba(245,158,11,.3)}
+  .flag.e{background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.35)}
+  .rules{margin-top:16px;font-size:12px;color:var(--mut)}
+  .rules li{margin:4px 0}
+  .foot{margin-top:18px;font-size:11px;color:#5f728c}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>JACK&nbsp;t05 — Weekly Basket Sizing <span style="color:var(--mut);font-size:14px">V2</span></h1>
+  <div class="sub">Size up to 12 trades at once. Per-row shares/position/risk + weekly totals, with tier sizing, Q5 cap, $5 floor, sector-3 and buying-power checks. Frictionless — treat as ceilings.</div>
+
+  <div class="bar">
+    <div class="fld"><label>Account size ($)</label><input id="acct" type="number" value="350000" step="1000"></div>
+    <div class="fld"><label>Risk scheme (sets tier risk %)</label>
+      <div class="seg" id="scheme">
+        <button data-s="bal" class="on">Balanced&nbsp;0.30/0.50/1.00</button>
+        <button data-s="agg">Aggressive&nbsp;0.35/0.55/0.85</button>
+      </div>
+    </div>
+    <div class="fld"><label>&nbsp;</label><button class="btn" id="clear">Clear all rows</button></div>
+  </div>
+
+  <div class="tblwrap">
+    <table>
+      <thead><tr>
+        <th>#</th><th>Ticker</th><th>Tier</th><th>Sector</th><th>Risk %</th><th>Stop</th><th>Entry/Now</th><th>Target</th>
+        <th class="sep">Risk $</th><th>Reward $</th><th>Shares</th><th>Position $</th><th>% Acct</th><th>Stop&nbsp;%</th><th>R:R</th><th>⚑</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+      <tfoot><tr>
+        <td colspan="8">WEEKLY TOTALS</td>
+        <td class="sep" id="tRisk">—</td><td id="tReward">—</td><td id="tShares">—</td><td id="tPos">—</td><td id="tPct">—</td><td></td><td></td><td id="tN">—</td>
+      </tr></tfoot>
+    </table>
+  </div>
+
+  <div class="totrow">
+    <div class="tile"><div class="lab">Total shares (week)</div><div class="val" id="bigShares">—</div><div class="sub2" id="bigN">0 trades</div></div>
+    <div class="tile"><div class="lab">Total position $</div><div class="val" id="bigPos">—</div><div class="sub2" id="bigGross">gross exposure —</div></div>
+    <div class="tile"><div class="lab">Total risk $ (heat)</div><div class="val" id="bigRisk">—</div><div class="sub2" id="bigHeat">— of account</div></div>
+    <div class="tile"><div class="lab">Total reward $ (at targets)</div><div class="val" id="bigReward">—</div><div class="sub2" id="bigRR">reward:risk —</div></div>
+  </div>
+
+  <div class="flags" id="flags"></div>
+
+  <div class="rules">
+    <ul>
+      <li><b>Only Q3–Q5.</b> Tier risk auto-fills from the scheme; editable per row. <b>Q5 hard cap 1.0%.</b></li>
+      <li><b>Price ≥ $5</b> · <b>max 3 open per sector</b> · watch <b>gross exposure</b> — >100% needs margin (capital, not risk, caps your slots).</li>
+      <li>Entry = next open after a daily close above the rim. Stop = handle low. Target = breakout + ½ cup depth (t05). Both exits = intraday-touch resting orders (bracket / Trade Armor).</li>
+    </ul>
+  </div>
+  <div class="foot" id="foot"></div>
+</div>
+
+<script>
+const SCHEMES={bal:{3:0.30,4:0.50,5:1.00},agg:{3:0.35,4:0.55,5:0.85}};
+const CAP={3:0.60,4:0.80,5:1.00};
+const SECTORS=['—','Comm Svcs','Cons Disc','Cons Staples','Energy','Financials','Health Care','Industrials','Info Tech','Materials','Real Estate','Utilities'];
+const NROWS=12; let scheme='bal';
+const $=id=>document.getElementById(id);
+const money=n=>'$'+Math.round(n).toLocaleString();
+const pctf=n=>n.toFixed(2)+'%';
+
+// build rows
+const rowsEl=$('rows');
+for(let i=0;i<NROWS;i++){
+  const tr=document.createElement('tr'); tr.dataset.i=i;
+  tr.innerHTML=`
+    <td class="dim">${i+1}</td>
+    <td><input class="tick" data-f="ticker" placeholder="TICK"></td>
+    <td><select data-f="tier"><option value="3">Q3</option><option value="4" selected>Q4</option><option value="5">Q5</option></select></td>
+    <td><select data-f="sector">${SECTORS.map((s,j)=>`<option value="${j===0?'':s}">${s}</option>`).join('')}</select></td>
+    <td><input data-f="risk" type="number" step="0.05" style="width:64px"></td>
+    <td><input data-f="stop" type="number" step="0.01"></td>
+    <td><input data-f="entry" type="number" step="0.01"></td>
+    <td><input data-f="target" type="number" step="0.01" placeholder="opt"></td>
+    <td class="sep calc" data-o="riskd">—</td>
+    <td class="calc" data-o="reward">—</td>
+    <td class="calc" data-o="shares">—</td>
+    <td class="calc" data-o="pos">—</td>
+    <td class="calc dim" data-o="pct">—</td>
+    <td class="calc dim" data-o="stopd">—</td>
+    <td class="calc dim" data-o="rr">—</td>
+    <td data-o="flag">—</td>`;
+  rowsEl.appendChild(tr);
+}
+// default risk fill
+document.querySelectorAll('tr[data-i]').forEach(tr=>{ tr.querySelector('[data-f="risk"]').value = SCHEMES[scheme][+tr.querySelector('[data-f="tier"]').value]; });
+
+$('scheme').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;scheme=b.dataset.s;
+  [...$('scheme').children].forEach(x=>x.classList.toggle('on',x.dataset.s===scheme));
+  document.querySelectorAll('tr[data-i]').forEach(tr=>{tr.querySelector('[data-f="risk"]').value=SCHEMES[scheme][+tr.querySelector('[data-f="tier"]').value];});
+  calc();});
+
+rowsEl.addEventListener('input',e=>{
+  if(e.target.dataset.f==='tier'){const tr=e.target.closest('tr');tr.querySelector('[data-f="risk"]').value=SCHEMES[scheme][+e.target.value];}
+  calc();
+});
+rowsEl.addEventListener('change',e=>{if(e.target.dataset.f==='sector')calc();});
+$('clear').addEventListener('click',()=>{document.querySelectorAll('tr[data-i] input').forEach(i=>i.value=i.classList.contains('tick')?'':'');
+  document.querySelectorAll('tr[data-i]').forEach(tr=>{tr.querySelector('[data-f="tier"]').value='4';tr.querySelector('[data-f="sector"]').value='';tr.querySelector('[data-f="risk"]').value=SCHEMES[scheme][4];});calc();});
+$('acct').addEventListener('input',calc);
+
+function calc(){
+  const acct=+$('acct').value||0;
+  let sumSh=0,sumPos=0,sumRisk=0,sumReward=0,n=0; const sect={}; const flags=[];
+  document.querySelectorAll('tr[data-i]').forEach(tr=>{
+    const g=f=>tr.querySelector(`[data-f="${f}"]`).value;
+    const o=(k,v)=>tr.querySelector(`[data-o="${k}"]`).textContent=v;
+    const tier=+g('tier'), rp=+g('risk')||0, entry=+g('entry')||0, stop=+g('stop')||0, tgt=+g('target')||0, sc=g('sector'), tk=g('ticker');
+    tr.classList.remove('bad');
+    if(!(entry>0&&stop>0&&rp>0)){['riskd','reward','shares','pos','pct','stopd','rr','flag'].forEach(k=>o(k, k==='flag'?'':'—'));return;}
+    if(stop>=entry){['riskd','reward','shares','pos','pct','stopd','rr'].forEach(k=>o(k,'—'));o('flag','⛔');tr.classList.add('bad');return;}
+    const rps=entry-stop, riskD=acct*rp/100, sh=Math.max(0,Math.floor(riskD/rps));
+    const aRisk=sh*rps, pos=sh*entry, reward=tgt>entry ? sh*(tgt-entry) : 0;
+    o('riskd',money(aRisk)); o('reward', tgt>entry ? money(reward) : '—'); o('shares',sh.toLocaleString()); o('pos',money(pos));
+    o('pct',(pos/acct*100).toFixed(1)+'%'); o('stopd',(rps/entry*100).toFixed(1)+'%');
+    o('rr', tgt>entry ? ((tgt-entry)/rps).toFixed(2) : '—');
+    // row flag
+    let fl='✅';
+    if(entry<5) fl='⚠️$';
+    if(rp>CAP[tier]) fl='⚠️cap';
+    o('flag',fl);
+    sumSh+=sh; sumPos+=pos; sumRisk+=aRisk; sumReward+=reward; n++;
+    if(sc){sect[sc]=(sect[sc]||0)+1;}
+  });
+  // totals
+  $('tShares').textContent=sumSh.toLocaleString(); $('tPos').textContent=money(sumPos);
+  $('tRisk').textContent=money(sumRisk); $('tReward').textContent=sumReward>0?money(sumReward):'—'; $('tPct').textContent=acct?((sumPos/acct*100).toFixed(0)+'%'):'—'; $('tN').textContent=n;
+  $('bigReward').textContent=sumReward>0?money(sumReward):'—'; $('bigRR').textContent='reward:risk '+(sumRisk>0&&sumReward>0?(sumReward/sumRisk).toFixed(2)+'×':'—');
+  $('bigShares').textContent=sumSh.toLocaleString(); $('bigN').textContent=n+' trade'+(n===1?'':'s');
+  $('bigPos').textContent=money(sumPos); $('bigGross').textContent='gross exposure '+(acct?(sumPos/acct*100).toFixed(0)+'%':'—');
+  $('bigRisk').textContent=money(sumRisk); $('bigHeat').textContent=(acct?(sumRisk/acct*100).toFixed(2)+'%':'—')+' of account';
+  // portfolio flags
+  if(acct&&sumPos>acct) flags.push(['w','Gross exposure '+(sumPos/acct*100).toFixed(0)+'% — exceeds cash, needs margin. Capital is capping you before risk is; trim slots or sizes.']);
+  if(acct&&sumRisk/acct>0.10) flags.push(['w','Portfolio heat '+(sumRisk/acct*100).toFixed(1)+'% — that’s a lot at risk at once across the book.']);
+  Object.entries(sect).forEach(([s,c])=>{ if(c>3) flags.push(['e','Sector "'+s+'" has '+c+' positions — max is 3. Drop the lowest-tier ones.']); });
+  if(n>0 && flags.length===0) flags.push(['ok',n+' trades sized — within sector, liquidity, cap and buying-power limits.']);
+  $('flags').innerHTML=flags.map(([c,t])=>`<div class="flag ${c}">${c==='e'?'⛔':c==='w'?'⚠️':'✅'} ${t}</div>`).join('');
+}
+$('foot').textContent='Frictionless model (no commission/slippage), clean fills assumed — largest cost on small/microcaps. Risk = loss at stop (1R); position ≈ risk ÷ stop-distance. Not financial advice.';
+calc();
+</script>
+</body>
+</html>
