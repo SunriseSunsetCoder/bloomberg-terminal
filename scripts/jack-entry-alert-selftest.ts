@@ -14,7 +14,7 @@
  *
  * Run:  npx tsx scripts/jack-entry-alert-selftest.ts
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectFire, findTouchExit, CONFIRM_WINDOW_BARS, type Bar } from "../lib/jack/outcome-tracker";
@@ -457,15 +457,75 @@ console.log("\n[15] SKIP setups produce NO buy alert (frozen SIZE_MAP: Q1/Q2 nev
     wouldFire({ bars, handleLowDate: HLD, rim: null, sizeBucket: "skip" }).reason === "skipped: no rim");
 }
 {
-  // The predicate itself, directly.
-  check("isTradeableSetup: skip bucket -> false", !isTradeableSetup({ sizeBucket: "skip" }));
-  check("isTradeableSetup: SKIP uppercase/padded -> false", !isTradeableSetup({ sizeBucket: "  SKIP  " }));
-  check("isTradeableSetup: full -> true", isTradeableSetup({ sizeBucket: "full" }));
-  check("isTradeableSetup: half -> true", isTradeableSetup({ sizeBucket: "half" }));
-  check("isTradeableSetup: Q1 tier -> false", !isTradeableSetup({ tier: "Q1" }));
-  check("isTradeableSetup: q2 lowercase -> false", !isTradeableSetup({ tier: "q2" }));
-  check("isTradeableSetup: Q3/Q4/Q5 -> true", ["Q3", "Q4", "Q5"].every((t) => isTradeableSetup({ tier: t })));
-  check("isTradeableSetup: empty -> true (no positive skip evidence)", isTradeableSetup({}));
+  // ---- THE SHARED TRUTH TABLE ------------------------------------------------
+  // isTradeableSetup has a Python mirror — is_tradeable_setup() in
+  // pipeline/run_daily.py — which cannot import this module. The rule is therefore
+  // written twice, and lib/jack/tradeable-truth-table.json is what stops the two
+  // drifting: BOTH selftests read THIS FILE rather than restating the cases.
+  //
+  // The Python side asserts the identical table in `run_daily.py --selftest`
+  // section [12]. Change the rule in one language and the other fails.
+  const truth = JSON.parse(
+    readFileSync(join(process.cwd(), "lib", "jack", "tradeable-truth-table.json"), "utf8")
+  ) as { cases: { sizeBucket: string | null; tier: string | null; expected: boolean; changedByFix: boolean; why: string }[] };
+
+  check("shared truth table loads", truth.cases.length > 0);
+  const failures = truth.cases
+    .map((c) => ({ c, got: isTradeableSetup({ sizeBucket: c.sizeBucket, tier: c.tier }) }))
+    .filter(({ c, got }) => got !== c.expected)
+    .map(({ c, got }) => `bucket=${JSON.stringify(c.sizeBucket)} tier=${JSON.stringify(c.tier)} expected ${c.expected} got ${got} (${c.why})`);
+  check(
+    `all ${truth.cases.length} shared cases pass on the TYPESCRIPT side`,
+    failures.length === 0,
+    failures.slice(0, 3).join(" | ")
+  );
+
+  // The regression that motivated the reorder: the bucket used to short-circuit
+  // before the tier was read, so a Q1 row carrying a full bucket was TRADEABLE and
+  // could raise a PROMOTED / ENTRY CONFIRMED alert for a tier that never trades.
+  check("Q1 + full bucket -> false (the tier VETOES)", !isTradeableSetup({ tier: "Q1", sizeBucket: "full" }));
+  check("Q2 + half bucket -> false", !isTradeableSetup({ tier: "Q2", sizeBucket: "half" }));
+  check("empty -> true (no positive skip evidence)", isTradeableSetup({}));
+
+  // ---- POSITIVE PATH, asserted explicitly ------------------------------------
+  // isTradeableSetup gates the Basket Sizer (basket.ts:101) and the LIVE display
+  // group (combine-decisions.ts:142), so a reorder that broke the positive path
+  // would silently SHRINK the basket instead of failing loudly. Checked by name.
+  for (const tier of ["Q3", "Q4", "Q5"]) {
+    for (const bucket of ["full", "half"]) {
+      check(`${tier} + ${bucket} -> TRUE`, isTradeableSetup({ tier, sizeBucket: bucket }));
+    }
+    check(`${tier} + skip -> false`, !isTradeableSetup({ tier, sizeBucket: "skip" }));
+    check(`${tier} + no bucket -> TRUE`, isTradeableSetup({ tier, sizeBucket: null }));
+  }
+  for (const tier of ["Q1", "Q2", "Q3", "Q4", "Q5", null]) {
+    check(`every tier + skip -> false (tier=${tier})`, !isTradeableSetup({ tier, sizeBucket: "skip" }));
+  }
+
+  // ---- BEHAVIOUR-NEUTRALITY, machine-checked ---------------------------------
+  // The OLD rule, restated ONLY here, so "the fix changes nothing for Q3/Q4/Q5" is
+  // PROVED against the whole table rather than asserted in prose.
+  const oldRule = (s: { sizeBucket?: string | null; tier?: string | null }): boolean => {
+    const b = (s.sizeBucket ?? "").toLowerCase().trim();
+    if (b === "skip") return false;
+    if (b === "full" || b === "half") return true;
+    const t = (s.tier ?? "").toUpperCase().trim();
+    if (t === "Q1" || t === "Q2") return false;
+    return true;
+  };
+  const differ = truth.cases.filter(
+    (c) => oldRule({ sizeBucket: c.sizeBucket, tier: c.tier }) !== isTradeableSetup({ sizeBucket: c.sizeBucket, tier: c.tier })
+  );
+  const claimed = truth.cases.filter((c) => c.changedByFix);
+  check(`exactly ${claimed.length} rows change behaviour`, differ.length === claimed.length, `${differ.length} differ, table claims ${claimed.length}`);
+  check("  the table's changedByFix flags match reality", differ.every((c) => c.changedByFix) && claimed.every((c) => differ.includes(c)));
+  check(
+    "  EVERY changed row is tier Q1/Q2",
+    differ.every((c) => ["Q1", "Q2"].includes((c.tier ?? "").toUpperCase().trim())),
+    JSON.stringify(differ.map((c) => [c.sizeBucket, c.tier]))
+  );
+  check("  EVERY changed row had a full/half bucket", differ.every((c) => ["full", "half"].includes((c.sizeBucket ?? "").toLowerCase().trim())));
+  check("  NOTHING on the Q3/Q4/Q5 positive path changed", !differ.some((c) => ["Q3", "Q4", "Q5"].includes((c.tier ?? "").toUpperCase().trim())));
 }
 
 // ===========================================================================

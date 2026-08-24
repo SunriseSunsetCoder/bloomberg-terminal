@@ -236,7 +236,21 @@ export function evalPromotionAlert(args: {
   handleLowDate: string;
   /** Fired on an earlier bar in the window, not today. */
   late: boolean;
+  /** Conviction quintile Q3/Q4/Q5 — only ever these, per isTradeableSetup. */
+  tier?: string | null;
+  /** FULL / HALF sizing directive. */
+  sizeBucket?: string | null;
 }): Alert {
+  // Conviction line, same shape ENTRY CONFIRMED uses, so the two alerts about the
+  // same setup read alike. "It went live" without the tier forced a board lookup to
+  // answer the only question that follows: how big?
+  const meta = [
+    args.tier ? args.tier.toUpperCase() : null,
+    args.sizeBucket ? `size ${args.sizeBucket.toUpperCase()}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return mk(
     "entry_trigger",
     "system",
@@ -246,6 +260,7 @@ export function evalPromotionAlert(args: {
       (args.late
         ? `Fired earlier in the window — entering now is OFF-parity vs the backtest\n`
         : `The setup is tradeable from the next open\n`) +
+      (meta ? `${meta}\n` : "") +
       `close-confirmed · pending → live`
   );
 }
@@ -1489,6 +1504,10 @@ export async function promotePendingToLive(
           fireBar: verdict.fireBar as number,
           handleLowDate: s.handleLowDate,
           late: verdict.firedStatus === "late",
+          // Already in scope — both are handed to isPromotedToLive just above.
+          // The isTradeableSetup gate has already run, so tier here is Q3/Q4/Q5.
+          tier: s.tier,
+          sizeBucket: s.sizeBucket,
         });
         const key = promotionMarkerKey(s.ticker, s.handleLowDate);
         if (await emitAlert(alert, { scope: boardScope, key }, stats)) r.alerted++;
