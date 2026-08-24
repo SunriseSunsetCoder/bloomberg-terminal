@@ -6,7 +6,7 @@ pipeline/run_daily.py — JACK daily pipeline, PHASE 7: the orchestrator.
 Chains the proven stage scripts in order and STOPS at the first failure:
 
     calendar guard -> tiingo_pull.py -> run_detector.py (--check-only, then real)
-                   -> ingest.py -> alert (STUB, Phase 5 fills it in)
+                   -> ingest.py -> Telegram fire alert (Phase 5)
 
     python pipeline/run_daily.py                  # the nightly run
     python pipeline/run_daily.py --skip-pull      # detect+ingest on the current corpus
@@ -40,10 +40,19 @@ EXIT CODES — the tens digit names the stage that failed
     44  INGEST persistence unavailable (ingest exit 5) — pointed at Vercel
     45  INGEST wrote nothing / could not verify (ingest exit 6)
 
-    50  ALERT failed (reserved for Phase 5; the stub cannot fail)
+    50  ALERT failed (RESERVED, and deliberately never returned — see below)
 
 Task Scheduler surfaces this as "Last Run Result", so a glance at the task
 history names the failing stage without opening a log.
+
+WHY 50 IS NEVER RETURNED
+    By the time the alert runs, the board is already written and correct. Failing
+    the run over a notification bug would be wrong. But a quiet swallow is worse:
+    no ping AND no error is indistinguishable from "nothing to report", which is
+    the silent-success failure this pipeline exists to remove. So an alert failure
+    keeps exit 0 and is made LOUD instead — a banner at the point of failure, a
+    block on the RESULT line ("[ALERT DEGRADED xN]"), and a best-effort Telegram
+    notice. See ALERT_PROBLEMS / alert_problem().
 
 WHY A WEEKEND IS EXIT 0
     The job fires 365 nights a year and ~250 of them are trading days. If every
@@ -97,10 +106,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -578,40 +590,409 @@ def stage_detect(tee: Tee, args) -> Tuple[int, Optional[Path]]:
     return EXIT_OK, watchlist
 
 
-def stage_ingest(tee: Tee, args, watchlist: Optional[Path]) -> int:
+def stage_ingest(tee: Tee, args, watchlist: Optional[Path]) -> Tuple[int, List[str]]:
     tee.rule("STAGE 3/4 — INGEST")
 
     if args.dry_run:
         tee.line("--dry-run: nothing to ingest (the detector did not run).")
-        return EXIT_OK
+        return EXIT_OK, []
 
     if watchlist is None:
         tee.line("no watchlist from the detector — cannot ingest.")
-        return EXIT_INGEST_NO_WATCHLIST
+        return EXIT_INGEST_NO_WATCHLIST, []
 
     argv: List[str] = [str(PIPELINE_DIR / "ingest.py"), "--watchlist", str(watchlist)]
     if args.no_floor_guard:
         argv += ["--no-floor-guard"]
         tee.line("WARNING: --no-floor-guard — the 50% board-shrink guard is DISABLED.")
 
-    code, _ = run_stage(tee, "INGEST", argv,
-                        code_map=INGEST_CODE_MAP, generic_code=EXIT_INGEST_GENERIC)
+    code, lines = run_stage(tee, "INGEST", argv,
+                            code_map=INGEST_CODE_MAP, generic_code=EXIT_INGEST_GENERIC)
     if code == EXIT_INGEST_FLOOR_GUARD:
         tee.line("floor guard REFUSED the ingest — the prior board is intact and "
                  "nothing was retired. This is the guard working, not a crash.")
     if code != EXIT_OK:
         _notify(tee, f"INGEST failed ({EXIT_MEANING.get(code, code)})", "Board NOT updated.")
-    return code
+    return code, lines
 
 
-def stage_alert(tee: Tee, args) -> int:
+def stage_alert(tee: Tee, args, ingest_lines: Sequence[str]) -> int:
+    """PHASE 5 — one Telegram alert describing what actually landed on the board.
+
+    Reached ONLY after a successful ingest (the chain is fail-fast and every
+    earlier stage returns before here), so this can never fire "here are your
+    fires" on a run that failed. Failure alerting stays with _notify and with
+    ingest.py's own floor-guard message.
+
+    Never returns non-zero. The board is already written by this point; an
+    alerting problem must not turn a good night into a red Last Run Result.
+    """
     tee.rule("STAGE 4/4 — ALERT")
-    tee.line("ALERT: not yet implemented — Phase 5 fills this in.")
-    tee.line("       Planned: counts of new fires by entry_status (FRESH/AGING/STALE)")
-    tee.line("       plus 'board updated', or 'FAILED: <reason>' on a failed run.")
-    tee.line("       The per-stage Telegram notices the stage scripts already send")
-    tee.line("       remain the interim signal.")
+    try:
+        return _alert_body(tee, args, ingest_lines)
+    except Exception as exc:  # noqa: BLE001
+        # The board IS written, so this does not redden the run — but it is NOT
+        # swallowed quietly. A silently-failing alert is no ping AND no error,
+        # which is exactly the silent-success failure this pipeline keeps
+        # removing. alert_problem() makes it loud in three places at once.
+        import traceback
+        alert_problem(tee, "the alert stage raised",
+                      "{}: {}".format(type(exc).__name__, exc))
+        for row_ in traceback.format_exc().splitlines():
+            tee.line("  | " + row_, stamp=False)
+        return EXIT_OK
+
+
+def _alert_body(tee: Tee, args, ingest_lines: Sequence[str]) -> int:
+    if args.dry_run:
+        tee.line("--dry-run: no ingest ran, so there is no board to report.")
+        return EXIT_OK
+
+    expected_run = parse_ingest_run_id(ingest_lines)
+    tee.line("ingest reported run #{}".format(
+        expected_run if expected_run is not None else "?"))
+
+    base = board_base_url()
+    tee.line("reading the persisted board: {}/api/jack-board".format(base))
+    payload, err = fetch_board(base)
+
+    if payload is None:
+        # The board IS written — only the read-back failed. Say exactly that, so
+        # this is not mistaken for a failed ingest.
+        alert_problem(tee, "could not read the board back", err)
+        _notify(tee, "board written, but the alert could not read it back",
+                "{}\nThe ingest SUCCEEDED — check the board in the terminal.".format(err))
+        return EXIT_OK
+
+    run_id = payload.get("runId")
+    decisions = payload.get("decisions") or []
+
+    note = ""
+    if payload.get("error"):
+        note = "board read reported: {}".format(payload["error"])
+    if expected_run is not None and run_id is not None and int(run_id) != int(expected_run):
+        # Reading a different run than the one just written means the alert would
+        # describe the wrong night. Report it rather than dress it up as tonight's.
+        note = ("board shows run #{} but ingest wrote run #{} — this alert may be "
+                "describing an older run".format(run_id, expected_run))
+        tee.line("RUN MISMATCH: {}".format(note))
+
+    summary = summarize_board(decisions)
+    tee.line("board run #{}: {} rows · FRESH {} · AGING {} · watching {} · UNREVIEWED {}".format(
+        run_id, len(decisions), len(summary["fresh"]), len(summary["aging"]),
+        summary["pending"], summary["unreviewed"]))
+
+    body = format_fire_alert(summary, run_id, note)
+
+    for line in body.split(NL):
+        tee.line("  > " + line, stamp=False)
+
+    if args.no_alert:
+        tee.line("--no-alert: rendered above, not sent.")
+        return EXIT_OK
+
+    try:
+        sent = send_telegram(body)
+        if sent:
+            tee.line("telegram: sent")
+        else:
+            # send_telegram already logged WHY (unset envs, or the HTTP failure).
+            # This is still an alert that did not reach anyone, so it is loud.
+            alert_problem(tee, "the alert was NOT delivered",
+                          "send_telegram returned False — unconfigured or the "
+                          "send failed. The board IS updated; the ping is what "
+                          "did not go out.")
+    except Exception as exc:  # noqa: BLE001 — alerting must never fail the run
+        alert_problem(tee, "the alert send raised",
+                      "{}: {}".format(type(exc).__name__, exc))
+
     return EXIT_OK
+
+
+# ============================================================================
+# PHASE 5 — the fire alert
+#
+# Reads the ACTUALLY-PERSISTED board and summarises the night in one message.
+#
+# WHY IT READS THE BOARD BACK INSTEAD OF TRUSTING THE INGEST RESPONSE
+#   ingest.py's `filterStats` (live N / pending M) is computed at applyFilters,
+#   BEFORE persistRun, and persistRun is deliberately non-fatal. Those counts
+#   therefore describe what PASSED THE FILTERS, not what reached jack.db.
+#   Alerting off them would be the same class of lie this pipeline keeps
+#   removing. GET /api/jack-board serves getCurrentBoard() — the rows that
+#   actually landed — so that is the source of truth here.
+#
+#   The board's runId is cross-checked against the run ingest reported writing.
+#   A mismatch means we are reading a different (stale) run, and the alert says
+#   so rather than presenting an older night's setups as tonight's.
+#
+# SPLIT BY entry_status, because that IS the actionable distinction:
+#   FRESH   -> confirmed on the most recent close; take the next open (2.24 book)
+#   AGING   -> still inside the window but the modeled open has passed;
+#              pullback-to-entry only (1.83 book). Listed, labelled do-not-chase.
+#   PENDING -> counted, never listed. Nothing to do tonight.
+#   UNKNOWN -> counted with PENDING; the alert makes no claim either way.
+#
+# UNREVIEWED is a DIFFERENT AXIS: it is the LLM verdict, not the entry window. A
+# row can be FRESH and UNREVIEWED at once. It is surfaced so a missing verdict
+# reads as "not analysed yet" and never as "no signal".
+#
+# WHAT THIS STAGE DELIBERATELY DOES NOT DO
+#   It does not alert on a failed run. The orchestrator's _notify already fires
+#   on every stage failure, and ingest.py sends its own message on a floor-guard
+#   refusal. Firing "here are your fires" after a failure would be actively
+#   misleading, so the alert is reached only after a confirmed successful ingest.
+# ============================================================================
+
+# Mirrors ingest.py's resolution so the alert reads the same app the ingest wrote.
+DEFAULT_BASE_URL = "http://localhost:3000"
+BOARD_TIMEOUT = 30
+
+NL = "\n"
+RUN_ID_RE = r"WROTE run #(\d+)"
+
+# Alert failures do NOT change the exit code — the board is already written and a
+# good night must not be reddened by an alerting bug. But they are never silent.
+#
+# A quiet swallow would produce no ping AND no error, which is indistinguishable
+# from "there was nothing to say" — the exact silent-success failure mode this
+# pipeline exists to remove. So every alert failure is recorded here and reported
+# in THREE places: a banner at the point of failure, the run's RESULT block, and
+# a best-effort Telegram notice (which may itself be the thing that is broken —
+# hence the other two).
+ALERT_PROBLEMS: List[str] = []
+
+
+def alert_problem(tee: "Tee", what: str, detail: str = "") -> None:
+    """Record an alert failure and shout about it. Never raises."""
+    ALERT_PROBLEMS.append(what + ((" — " + detail) if detail else ""))
+    tee.line("")
+    tee.line("!" * 72, stamp=False)
+    tee.line("!! ALERT DEGRADED: " + what)
+    if detail:
+        tee.line("!! " + detail)
+    tee.line("!! The board IS updated — this is the NOTIFICATION failing, not the run.")
+    tee.line("!" * 72, stamp=False)
+
+# Telegram hard-caps a message at 4096 characters. FRESH is the actionable list
+# and is capped generously; AGING is reference and is capped tighter. Anything
+# dropped is always still COUNTED, so the message can never imply a shorter
+# night than actually happened.
+MAX_FRESH_LISTED = 25
+MAX_AGING_LISTED = 12
+MAX_MESSAGE_CHARS = 3900
+
+
+def board_base_url() -> str:
+    return (env("JACK_SELF_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+
+
+def fetch_board(base_url: str) -> Tuple[Optional[dict], str]:
+    """GET /api/jack-board. Returns (payload, "") or (None, reason)."""
+    url = base_url + "/api/jack-board"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=BOARD_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return None, "HTTP {} from {}".format(exc.code, url)
+    except Exception as exc:  # noqa: BLE001
+        return None, "{}: {} (is the app running at {}?)".format(
+            type(exc).__name__, exc, base_url)
+    try:
+        return json.loads(raw), ""
+    except (ValueError, TypeError):
+        return None, "response was not JSON: {!r}".format(raw[:160])
+
+
+def _num(val, digits: int = 2) -> str:
+    if val is None:
+        return "-"
+    try:
+        return format(float(val), "." + str(digits) + "f")
+    except (TypeError, ValueError):
+        return "-"
+
+
+def summarize_board(decisions: Sequence[dict]) -> dict:
+    """Split the persisted board into the alert's buckets. Pure — unit-testable."""
+    fresh: List[dict] = []
+    aging: List[dict] = []
+    pending = 0
+    unreviewed = 0
+
+    for d in decisions or []:
+        status = str(d.get("entryStatus") or "UNKNOWN").upper()
+        if str(d.get("decision") or "").strip().upper() == "UNREVIEWED":
+            unreviewed += 1
+        if status == "FRESH":
+            fresh.append(d)
+        elif status == "AGING":
+            aging.append(d)
+        else:
+            pending += 1
+
+    # Highest P-rank first, then the stronger handle — the board's own order, so
+    # the alert's top name is the board's top name rather than a second opinion.
+    def rank(d: dict):
+        return (-(d.get("priority") or 0), -(d.get("handleScore") or 0), d.get("ticker") or "")
+
+    fresh.sort(key=rank)
+    aging.sort(key=rank)
+    return {"fresh": fresh, "aging": aging, "pending": pending, "unreviewed": unreviewed}
+
+
+def _fire_line(d: dict) -> str:
+    tier = str(d.get("tier") or "?").upper()
+    bucket = str(d.get("sizeBucket") or "?").upper()
+    hs = d.get("handleScore")
+    hs_txt = " · hs " + format(float(hs), ".2f") if isinstance(hs, (int, float)) else ""
+    return (
+        "• <b>" + str(d.get("ticker") or "?") + "</b> " + tier + " · " + bucket + hs_txt
+        + NL
+        + "   entry " + _num(d.get("entry"))
+        + " · stop " + _num(d.get("stop"))
+        + " · t05 " + _num(d.get("target"))
+    )
+
+
+def format_fire_alert(summary: dict, run_id, run_note: str = "") -> str:
+    """Build the Telegram HTML body. Pure, so every state is testable offline."""
+    fresh, aging = summary["fresh"], summary["aging"]
+    pending, unreviewed = summary["pending"], summary["unreviewed"]
+    head_run = "run #" + str(run_id) if run_id is not None else "run #?"
+
+    parts: List[str] = []
+
+    if not fresh and not aging:
+        # QUIET NIGHT. This still sends: silence must never be indistinguishable
+        # from a dead pipeline. "No fires" is a result, not the absence of one.
+        parts.append("🌙 <b>JACK nightly — no new fires</b>")
+        parts.append(head_run + " · board updated · " + str(pending) + " watching")
+    else:
+        parts.append("🎯 <b>JACK nightly — " + str(len(fresh)) + " FRESH · "
+                     + str(len(aging)) + " AGING</b>")
+        parts.append(head_run + " · " + str(pending) + " watching")
+
+    if run_note:
+        parts.append("⚠ " + run_note)
+
+    if fresh:
+        parts.append("")
+        parts.append("<b>FRESH — take the next open</b> <i>(2.24 book)</i>")
+        for d in fresh[:MAX_FRESH_LISTED]:
+            parts.append(_fire_line(d))
+        if len(fresh) > MAX_FRESH_LISTED:
+            parts.append("   …+" + str(len(fresh) - MAX_FRESH_LISTED) + " more FRESH")
+
+    if aging:
+        parts.append("")
+        parts.append("<b>AGING — pullback to entry ONLY</b> <i>(1.83 book)</i>")
+        parts.append("<i>do not chase at market</i>")
+        for d in aging[:MAX_AGING_LISTED]:
+            parts.append(_fire_line(d))
+        if len(aging) > MAX_AGING_LISTED:
+            parts.append("   …+" + str(len(aging) - MAX_AGING_LISTED) + " more AGING")
+
+    if unreviewed:
+        parts.append("")
+        parts.append("⚠️ <b>" + str(unreviewed) + " row(s) UNREVIEWED</b> — verdicts "
+                     "pending, the analysis was unavailable. NOT a SKIP: these were "
+                     "never graded.")
+
+    body = NL.join(parts)
+    if len(body) > MAX_MESSAGE_CHARS:
+        body = body[:MAX_MESSAGE_CHARS] + NL + "…truncated (Telegram limit)."
+    return body
+
+
+def parse_ingest_run_id(lines: Sequence[str]) -> Optional[int]:
+    """Pull the run number out of ingest.py's 'WROTE run #N ...' success line."""
+    for line in reversed(list(lines or [])):
+        m = re.search(RUN_ID_RE, line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+
+JACK_TEST_CHANNEL = "-1003974425876"  # the JACK/equity trade channel, per jack-state.md
+
+
+def send_test_alert() -> int:
+    """Send a clearly-labelled [TEST] alert through the REAL send path.
+
+    Exists because the one thing unit tests cannot prove is that a message
+    actually reaches the right Telegram channel and reads well on a phone. This
+    renders realistic synthetic FRESH/AGING/PENDING/UNREVIEWED data through the
+    SAME format_fire_alert() and the SAME send_telegram() the nightly run uses,
+    so what lands is what the real alert will look like.
+
+    Every line is marked [TEST] and the body says twice that it is not a signal —
+    a test message that could be mistaken for real fires would be worse than no
+    test at all.
+    """
+    chat_id = env("TELEGRAM_TRADE_CHAT_ID")
+    token = env("TELEGRAM_BOT_TOKEN")
+
+    print("TELEGRAM_TRADE_CHAT_ID = " + (chat_id or "(unset)"))
+    print("TELEGRAM_BOT_TOKEN     = " + ("set (not shown)" if token else "(unset)"))
+    if chat_id:
+        if chat_id == JACK_TEST_CHANNEL:
+            print("channel                = MATCHES the JACK/equity channel "
+                  + JACK_TEST_CHANNEL)
+        else:
+            print("channel                = " + chat_id + "  <-- does NOT match the "
+                  "documented JACK channel " + JACK_TEST_CHANNEL)
+            print("                         Check WHERE this lands before trusting it.")
+    def row(t, st, tier, bucket, hs, e, s, tg, p, dec="TAKE"):
+        return {"ticker": t, "entryStatus": st, "tier": tier, "sizeBucket": bucket,
+                "handleScore": hs, "entry": e, "stop": s, "target": tg,
+                "priority": p, "decision": dec}
+
+    board = [
+        row("NVDA", "FRESH", "Q5", "full", 0.74, 178.40, 164.20, 196.10, 9.8),
+        row("AMD", "FRESH", "Q4", "full", 0.61, 112.40, 104.00, 126.90, 9.1),
+        row("PLTR", "FRESH", "Q3", "full", 0.47, 28.50, 26.10, 31.80, 7.4, dec="UNREVIEWED"),
+        row("MU", "AGING", "Q5", "full", 0.69, 96.20, 88.75, 107.40, 8.6),
+        row("SMCI", "AGING", "Q4", "full", 0.58, 41.05, 37.60, 46.30, 7.9),
+        row("COIN", "AGING", "Q4", "full", 0.54, 233.10, 214.00, 261.80, 7.2),
+        row("ANET", "AGING", "Q3", "full", 0.49, 88.90, 81.40, 100.20, 6.5),
+    ] + [row("W%02d" % i, "PENDING", "Q4", "full", 0.5, 10, 9, 12, 5) for i in range(44)]
+
+    summary = summarize_board(board)
+    body = format_fire_alert(summary, "TEST")
+
+    banner = (
+        "🧪 <b>[TEST] JACK Phase 5 alert — NOT A SIGNAL</b>" + NL
+        + "<i>Synthetic data, sent to verify formatting and the channel. "
+        + "Do not trade any of this.</i>" + NL + NL
+    )
+    footer = (
+        NL + NL + "🧪 <i>[TEST] End of test message. None of the above is a real "
+        "setup.</i>"
+    )
+    message = banner + body + footer
+
+    # Rendered BEFORE the credential check, so the exact message can be reviewed
+    # on a box that has no keys (the build box) as well as on the VPS that sends it.
+    print("\n--- message (" + str(len(message)) + " chars, limit 4096) ---")
+    print(message)
+    print("--- end ---\n")
+
+    if not token or not chat_id:
+        print("NOT SENT: TELEGRAM_BOT_TOKEN and/or TELEGRAM_TRADE_CHAT_ID are unset "
+              "here.\nThey live in .env.local on the VPS — run this there to actually "
+              "deliver it.")
+        return 1
+
+    ok = send_telegram(message)
+    print("send_telegram -> " + ("SENT" if ok else "FAILED"))
+    if ok:
+        print("Check the channel: the message should be titled '[TEST] JACK Phase 5 "
+              "alert — NOT A SIGNAL'.")
+    return 0 if ok else 1
+
 
 
 def _notify(tee: Tee, headline: str, detail: str) -> None:
@@ -765,6 +1146,138 @@ def selftest() -> int:
         check(f"{name}: {len(risky)} char(s) need UTF-8 stdout", True,
               "".join(f"U+{ord(c):04X} " for c in risky) or "none")
 
+    print("\n[9] Phase 5 alert — board summarising and every alert state")
+
+    def row(tkr, status, tier="Q5", bucket="full", hs=0.71, entry=41.2, stop=37.9,
+            tgt=45.6, prio=9.0, decision="TAKE"):
+        return {"ticker": tkr, "entryStatus": status, "tier": tier, "sizeBucket": bucket,
+                "handleScore": hs, "entry": entry, "stop": stop, "target": tgt,
+                "priority": prio, "decision": decision}
+
+    board = (
+        [row("AAAA", "FRESH", prio=9.5), row("BBBB", "FRESH", tier="Q4", hs=0.58, prio=8.1),
+         row("CCCC", "FRESH", tier="Q3", hs=0.49, prio=7.0)]
+        + [row(f"AG{i:02d}", "AGING", tier="Q4", hs=0.55, prio=6.0 - i * 0.1) for i in range(29)]
+        + [row(f"PD{i:02d}", "PENDING") for i in range(44)]
+    )
+    s = summarize_board(board)
+    check("FRESH split", len(s["fresh"]) == 3, str(len(s["fresh"])))
+    check("AGING split", len(s["aging"]) == 29, str(len(s["aging"])))
+    check("PENDING counted, not listed", s["pending"] == 44, str(s["pending"]))
+    check("no UNREVIEWED here", s["unreviewed"] == 0)
+    check("FRESH ordered by P-rank", [d["ticker"] for d in s["fresh"]] == ["AAAA", "BBBB", "CCCC"],
+          str([d["ticker"] for d in s["fresh"]]))
+
+    normal = format_fire_alert(s, 412)
+    check("normal: headline counts", "3 FRESH · 29 AGING" in normal)
+    check("normal: run id", "run #412" in normal)
+    check("normal: pending counted", "44 watching" in normal)
+    check("normal: FRESH labelled with the 2.24 book", "2.24 book" in normal)
+    check("normal: AGING labelled pullback-only", "pullback to entry ONLY" in normal)
+    check("normal: AGING carries the do-not-chase warning", "do not chase at market" in normal)
+    check("normal: geometry on a fire line", "entry 41.20" in normal and "stop 37.90" in normal
+          and "t05 45.60" in normal)
+    check("normal: AGING truncated with a count", "more AGING" in normal, normal[-80:])
+    check("normal: nothing dropped silently — 29 still in the headline",
+          "29 AGING" in normal)
+    check("normal: inside Telegram's 4096 limit", len(normal) < 4096, str(len(normal)))
+
+    quiet = format_fire_alert(summarize_board([row(f"PD{i}", "PENDING") for i in range(42)]), 413)
+    check("quiet: still sends something", bool(quiet.strip()))
+    check("quiet: says no new fires", "no new fires" in quiet)
+    check("quiet: still reports the watch count", "42 watching" in quiet)
+    check("quiet: no FRESH/AGING sections", "2.24 book" not in quiet and "1.83 book" not in quiet)
+
+    unrev = format_fire_alert(
+        summarize_board([row("AAAA", "FRESH", decision="UNREVIEWED"),
+                         row("BBBB", "FRESH", decision="TAKE"),
+                         row("PD01", "PENDING", decision="UNREVIEWED")]), 414)
+    check("unreviewed: counted across statuses", "2 row(s) UNREVIEWED" in unrev, unrev[-160:])
+    check("unreviewed: framed as not-yet-graded, not as a skip", "NOT a SKIP" in unrev)
+    check("unreviewed: the FRESH list is still shown", "2.24 book" in unrev)
+
+    mismatch = format_fire_alert(s, 999, "board shows run #999 but ingest wrote run #412")
+    check("run mismatch surfaces in the message", "ingest wrote run #412" in mismatch)
+
+    big = summarize_board([row(f"F{i:03d}", "FRESH", prio=100 - i) for i in range(60)])
+    huge = format_fire_alert(big, 415)
+    check("60 FRESH: list capped", "more FRESH" in huge)
+    check("  but the true count is in the headline", "60 FRESH" in huge)
+    check("  and it still fits Telegram", len(huge) < 4096, str(len(huge)))
+
+    check("run id parsed from ingest stdout",
+          parse_ingest_run_id(["noise", "WROTE run #412 in 8s: 76 setups · 76 decisions"]) == 412)
+    check("  no run line -> None", parse_ingest_run_id(["nothing here"]) is None)
+    check("  last run line wins", parse_ingest_run_id(["WROTE run #1 x", "WROTE run #2 y"]) == 2)
+
+    check("UNKNOWN entry_status counts as watching, never as a fire",
+          summarize_board([row("XX", "UNKNOWN")])["pending"] == 1)
+    check("missing entry_status counts as watching",
+          summarize_board([{"ticker": "YY"}])["pending"] == 1)
+
+    if os.environ.get("JACK_SHOW_ALERTS"):
+        for title, msg in (("NORMAL (FRESH + AGING)", normal), ("QUIET NIGHT", quiet),
+                           ("UNREVIEWED", unrev), ("RUN MISMATCH", mismatch)):
+            print("\n----- SAMPLE: " + title + " -----")
+            print(msg)
+            print("----- end (" + str(len(msg)) + " chars) -----")
+
+    print("\n[10] a failed alert is LOUD, never a quiet swallow")
+    # The whole point: a silently-failing alert is no ping AND no error, which
+    # reads identically to "nothing to report". These assert the three places a
+    # failure must show up.
+    _saved = list(ALERT_PROBLEMS)
+    ALERT_PROBLEMS.clear()
+    try:
+        quiet_tee = Tee(None)
+        alert_problem(quiet_tee, "test failure", "test detail")
+        check("alert_problem records the failure", len(ALERT_PROBLEMS) == 1, str(ALERT_PROBLEMS))
+        check("  and keeps the detail with it", "test detail" in ALERT_PROBLEMS[0])
+
+        # stage_alert must return 0 even when the body explodes — the board is
+        # already written — while still recording the problem.
+        class Boom:
+            dry_run = False
+            no_alert = True
+            @property
+            def kaboom(self):
+                raise RuntimeError("x")
+        ALERT_PROBLEMS.clear()
+        saved_body = globals()["_alert_body"]
+
+        def _explode(*a, **k):
+            raise RuntimeError("simulated alert bug")
+        globals()["_alert_body"] = _explode
+        try:
+            rc = stage_alert(Tee(None), Boom(), [])
+        finally:
+            globals()["_alert_body"] = saved_body
+        check("a raising alert stage still returns 0", rc == EXIT_OK, str(rc))
+        check("  but the failure IS recorded, not swallowed", len(ALERT_PROBLEMS) == 1,
+              str(ALERT_PROBLEMS))
+        check("  and names the cause", "simulated alert bug" in ALERT_PROBLEMS[0],
+              str(ALERT_PROBLEMS))
+    finally:
+        ALERT_PROBLEMS.clear()
+        ALERT_PROBLEMS.extend(_saved)
+
+    print("\n[11] the RESULT line never misreports the exit code")
+    # A weekend skip used to log "exit 1 — orchestrator error" while the process
+    # exited 0, because `code` kept its seed value on that return path. A log that
+    # misreports the exit code is worse than no log.
+    import io as _io
+    import contextlib as _ctx
+    buf = _io.StringIO()
+    with _ctx.redirect_stdout(buf):
+        rc = main(["--date", "2026-08-22", "--dry-run", "--log-dir",
+                   str(Path(os.environ.get("TEMP", ".")) / "jack_selftest_logs")])
+    out = buf.getvalue()
+    check("weekend skip returns 0", rc == 0, str(rc))
+    check("  and the RESULT line says exit 0", "exit 0 — success" in out,
+          [l for l in out.splitlines() if "exit " in l][-1:] and
+          [l for l in out.splitlines() if "exit " in l][-1] or "")
+    check("  and never claims an orchestrator error", "orchestrator error" not in out)
+
     print(f"\n{'ALL PASS' if failed == 0 else 'FAILURES'} — {passed} passed, {failed} failed\n")
     return 0 if failed == 0 else 1
 
@@ -808,10 +1321,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--no-floor-guard", action="store_true",
                         help="Pass --no-floor-guard to ingest. Use only for a known-good "
                              "deliberate shrink.")
+    parser.add_argument("--no-alert", action="store_true",
+                        help="Render the Phase 5 alert into the log but do NOT send it. "
+                             "For previewing the message without pinging the channel.")
+    parser.add_argument("--test-alert", action="store_true",
+                        help="Send ONE clearly-labelled [TEST] alert with synthetic data "
+                             "through the real formatter and sender, then exit. Proves the "
+                             "message reaches the right channel and reads correctly.")
     parser.add_argument("--selftest", action="store_true",
                         help="Run offline checks of the cap guard and exit-code map. "
                              "No network, no subprocesses.")
     args = parser.parse_args(argv)
+
+    if args.test_alert:
+        return send_test_alert()
 
     if args.selftest:
         return selftest()
@@ -856,7 +1379,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not trading and not args.force:
             tee.line("not a trading session — nothing to do. Exiting 0 (a skip is a "
                      "correct outcome, not a failure).")
-            return EXIT_OK
+            # `code` MUST be assigned before returning: the RESULT block in the
+            # finally reads it, and leaving it at its EXIT_ORCHESTRATOR seed made
+            # every weekend log read "exit 1 — orchestrator error" while the
+            # process actually exited 0. A log that misreports the exit code is
+            # worse than no log.
+            code = EXIT_OK
+            return code
         if not trading and args.force:
             tee.line("--force: running anyway.")
 
@@ -868,11 +1397,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if code != EXIT_OK:
             return code
 
-        code = stage_ingest(tee, args, watchlist)
+        code, ingest_lines = stage_ingest(tee, args, watchlist)
         if code != EXIT_OK:
             return code
 
-        code = stage_alert(tee, args)
+        code = stage_alert(tee, args, ingest_lines)
         return code
 
     except KeyboardInterrupt:
@@ -888,7 +1417,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return code
     finally:
         tee.rule("RESULT")
-        tee.line(f"exit {code} — {EXIT_MEANING.get(code, 'unknown')}")
+        # A degraded alert must be visible on the RESULT line itself. Reading
+        # "exit 0 — success" on a night where nothing was ever delivered is the
+        # failure this annotation exists to prevent.
+        suffix = ""
+        if ALERT_PROBLEMS:
+            suffix = f"  [ALERT DEGRADED x{len(ALERT_PROBLEMS)} — see below]"
+        tee.line(f"exit {code} — {EXIT_MEANING.get(code, 'unknown')}{suffix}")
+        if ALERT_PROBLEMS:
+            tee.line("!" * 72, stamp=False)
+            tee.line("!! THE RUN SUCCEEDED BUT THE ALERT DID NOT REACH YOU:")
+            for problem in ALERT_PROBLEMS:
+                tee.line("!!   · " + problem)
+            tee.line("!! Exit stays 0 on purpose — the board is written and correct.")
+            tee.line("!! Do NOT read 'no alert tonight' as 'no fires tonight'.")
+            tee.line("!" * 72, stamp=False)
         tee.line(f"elapsed {(time.time() - started) / 60:.1f} min")
         tee.line(f"log: {log_path}")
         tee.close()
