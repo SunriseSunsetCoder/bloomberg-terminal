@@ -305,9 +305,61 @@ def send_telegram(text: str) -> bool:
         return False
 
 
+def enable_utf8_stdio() -> None:
+    """Force UTF-8 on stdout/stderr so a log line can never kill the run.
+
+    WHY THIS EXISTS
+    ---------------
+    Windows picks the ANSI code page (cp1252 here) for stdout when it is not a
+    UTF-8 console. cp1252 cannot encode U+26A0 WARNING SIGN, U+2192 RIGHTWARDS
+    ARROW, or any emoji — all of which appear in this pipeline's log and alert
+    strings. print() then raises UnicodeEncodeError, which is FATAL: a 2026-08-24
+    run lost an otherwise-perfect detector pass (76/76 setups scored, entry_status
+    stamped) because the very last log line contained a warning sign.
+
+    A logging call must never be able to fail a pipeline stage. This makes the
+    stream itself UTF-8 and lossy-on-failure, and log() below adds a second net.
+
+    Called at import, so every module that imports from tiingo_pull — which is all
+    three stage scripts and the orchestrator — is protected without repeating it.
+
+    NON-INTERACTIVE IS THE CASE THAT MATTERS. The 19:00 Task Scheduler run has no
+    console at all: stdout is a redirected file handle. reconfigure() works there
+    too, and pipeline/run_daily.cmd additionally exports PYTHONUTF8=1 and
+    PYTHONIOENCODING=utf-8:replace so the interpreter starts in UTF-8 mode before
+    any of our code runs — which also covers output we do NOT route through log(),
+    notably papermill's own progress and traceback printing.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue  # pythonw, a replaced stream, or an exotic wrapper
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — best effort; log() still has a fallback
+            pass
+
+
+enable_utf8_stdio()
+
+
 def log(msg: str) -> None:
+    """Timestamped stdout line. CANNOT raise — see enable_utf8_stdio()."""
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{stamp}] {msg}", flush=True)
+    line = f"[{stamp}] {msg}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        # Second net: the stream refused UTF-8 (reconfigure failed). Transliterate
+        # rather than lose the line — and never let it propagate.
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        try:
+            print(line.encode(enc, "replace").decode(enc, "replace"), flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001 — a closed/broken pipe must not kill the run
+        pass
 
 
 # ============================================================================

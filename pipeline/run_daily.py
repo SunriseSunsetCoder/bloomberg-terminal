@@ -116,6 +116,7 @@ sys.path.insert(0, str(PIPELINE_DIR))
 try:
     from tiingo_pull import (  # type: ignore  # noqa: E402
         FAILURE_LEDGER,
+        enable_utf8_stdio,
         env,
         is_trading_day,
         send_telegram,
@@ -123,6 +124,18 @@ try:
 except Exception as exc:  # noqa: BLE001 — a broken import must not be a stack trace at 19:00
     print(f"FATAL: cannot import pipeline/tiingo_pull.py helpers: {exc}", file=sys.stderr)
     raise SystemExit(1) from exc
+
+# Importing tiingo_pull already ran this, but call it explicitly so the guarantee
+# is visible here and survives any future change to that module's import side
+# effects. Windows cp1252 stdout is what it defends against — see the docstring.
+enable_utf8_stdio()
+
+# Handed to every child process. PYTHONUTF8 puts the child interpreter in UTF-8
+# mode from startup, which covers output that never passes through our log() —
+# papermill's progress and tracebacks above all. Without it a child writes cp1252
+# bytes that this parent then decodes as UTF-8, producing the mojibake that made
+# em-dashes render as replacement characters in earlier run logs.
+CHILD_ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8:replace"}
 
 
 # ============================================================================
@@ -321,8 +334,16 @@ class Tee:
         try:
             print(text, flush=True)
         except UnicodeEncodeError:
-            # Windows consoles are not always UTF-8. The log file still gets it.
-            print(text.encode("ascii", "replace").decode("ascii"), flush=True)
+            # enable_utf8_stdio() should have made this unreachable; kept as the
+            # last net so a log line can never fail a stage. The file still gets
+            # the original text either way.
+            enc = getattr(sys.stdout, "encoding", None) or "ascii"
+            try:
+                print(text.encode(enc, "replace").decode(enc, "replace"), flush=True)
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001 — broken pipe must not kill the run
+            pass
         if self._fh is not None:
             self._fh.write(text + "\n")
             self._fh.flush()
@@ -375,6 +396,7 @@ def run_stage(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=CHILD_ENV,
         )
     except OSError as exc:
         tee.line(f"{name}: could not launch: {type(exc).__name__}: {exc}")
@@ -698,8 +720,62 @@ def selftest() -> int:
     for script in ("tiingo_pull.py", "run_detector.py", "ingest.py"):
         check(f"{script} present", (PIPELINE_DIR / script).is_file())
 
+    print("\n[7] logging survives a cp1252 stdout (the 2026-08-24 crash)")
+    # Regression test for the UnicodeEncodeError that killed an otherwise-perfect
+    # run: the detector had scored 76/76 setups and stamped entry_status, then a
+    # final log line carrying U+26A0 met cp1252 stdout and raised, failing the
+    # stage. This spawns a CHILD with a hostile encoding on purpose - by the time
+    # the selftest runs, this process's stdout is already UTF-8 and would prove
+    # nothing. PYTHONUTF8 is stripped so the IN-CODE fix has to stand on its own,
+    # without help from run_daily.cmd.
+    killers = "warn ⚠ arrow → stop \U0001F6D1 ok ✅ clip \U0001F4CB"
+    child = (
+        "import sys; sys.path.insert(0, r'" + str(PIPELINE_DIR) + "');"
+        "from tiingo_pull import log;"
+        "log(" + repr(killers) + ");"
+        "print('SURVIVED')"
+    )
+    hostile = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    hostile.pop("PYTHONUTF8", None)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", child],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=hostile, timeout=60,
+        )
+        check("log() does not raise under cp1252 stdout", proc.returncode == 0,
+              (proc.stderr or "").strip()[-160:])
+        check("  and the line still reaches stdout", "SURVIVED" in (proc.stdout or ""))
+        check("  with the characters intact, not dropped",
+              "⚠" in (proc.stdout or "") and "→" in (proc.stdout or ""),
+              (proc.stdout or "").strip()[:120])
+    except Exception as exc:  # noqa: BLE001
+        check("cp1252 child ran", False, f"{type(exc).__name__}: {exc}")
+
+    print("\n[8] which characters depend on the UTF-8 guarantee")
+    # Every stage script logs through tiingo_pull.log, so UTF-8 stdout covers them
+    # all. This records WHICH characters rely on it, so a future reader knows the
+    # guarantee is load-bearing rather than decorative.
+    for name in ("tiingo_pull.py", "run_detector.py", "ingest.py", "run_daily.py"):
+        path = PIPELINE_DIR / name
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        risky = sorted({c for c in set(text) if ord(c) > 127 and not _cp1252_ok(c)})
+        check(f"{name}: {len(risky)} char(s) need UTF-8 stdout", True,
+              "".join(f"U+{ord(c):04X} " for c in risky) or "none")
+
     print(f"\n{'ALL PASS' if failed == 0 else 'FAILURES'} — {passed} passed, {failed} failed\n")
     return 0 if failed == 0 else 1
+
+
+def _cp1252_ok(ch: str) -> bool:
+    """Is this character representable in the Windows ANSI code page?"""
+    try:
+        ch.encode("cp1252")
+        return True
+    except UnicodeEncodeError:
+        return False
 
 
 # ============================================================================
