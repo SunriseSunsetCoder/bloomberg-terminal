@@ -27,6 +27,7 @@ export interface SetupSeen {
   entryStatus?: string;
   confirmedCloseDate?: string;
   daysSinceConfirm?: number;
+  daysSinceHandleLow?: number;
 }
 
 export interface ValidationRunRow {
@@ -125,9 +126,10 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
          -- NULL is honest ("not stamped"); a stale FRESH is a false actionable.
          -- On the nightly path the distinction never arises: the stamper is
          -- total and always supplies a label for every row.
-         entry_status         = ?,
-         confirmed_close_date = ?,
-         days_since_confirm   = ?
+         entry_status          = ?,
+         confirmed_close_date  = ?,
+         days_since_confirm    = ?,
+         days_since_handle_low = ?
        WHERE id = ?`
     ).run(
       seenAt,
@@ -146,6 +148,7 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
       setup.entryStatus ?? null,
       setup.confirmedCloseDate ?? null,
       setup.daysSinceConfirm ?? null,
+      setup.daysSinceHandleLow ?? null,
       existing.id
     );
     return existing.id;
@@ -161,8 +164,8 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
          cup_depth_pct, handle_retr_pct,
          handle_score, size_bucket,
          sector, tier, priority,
-         entry_status, confirmed_close_date, days_since_confirm
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         entry_status, confirmed_close_date, days_since_confirm, days_since_handle_low
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       setup.ticker,
@@ -185,7 +188,8 @@ export function upsertSetup(setup: SetupSeen, seenAt: string): number {
       setup.priority ?? null,
       setup.entryStatus ?? null,
       setup.confirmedCloseDate ?? null,
-      setup.daysSinceConfirm ?? null
+      setup.daysSinceConfirm ?? null,
+      setup.daysSinceHandleLow ?? null
     );
 
   return Number(result.lastInsertRowid);

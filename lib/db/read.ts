@@ -352,6 +352,31 @@ export interface CurrentBoardRow {
   fireClose: number | null;
   fireBar: number | null;
   firedStatus: "confirmed" | "late" | "resolved" | null;
+  // ---- Board HYDRATION fields (GET /api/jack-board) --------------------------
+  // Everything below is additive and DISPLAY-ONLY. It exists so a fresh page load
+  // can rebuild the board from SQLite instead of from the last VALIDATE response
+  // held in a client atom — which is what made a pipeline-ingested run invisible
+  // to the terminal. No eligibility, scoping or owned/retired rule reads any of it.
+  cupDepthPct?: number | null;
+  handleRetrPct?: number | null;
+  // Phase 3 entry-freshness stamp — drives the FRESH/AGING split in the UI/alert.
+  entryStatus?: string | null;
+  confirmedCloseDate?: string | null;
+  daysSinceConfirm?: number | null;
+  daysSinceHandleLow?: number | null;
+  // The analysis commentary. Persisted per-decision all along; simply never read
+  // back before hydration existed.
+  notes?: string | null;
+  newsClass?: string | null;
+  sectorRs?: string | null;
+  crossAsset?: string | null;
+  earningsFlag?: string | null;
+  shares?: number | null;
+  notional?: number | null;
+  pctToBreakout?: number | null;
+  liveCloseDeltaPct?: number | null;
+  jackDecisionAtMark?: string | null;
+  jackAnalysisAtMark?: string | null;
 }
 
 /**
@@ -406,6 +431,20 @@ export function getCurrentBoardSetupCount(): number {
   return row?.n ?? 0;
 }
 
+/**
+ * Metadata for one validation run. Used by the board-hydration route so a
+ * rebuilt board recomputes share counts against the risk setting THAT RUN was
+ * sized with, rather than whatever the current default happens to be.
+ */
+export function getRunMeta(
+  runId: number
+): { timestamp: string; riskPerTrade: number } | null {
+  const row = getDb()
+    .prepare(`SELECT timestamp, risk_per_trade AS riskPerTrade FROM validation_runs WHERE id = ?`)
+    .get(runId) as { timestamp: string; riskPerTrade: number } | undefined;
+  return row ?? null;
+}
+
 export function getCurrentBoard(): { runId: number | null; live: CurrentBoardRow[]; pending: CurrentBoardRow[] } {
   const runId = getCurrentRunId();
   if (runId === null) return { runId: null, live: [], pending: [] };
@@ -429,6 +468,29 @@ export function getCurrentBoard(): { runId: number | null; live: CurrentBoardRow
          s.size_bucket      AS sizeBucket,
          s.sector           AS sector,
          s.handle_score     AS handleScore,
+         -- ---- board HYDRATION columns (GET /api/jack-board) -----------------
+         -- Additive and display-only. Read back so a fresh page load can rebuild
+         -- the board from SQLite instead of from the last VALIDATE response held
+         -- in a client atom — which is what made a pipeline-ingested run
+         -- invisible to the terminal. The commentary below was persisted all
+         -- along; it simply was never selected.
+         s.cup_depth_pct    AS cupDepthPct,
+         s.handle_retr_pct  AS handleRetrPct,
+         s.entry_status     AS entryStatus,
+         s.confirmed_close_date AS confirmedCloseDate,
+         s.days_since_confirm   AS daysSinceConfirm,
+         s.days_since_handle_low AS daysSinceHandleLow,
+         d.notes            AS notes,
+         d.news_class       AS newsClass,
+         d.sector_rs        AS sectorRs,
+         d.cross_asset      AS crossAsset,
+         d.earnings_flag    AS earningsFlag,
+         d.shares           AS shares,
+         d.notional         AS notional,
+         d.pct_to_breakout  AS pctToBreakout,
+         d.live_close_delta_pct  AS liveCloseDeltaPct,
+         d.jack_decision_at_mark AS jackDecisionAtMark,
+         d.jack_analysis_at_mark AS jackAnalysisAtMark,
          -- FIRED STATE IS RESOLVED PER *SETUP*, ACROSS RUNS — not from this run's row.
          --
          -- This is the fix for the "shows LIVE on the JACK tab, Basket Sizer won't size

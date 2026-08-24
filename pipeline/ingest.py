@@ -16,6 +16,7 @@ Exit codes:
     3  transport/HTTP failure talking to the app
     4  INGEST REFUSED by the floor guard — prior board deliberately preserved
     5  persistence unavailable (pointed at Vercel, where writes silently no-op)
+    6  the endpoint ran but NOTHING WAS WRITTEN (or the write errored)
 
 =============================================================================
 WHY THIS POSTS TO THE APP INSTEAD OF WRITING SQLite DIRECTLY
@@ -202,22 +203,63 @@ def run(watchlist: Path, risk_per_trade: int, floor_guard: bool, dry_run: bool) 
             "JACK_SELF_BASE_URL must point at the VPS app, not Vercel.",
         )
 
+    # ---- VERIFY THE WRITE ---------------------------------------------------
+    #
+    # filterStats is computed at applyFilters, BEFORE persistRun, and persistRun
+    # is deliberately non-fatal — a DB error surfaces only in the response's
+    # markdown preface. So "live 12 · pending 42" proves the CSV parsed, not that
+    # a single row reached jack.db. An unattended job reporting success off a
+    # filter count is the same class of lie this pipeline keeps removing, so the
+    # structured persist block is authoritative here.
+    persist = payload.get("persist") or {}
+    if not persist:
+        return fail(
+            6, "Ingest FAILED — cannot verify the write",
+            "The response carried no `persist` block, so there is no way to confirm "
+            "anything reached jack.db. The app is likely older than the Phase 4 "
+            "verification change — redeploy the VPS.",
+        )
+    if persist.get("error"):
+        return fail(
+            6, "Ingest FAILED — persistence error",
+            f"The endpoint ran but the write failed: {persist['error']}. "
+            f"The board was NOT updated.",
+        )
+    inserted = persist.get("decisionsInserted") or 0
+    run_id = persist.get("runId")
+    if run_id is None or inserted == 0:
+        return fail(
+            6, "Ingest FAILED — nothing written",
+            f"run_id={run_id}, decisionsInserted={inserted}. The endpoint accepted the "
+            f"CSV but produced no decision rows, so getCurrentRunId() will not resolve "
+            f"to this run and the board will not move.",
+        )
+
+    skipped = persist.get("decisionsSkipped") or 0
+    geometry_ok = persist.get("geometryOk") or 0
+    setups = persist.get("setupsUpserted") or 0
+
     # ---- success ------------------------------------------------------------
     stats = payload.get("filterStats") or {}
     live = (stats.get("live") or {}).get("finalCount", "?")
     pending = (stats.get("pending") or {}).get("finalCount", "?")
-    skipped = bool(payload.get("analysisSkipped"))
+    analysis_skipped = bool(payload.get("analysisSkipped"))
     unreviewed = payload.get("unreviewedCount") or 0
     err_msg = payload.get("error")
 
-    log(f"ingested in {elapsed:.0f}s: live {live} · pending {pending}"
-        + (f" · {unreviewed} UNREVIEWED" if skipped else "")
+    log(f"WROTE run #{run_id} in {elapsed:.0f}s: {setups} setups · {inserted} decisions"
+        + (f" · {skipped} skipped" if skipped else "")
+        + f" · live {live} · pending {pending}"
+        + (f" · {unreviewed} UNREVIEWED" if analysis_skipped else "")
         + (f" · error: {err_msg}" if err_msg else ""))
+    if geometry_ok < setups:
+        log(f"WARNING: only {geometry_ok}/{setups} setups are replayable "
+            f"(need breakout_level + stop + t05_target) — outcome tracking will be partial.")
 
     verdict_line = (
         f"⚠️ <b>{unreviewed} setup(s) stored UNREVIEWED</b> — the analysis was unavailable, "
         f"so no verdict text. The board, promotion and sizing are unaffected."
-        if skipped
+        if analysis_skipped
         else "Analysis graded every setup."
     )
     send_telegram(
