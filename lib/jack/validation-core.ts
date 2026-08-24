@@ -238,6 +238,138 @@ export interface JackDecisionClient {
   recNotional: number | null;
 }
 
+// ============================================================================
+// THE SHARED EXIT — every render path leaves through finalizeClientDecisions.
+//
+// There are two ways a board reaches the terminal: a live VALIDATE
+// (buildClientDecisions) and a page load (GET /api/jack-board, via
+// buildHydratedDecisions). They start from different sources — parsed LLM output
+// + enriched setups on one side, a SQLite row join + a Redis price store on the
+// other — and every time they have been allowed to finish independently they have
+// drifted:
+//
+//   · entry_status was emitted by one and not the other (dc94942)
+//   · currentPrice arrived as {price,source,asOf} from the price store while the
+//     client type promised number, so the price ladder called .toFixed on an
+//     object and the row crashed on expand
+//   · LIVE came out priority-sorted from VALIDATE and alphabetical from
+//     hydration, because the sort lived at the tail of buildClientDecisions
+//
+// Same class of bug three times: the divergence is possible, so eventually it
+// happens. This function is the fix for the class, not the instances. Both paths
+// end with `return finalizeClientDecisions(rows)`, so type and order are settled
+// in ONE place and a new path cannot get them wrong by omission.
+//
+// scripts/jack-render-path-parity-selftest.ts holds this contract to runtime
+// typeof + ticker-sequence equality on both paths.
+// ============================================================================
+
+/**
+ * Every numeric field of JackDecisionClient, enumerated ONCE.
+ *
+ * Two things must agree about this list: finalizeClientDecisions (which coerces
+ * them) and the parity selftest (which asserts their runtime typeof). The
+ * selftest also checks the list has not gone stale — any key that arrives as a
+ * number on either path but is absent here is a coercion hole, and it fails.
+ */
+export const NUMERIC_DECISION_FIELDS = [
+  "decisionId", "setupId", "entry", "stop", "target", "shares", "breakout",
+  "currentPrice", "pctToBreakout", "userEntryPrice", "userExitPrice",
+  "sharesAtMark", "fireClose", "fireBar", "handleScore", "priority",
+  "cupDepthPct", "handleRetrPct", "daysSinceHandleLow", "daysSinceConfirm",
+  "fullShares", "fullNotional", "halfShares", "halfNotional",
+  "recShares", "recNotional",
+] as const;
+
+/**
+ * Anything → a finite number, or null. The last gate before a numeric field
+ * reaches the client.
+ *
+ * The UNWRAP is deliberate and narrow. The Redis price store holds
+ * `{ price, source, asOf }` per ticker (StoredPrices in lib/jack/price-refresh),
+ * and a reader that forgets `.price` hands the whole object to a field the client
+ * type says is a number. Coercing that with Number() yields NaN — which is
+ * strictly WORSE than the crash it replaces, because NaN passes every `!= null`
+ * guard and silently renders a blank ladder instead of throwing somewhere a
+ * stack trace can be read. So the wrapper is unwrapped by name, and everything
+ * that is not a finite number after that becomes null.
+ *
+ * Numeric strings are accepted too — a JSON round-trip or a TEXT-affinity column
+ * can hand back "101.5", and null is a worse answer than the number it plainly is.
+ */
+export function toFiniteNumber(v: unknown): number | null {
+  if (v == null) return null;
+  // Explicit unwrap of the price-store wrapper. Named shape only — this is not a
+  // general "pull a number out of any object", which would hide real shape bugs.
+  if (typeof v === "object" && !Array.isArray(v)) {
+    const inner = (v as { price?: unknown }).price;
+    return typeof inner === "number" && Number.isFinite(inner) ? inner : null;
+  }
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (t === "") return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+const BUCKET_SORT_RANK: Record<string, number> = { full: 0, half: 1, skip: 2 };
+
+/**
+ * Within-section ordering: priority DESC (nulls last, LIVE only) → size_bucket
+ * (full → half → skip) → handle_score DESC → ticker ASC → handleLowDate ASC.
+ *
+ * The final tiebreak is DATA, not arrival index. It used to be `a.i - b.i`, which
+ * reads as "stable" but silently means "whatever order the caller happened to
+ * build the array in" — LLM emit order on the VALIDATE path, `ORDER BY s.ticker`
+ * on the hydration path. Two paths cannot agree on an order defined by how they
+ * were called, so exact ties now break alphabetically and the board's order is
+ * reproducible from the rows alone.
+ */
+function sortWithinSection(list: JackDecisionClient[], usePriority: boolean): JackDecisionClient[] {
+  return [...list].sort((a, b) => {
+    if (usePriority && (a.priority ?? null) !== (b.priority ?? null)) {
+      if (a.priority == null) return 1; // nulls last
+      if (b.priority == null) return -1;
+      return b.priority - a.priority; // higher priority first
+    }
+    const ba = a.sizeBucket ? BUCKET_SORT_RANK[a.sizeBucket] ?? 3 : 3;
+    const bb = b.sizeBucket ? BUCKET_SORT_RANK[b.sizeBucket] ?? 3 : 3;
+    if (ba !== bb) return ba - bb;
+    const sa = a.handleScore ?? Number.NEGATIVE_INFINITY;
+    const sb = b.handleScore ?? Number.NEGATIVE_INFINITY;
+    if (sa !== sb) return sb - sa;
+    const t = a.ticker.localeCompare(b.ticker);
+    if (t !== 0) return t;
+    return a.handleLowDate.localeCompare(b.handleLowDate);
+  });
+}
+
+/**
+ * Coerce every numeric field, then order both sections. The single exit both
+ * render paths return through — see the block comment above.
+ *
+ * Rows whose section is neither live nor pending (a client-side "open" row) are
+ * passed through untouched at the end rather than dropped; no server path emits
+ * them today, and silently losing a row is not a thing a normalizer should do.
+ */
+export function finalizeClientDecisions(rows: JackDecisionClient[]): JackDecisionClient[] {
+  const coerced = rows.map((d) => {
+    const out: Record<string, unknown> = { ...d };
+    for (const f of NUMERIC_DECISION_FIELDS) {
+      if (f in out) out[f] = toFiniteNumber(out[f]);
+    }
+    return out as unknown as JackDecisionClient;
+  });
+  return [
+    ...sortWithinSection(coerced.filter((d) => d.section === "live"), true),
+    ...sortWithinSection(coerced.filter((d) => d.section === "pending"), false),
+    ...coerced.filter((d) => d.section !== "live" && d.section !== "pending"),
+  ];
+}
+
 export interface SectionedSetups {
   live: ParsedSetup[];
   pending: ParsedSetup[];
@@ -669,39 +801,12 @@ export function buildClientDecisions(
   for (const ed of extracted?.live_decisions ?? []) push(ed, "live");
   for (const ed of extracted?.pending_decisions ?? []) push(ed, "pending");
 
-  // DEFAULT SORT (spec Part C): within each section, rank by size_bucket
-  // (full → half → skip) then handle_score DESC. Rows without a score sink to the
-  // bottom. Stable — preserves the upstream status-priority order among ties. The
-  // section grouping in the UI is preserved because we only reorder WITHIN a section.
-  //
-  // LIVE additionally sorts by scanner `priority` DESC as the PRIMARY key when
-  // present (higher = take first), NULLS LAST. When no row carries a priority (the
-  // scanner hasn't emitted the column yet), the priority key is constant and the
-  // sort falls through to the exact bucketRank→score→stable order as before — so
-  // this is a no-op until the data arrives, and never disturbs the existing order.
-  const bucketRank: Record<string, number> = { full: 0, half: 1, skip: 2 };
-  const sortKey = (d: JackDecisionClient) => ({
-    priority: d.priority ?? null,
-    br: d.sizeBucket ? bucketRank[d.sizeBucket] : 3,
-    score: d.handleScore ?? -Infinity,
-  });
-  const stableSort = (list: JackDecisionClient[], usePriority: boolean) =>
-    list
-      .map((d, i) => ({ d, i }))
-      .sort((a, b) => {
-        const ka = sortKey(a.d);
-        const kb = sortKey(b.d);
-        if (usePriority && ka.priority !== kb.priority) {
-          if (ka.priority == null) return 1; // nulls last
-          if (kb.priority == null) return -1;
-          return kb.priority - ka.priority; // higher priority first
-        }
-        if (ka.br !== kb.br) return ka.br - kb.br;
-        if (ka.score !== kb.score) return kb.score - ka.score;
-        return a.i - b.i; // stable tiebreak
-      })
-      .map((x) => x.d);
-  const liveSorted = stableSort(out.filter((d) => d.section === "live"), true);
-  const pendingSorted = stableSort(out.filter((d) => d.section === "pending"), false);
-  return [...liveSorted, ...pendingSorted];
+  // DEFAULT SORT (spec Part C) + numeric coercion now live in
+  // finalizeClientDecisions, the shared exit both render paths return through.
+  // This used to be a private sort at the tail of THIS function, which is exactly
+  // why the hydrated board came out alphabetical: the ordering was a property of
+  // the VALIDATE path rather than of the board. Same keys as before (priority DESC
+  // nulls-last on LIVE → bucket → score), with the arrival-index tiebreak replaced
+  // by ticker ASC so both paths can produce the same order.
+  return finalizeClientDecisions(out);
 }

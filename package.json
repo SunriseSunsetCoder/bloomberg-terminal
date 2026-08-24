@@ -10,6 +10,7 @@
     "lint": "biome lint .",
     "format": "biome format --write .",
     "typecheck": "tsc --noEmit",
+    "selftest:parity": "tsx scripts/jack-render-path-parity-selftest.ts",
     "prepare": "husky"
   },
   "dependencies": {

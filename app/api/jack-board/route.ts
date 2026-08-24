@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { isPersistenceAvailable, persistenceUnavailableReason } from "@/lib/db/env";
-import { computeSizing, normalizeSizeBucket } from "@/lib/jack/handle-score";
+import { buildHydratedDecisions, etDateISO } from "@/lib/jack/board-hydration";
 import { DEFAULT_RISK_PER_TRADE, type JackDecisionClient } from "@/lib/jack/validation-core";
+import type { StoredPrices } from "@/lib/jack/price-refresh";
 
 export const dynamic = "force-dynamic";
 
@@ -100,87 +101,30 @@ export async function GET() {
 
     // NOW price from the shared Redis store the open-position board already reads.
     // Best-effort: a Redis hiccup must not cost the whole board.
-    let prices: Record<string, number> = {};
+    //
+    // The store's shape is StoredPrices — { price, source, asOf } PER TICKER, not
+    // a bare number. It is handed to buildHydratedDecisions whole, which reads
+    // `.price` and applies the same ET-day freshness gate /api/jack-open-positions
+    // uses. Asserting a wrong shape here is what put an object into a field the
+    // client type promised was a number.
+    let priceStore: StoredPrices | null = null;
     try {
       const { redis } = await import("@/lib/redis");
-      const store = (await redis.get(PRICES_KEY)) as { prices?: Record<string, number> } | null;
-      prices = store?.prices ?? {};
+      priceStore = (await redis.get(PRICES_KEY)) as StoredPrices | null;
     } catch {
-      prices = {}; // a Redis hiccup must not cost the whole board
+      priceStore = null; // a Redis hiccup must not cost the whole board
     }
 
-    const decisions: JackDecisionClient[] = rows.map((r) => {
-      const mark = marks.get(r.setupId);
-      const bucket = normalizeSizeBucket(r.sizeBucket);
-      const sizing = computeSizing(riskPerTrade, r.entry, r.stop);
-      const recShares =
-        bucket === "half" ? sizing.halfShares : bucket === "skip" ? null : sizing.fullShares;
-
-      return {
-        decisionId: r.decisionId,
-        setupId: r.setupId,
-        ticker: r.ticker,
-        handleLowDate: r.handleLowDate,
-        section: r.section,
-        decision: r.decision,
-        entry: r.entry,
-        stop: r.stop,
-        target: r.target,
-        breakout: r.breakout,
-        shares: r.shares ?? null,
-        currentPrice: prices[r.ticker.toUpperCase()] ?? null,
-
-        // Commentary — persisted per-decision all along, read back here.
-        note: r.notes ?? null,
-        newsClass: r.newsClass ?? null,
-        sectorRs: r.sectorRs ?? null,
-        crossAsset: r.crossAsset ?? null,
-        earningsFlag: r.earningsFlag ?? null,
-        pctToBreakout: r.pctToBreakout ?? null,
-
-        // User marks + frozen decision-time context.
-        userAction: mark?.userAction ?? r.userAction ?? null,
-        userEntryPrice: mark?.userEntryPrice ?? null,
-        userEntryDate: mark?.userEntryDate ?? null,
-        userExitPrice: mark?.userExitPrice ?? r.userExitPrice ?? null,
-        userExitDate: mark?.userExitDate ?? null,
-        jackDecisionAtMark: mark?.jackDecisionAtMark ?? r.jackDecisionAtMark ?? null,
-        sharesAtMark: mark?.sharesAtMark ?? null,
-        jackAnalysisAtMark: r.jackAnalysisAtMark ?? null,
-
-        // Fired state — what drives the pending→LIVE display re-section.
-        firedAt: r.firedAt,
-        fireClose: r.fireClose,
-        fireBar: r.fireBar,
-        firedStatus: r.firedStatus,
-
-        // Scanner classification + geometry.
-        handleScore: r.handleScore,
-        sizeBucket: bucket,
-        sector: r.sector,
-        tier: r.tier,
-        priority: r.priority,
-        cupDepthPct: r.cupDepthPct ?? null,
-        handleRetrPct: r.handleRetrPct ?? null,
-
-        // Phase 3 entry freshness — the FRESH/AGING split.
-        entryStatus: r.entryStatus ?? null,
-        confirmedCloseDate: r.confirmedCloseDate ?? null,
-        daysSinceConfirm: r.daysSinceConfirm ?? null,
-
-        // Persisted by the ingest (the detector's ASOF-anchored value), never
-        // recomputed here — re-deriving it from a wall clock is the drift the
-        // anchor fix removed.
-        daysSinceHandleLow: r.daysSinceHandleLow ?? null,
-
-        // Sizing, recomputed from the run's own risk setting.
-        fullShares: sizing.fullShares,
-        fullNotional: sizing.fullNotional,
-        halfShares: sizing.halfShares,
-        halfNotional: sizing.halfNotional,
-        recShares,
-        recNotional: recShares != null && r.entry != null ? recShares * r.entry : null,
-      };
+    // Shape the rows through the SHARED exit. buildHydratedDecisions ends with
+    // finalizeClientDecisions, the same call buildClientDecisions ends with, so
+    // this board is type- and order-identical to a VALIDATE-rendered one by
+    // construction rather than by two mappers happening to agree.
+    const decisions: JackDecisionClient[] = buildHydratedDecisions({
+      rows,
+      riskPerTrade,
+      marks,
+      priceStore,
+      etDay: etDateISO(new Date()),
     });
 
     return NextResponse.json<JackBoardResponse>({

@@ -15,4 +15,15 @@ if [ "$current_branch" = "main" ] || [ "$current_branch" = "master" ]; then
   exit 1
 fi
 
+# Render-path parity — the two ways a board reaches the terminal (a live VALIDATE
+# and a hydrated page load) must agree on field TYPES and row ORDER. They have
+# drifted three times, and each time the guard was an ad-hoc script nobody ran.
+# Runs here so type/order divergence cannot be pushed. ~5s.
+echo "🔍 Render-path parity selftest..."
+if ! npm run --silent selftest:parity; then
+  echo "❌ Render-path parity FAILED — the VALIDATE and hydration boards disagree."
+  echo "💡 To bypass: BYPASS_PUSH_PROTECTION=1 git push"
+  exit 1
+fi
+
 echo "✅ Pre-push checks passed!"
