@@ -29,7 +29,7 @@ write is a "mark traded" convenience (Phase 2). Mirrors the standalone
 ## Sizing
 
 - **Account size:** input, default **$70,000**, **persisted** (localStorage or user-settings — this is the real app, persistence is fine). Drives all dollar math.
-- **Risk scheme toggle** (persisted): **Balanced** Q3 0.30% / Q4 0.50% / Q5 0.75% · **Aggressive** Q3 0.35% / Q4 0.55% / Q5 0.85%. **Q5 hard cap 1.0%.** Editable per-row risk% (defaults from tier+scheme).
+- **Risk scheme toggle** (persisted): **Balanced** Q3 0.30% / Q4 0.50% / Q5 1.00% · **Aggressive** Q3 0.35% / Q4 0.55% / Q5 0.85%. **Q5 hard cap 1.0%.** Editable per-row risk% (defaults from tier+scheme).
 - Per row: `risk$ = account × risk% ; shares = floor(risk$/(entry−stop)) ; position$ = shares×entry ; reward$ = shares×(target−entry)`. Reuse `computeSizing` where possible.
 
 ---
