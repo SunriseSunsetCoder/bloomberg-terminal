@@ -28,6 +28,24 @@ REM ===========================================================================
 
 cd /d "%~dp0.."
 set "REPO=%CD%"
+
+REM --- UTF-8, before Python starts -----------------------------------------
+REM Windows defaults stdout to the ANSI code page (cp1252), which cannot encode
+REM the warning signs, arrows and emoji in this pipeline's log strings. print()
+REM then raises UnicodeEncodeError and kills the stage — a 2026-08-24 run lost a
+REM clean 76/76 detector pass to exactly that, on its last log line.
+REM
+REM UTF-8 mode is set here rather than only in code because it must also cover
+REM output that never passes through our log(): papermill's progress and
+REM tracebacks, and anything a dependency prints directly.
+REM
+REM This is the NON-INTERACTIVE path — under Task Scheduler there is no console
+REM at all and stdout is the redirected handle below. chcp only affects a real
+REM console, so it is best-effort and silenced; the two env vars are what
+REM actually carry the fix headless.
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8:replace"
+chcp 65001 >nul 2>&1
 set "LOGDIR=%REPO%\data\pipeline_state\logs"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" 2>nul
 set "WRAPLOG=%LOGDIR%\task_wrapper.log"
