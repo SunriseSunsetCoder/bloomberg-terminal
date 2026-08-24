@@ -492,6 +492,49 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
     );
   };
 
+  // Phase 3 entry-freshness badge — a pure READ of the entry_status column the
+  // pipeline stamps (scripts/jack-stamp-entry-status.ts). It NEVER recomputes the
+  // split; if this badge and the stamper ever disagree the bug is upstream, not here.
+  // The stamp is time-since-confirm only, with one threshold at zero:
+  //   FRESH   the confirming close IS the latest close — the modeled fill (next
+  //           session's open) has not happened yet, so the entry is at parity.
+  //   AGING   it is not — the modeled open has passed, so pullback-to-entry only.
+  //           Flagged, NEVER auto-skipped; there is deliberately no upper bound.
+  //   PENDING no confirming close at all, so the setup has no entry age.
+  // Colour follows bucketPill's weight-encodes-directive rule, but FRESH is OUTLINE
+  // green, not filled: the filled-green "handle score: FULL" pill sits immediately to
+  // its left and two filled greens fight. Outline-green-bold is already the table's
+  // positive-timing vocabulary (see firedBadge). UNKNOWN/absent/unrecognized degrades
+  // to nothing, exactly like tierLabel/sectorLabel — a null must never paint a badge.
+  const entryStatusBadge = (d: JackDecisionClient) => {
+    const status = (d.entryStatus ?? "").trim().toUpperCase();
+    if (status !== "FRESH" && status !== "AGING" && status !== "PENDING") return null;
+    const cls =
+      status === "FRESH"
+        ? isDarkMode
+          ? "bg-transparent text-green-400 border-green-600 font-bold"
+          : "bg-transparent text-green-700 border-green-600 font-bold"
+        : status === "AGING"
+          ? isDarkMode
+            ? "bg-transparent text-amber-300 border-amber-500/70 font-semibold"
+            : "bg-transparent text-amber-700 border-amber-500 font-semibold"
+          : `bg-transparent ${subFg} ${border} font-medium`;
+    const title =
+      status === "FRESH"
+        ? "Confirmed on the most recent close — the modeled fill (the next session's open) has not happened yet, so the entry is still at backtest parity. The 2.24 book."
+        : status === "AGING"
+          ? "Confirmed before the most recent close — the modeled next open has already passed, so this entry is off-parity. Pullback-to-entry only, which restores the original R:R without improving it. The 1.83 book. Flagged, never auto-skipped — the call is yours."
+          : "No confirming close above the rim yet, so the setup has no entry age. Not actionable — watch only.";
+    return (
+      <span
+        className={`px-1.5 py-0.5 rounded text-[10px] tracking-wide border whitespace-nowrap shrink-0 ${cls}`}
+        title={title}
+      >
+        <span className="opacity-60 font-normal">entry:</span> {status}
+      </span>
+    );
+  };
+
   // Scanner classification tags — shown on the COLLAPSED row (always visible, so no
   // setup reads "no sector") right beside the handle-score pill. Each degrades to
   // nothing when the scanner omitted that column.
@@ -1090,6 +1133,7 @@ export function JackDecisionsTable({ decisions, isDarkMode, persistenceAvailable
               not JACK's call). Unmarked → live verdict, prominent. */}
           {marked ? verdictPill(frozenVerdict ?? liveVerdict, true) : verdictPill(liveVerdict)}
           {bucketPill(d)}
+          {entryStatusBadge(d)}
           {tierLabel(d)}
           {sectorLabel(d)}
           {priorityLabel(d)}
