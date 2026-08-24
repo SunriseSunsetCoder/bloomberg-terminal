@@ -216,7 +216,16 @@ export interface JackDecisionClient {
   // SETUP GEOMETRY line so the pattern shape is readable, not just its score.
   cupDepthPct: number | null; // cup depth %
   handleRetrPct: number | null; // handle retracement %
-  daysSinceHandleLow: number | null; // trading/calendar days since the handle low
+  daysSinceHandleLow: number | null; // calendar days since the handle low, as the detector measured it
+  // ---- Phase 3 entry freshness ----------------------------------------------
+  // FRESH (next open takeable, 2.24 book) / AGING (pullback-to-entry only, 1.83
+  // book) / PENDING / UNKNOWN. Carried by BOTH render paths on purpose: a live
+  // VALIDATE fills these from the parsed CSV, GET /api/jack-board fills them from
+  // setups. If only one path carried them the terminal would show a different
+  // board depending on how it was loaded.
+  entryStatus: string | null;
+  confirmedCloseDate: string | null;
+  daysSinceConfirm: number | null;
   // Concrete shares/notional at each size, from risk/trade ÷ stop distance. The
   // user sees "FULL — 340 sh / $47,600" and makes the call. Null if geometry is
   // missing or stop >= entry.
@@ -568,6 +577,7 @@ export function buildClientDecisions(
       currentPrice: number | null; handleScore: number | null; sizeBucket: SizeBucket | null;
       sector: string | null; tier: string | null; priority: number | null;
       cupDepthPct: number | null; handleRetrPct: number | null; daysSinceHandleLow: number | null;
+      entryStatus: string | null; confirmedCloseDate: string | null; daysSinceConfirm: number | null;
     }
   >();
   for (const s of [...enrichedLive, ...enrichedPending]) {
@@ -587,6 +597,9 @@ export function buildClientDecisions(
       cupDepthPct: s.cupDepthPct ?? null,
       handleRetrPct: s.handleRetrPct ?? null,
       daysSinceHandleLow: Number.isFinite(s.daysSinceHandleLow) ? s.daysSinceHandleLow : null,
+      entryStatus: s.entryStatus ?? null,
+      confirmedCloseDate: s.confirmedCloseDate ?? null,
+      daysSinceConfirm: s.daysSinceConfirm ?? null,
     });
   }
 
@@ -642,6 +655,9 @@ export function buildClientDecisions(
       cupDepthPct: g?.cupDepthPct ?? null,
       handleRetrPct: g?.handleRetrPct ?? null,
       daysSinceHandleLow: g?.daysSinceHandleLow ?? null,
+      entryStatus: g?.entryStatus ?? null,
+      confirmedCloseDate: g?.confirmedCloseDate ?? null,
+      daysSinceConfirm: g?.daysSinceConfirm ?? null,
       fullShares: sizing.fullShares,
       fullNotional: sizing.fullNotional,
       halfShares: sizing.halfShares,

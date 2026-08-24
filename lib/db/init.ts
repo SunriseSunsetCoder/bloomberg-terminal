@@ -130,6 +130,10 @@ function runMigrations(database: Database.Database): void {
     { name: "entry_status", def: "TEXT" },
     { name: "confirmed_close_date", def: "TEXT" },
     { name: "days_since_confirm", def: "INTEGER" },
+    // Handle age as the DETECTOR measured it (anchored to the data's last bar,
+    // not a wall clock). Stored so a DB-restored board shows the same number the
+    // CSV carried instead of a blank or a re-derived, drifting one.
+    { name: "days_since_handle_low", def: "INTEGER" },
   ]);
   // Reference-row support on validation_runs: a non-run bookkeeping row that stores
   // the FROZEN hscore_edges + size map as auditable JSON, so the thresholds behind

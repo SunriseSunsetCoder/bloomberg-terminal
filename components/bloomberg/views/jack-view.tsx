@@ -4,6 +4,9 @@ import { useState, useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Play, RotateCcw, Copy, Check, Briefcase, Filter, Database, RefreshCw, DollarSign, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useJackValidation } from "@/components/bloomberg/hooks/useJackValidation";
+// Hydrates the board from SQLite when the client holds none — what makes a
+// pipeline-ingested run visible on a fresh page load. A live VALIDATE always wins.
+import { useJackBoard } from "@/components/bloomberg/hooks/useJackBoard";
 import { useJackOpenPositions } from "@/components/bloomberg/hooks/useJackOpenPositions";
 import { useJackFiredFlags } from "@/components/bloomberg/hooks/useJackFiredFlags";
 import { JackDecisionsTable } from "@/components/bloomberg/views/jack-decisions-table";
@@ -45,6 +48,8 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
   // is a collapsed fallback for copy/reference. Default hidden.
   const [showRaw, setShowRaw] = useState(false);
   const { mutate, data, isPending, reset } = useJackValidation();
+  // Fills the empty state from the current DB run; no-ops once a board exists.
+  const { isHydrating } = useJackBoard();
   // Open positions across ALL runs, so an open trade stays reachable even when it
   // isn't in this week's scan. A setup whose latest mark is TRADED routes to CURRENT
   // POSITIONS (open-management view) and out of LIVE/PENDING — see combineJackDecisions,
@@ -483,7 +488,13 @@ export function JackView({ isDarkMode = true, onBack }: JackViewProps) {
               </div>
             )}
 
-            {!isPending && !data && (
+            {!isPending && !data && isHydrating && (
+              <div className={`text-center ${subFg} py-12 text-sm`}>
+                Restoring board from the database…
+              </div>
+            )}
+
+            {!isPending && !data && !isHydrating && (
               <div className={`text-center ${subFg} py-12 text-sm`}>
                 Paste scanner CSV on the left and click VALIDATE.
               </div>

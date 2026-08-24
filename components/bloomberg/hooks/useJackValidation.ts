@@ -68,6 +68,12 @@ export interface JackDecisionClient {
   cupDepthPct?: number | null;
   handleRetrPct?: number | null;
   daysSinceHandleLow?: number | null;
+  // Phase 3 entry freshness — FRESH (next open takeable, 2.24 book) / AGING
+  // (pullback-to-entry only, 1.83 book) / PENDING / UNKNOWN. Present on BOTH a
+  // VALIDATE response and a DB-hydrated board.
+  entryStatus?: string | null;
+  confirmedCloseDate?: string | null;
+  daysSinceConfirm?: number | null;
   fullShares?: number | null;
   fullNotional?: number | null;
   halfShares?: number | null;

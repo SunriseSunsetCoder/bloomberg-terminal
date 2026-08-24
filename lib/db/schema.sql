@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS setups (
     entry_status          TEXT,
     confirmed_close_date  TEXT,
     days_since_confirm    INTEGER,
+    -- Calendar days from handle_low_date to the DATA's last bar (ASOF_DATE in the
+    -- detector), read straight off the watchlist CSV. Persisted rather than
+    -- recomputed on read: deriving it from a wall clock is exactly the drift the
+    -- ASOF anchor fix removed, and a restored board must show the same number the
+    -- CSV carried.
+    days_since_handle_low INTEGER,
     CHECK (first_seen_status IN ('just_fired', 'pending', 'recent_breakout', 'unknown')),
     CHECK (last_seen_status  IN ('just_fired', 'pending', 'recent_breakout', 'unknown')),
     UNIQUE (ticker, handle_low_date)

@@ -100,6 +100,26 @@ interface JackValidationResponse {
   ingestRefused?: boolean;
   priorCount?: number;
   newCount?: number;
+  /**
+   * STRUCTURED persistence outcome. Exists because an unattended caller had no
+   * way to tell "the endpoint ran" from "the endpoint wrote": filterStats is
+   * computed at applyFilters, BEFORE persistRun, and persistRun is deliberately
+   * non-fatal — a DB error was reported only inside the markdown preface. So a
+   * run whose write failed still returned 200 with plausible-looking counts, and
+   * pipeline/ingest.py called it success.
+   *
+   * Clients must verify against THIS, not against filterStats.
+   */
+  persist?: {
+    runId: number | null;
+    setupsUpserted: number;
+    decisionsInserted: number;
+    decisionsSkipped: number;
+    geometryOk: number;
+    retired: number;
+    unretired: number;
+    error: string | null;
+  };
 }
 
 
@@ -403,6 +423,15 @@ function persistRun(args: {
         sector: setup.sector,
         tier: setup.tier,
         priority: setup.priority,
+        // Phase 3 freshness + the detector's handle age. All per-run and
+        // data-anchored; upsertSetup overwrites them rather than COALESCE-ing,
+        // so tonight's stamp replaces last night's.
+        entryStatus: setup.entryStatus,
+        confirmedCloseDate: setup.confirmedCloseDate,
+        daysSinceConfirm: setup.daysSinceConfirm,
+        daysSinceHandleLow: Number.isFinite(setup.daysSinceHandleLow)
+          ? setup.daysSinceHandleLow
+          : undefined,
       };
       const setupId = dbWrite.upsertSetup(seen, args.timestamp);
       setupIdMap.set(`${setup.ticker}|${handleLowDate}`, setupId);
@@ -797,6 +826,16 @@ function persistAndRespond(args: PersistAndRespondArgs): NextResponse {
     analysisMode,
     analysisSkipped,
     unreviewedCount,
+    persist: {
+      runId: persistResult.runId ?? null,
+      setupsUpserted: persistResult.setupsUpserted,
+      decisionsInserted: persistResult.decisionsInserted,
+      decisionsSkipped: persistResult.decisionsSkipped,
+      geometryOk: persistResult.geometryOk,
+      retired: persistResult.retired,
+      unretired: persistResult.unretired,
+      error: persistResult.error ?? null,
+    },
   });
 }
 
