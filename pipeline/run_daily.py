@@ -468,6 +468,10 @@ def stage_pull(tee: Tee, args, run_date: date) -> int:
         argv += ["--date", args.date]
     if args.dry_run:
         argv += ["--dry-run"]
+    if args.pacing is not None:
+        argv += ["--pacing", str(args.pacing)]
+        tee.line(f"pacing override: {args.pacing}s between requests "
+                 f"(tiingo_pull's default is 1.0s)")
 
     watcher = PullWatcher()
     tee.line(f"tier-cap guard ARMED: abort after {watcher.cap_hits_to_abort} distinct "
@@ -1457,6 +1461,35 @@ def selftest() -> int:
     check("an untiered row is still listed (no positive skip evidence)",
           len(summarize_board([{"ticker": "U", "entryStatus": "FRESH"}])["fresh"]) == 1)
 
+    print("\n[14] the cap guard is RATE-independent (pacing can be lowered safely)")
+    # Dropping pacing 1.0s -> 0.1s sends requests 10x faster. The guard counts
+    # distinct cap signatures with no timestamps anywhere, so speed cannot outrun
+    # it -- but "should" is not evidence. This drives a REAL child through the
+    # actual run_stage() plumbing (pipe, line reader, watcher, terminate) at 0.1s
+    # AND unpaced, and asserts it still aborts on the 3rd hit having read exactly
+    # 3 FAIL lines. The pull is strictly sequential (one request at a time), so
+    # there is no in-flight backlog to leak past the abort either.
+    flood = (
+        "import time\n"
+        "for i in range(400):\n"
+        "    print(f'  {i}/1823 - 0 updated - 0 current - {i} failed (0s)', flush=True)\n"
+        "    print(f'  FAIL T{i:04d}: HTTP 429: Too Many Requests', flush=True)\n"
+        "    SLEEP\n"
+        "print('guard was outrun', flush=True)\n"
+    )
+    for label, sleep_stmt in (("0.1s (10 req/s)", "time.sleep(0.1)"), ("unpaced", "pass")):
+        w = PullWatcher()
+        code, lines = run_stage(
+            Tee(None), "PULL", ["-c", flood.replace("SLEEP", sleep_stmt)],
+            code_map={}, generic_code=EXIT_PULL_GENERIC,
+            on_line=w.feed, abort_code=EXIT_PULL_TIER_CAP,
+            abort_reason="cap probe",
+        )
+        check(f"{label}: aborts with the tier-cap code", code == EXIT_PULL_TIER_CAP, str(code))
+        check(f"  {label}: stopped at exactly 3 cap hits", len(w.cap_hits) == 3, str(len(w.cap_hits)))
+        check(f"  {label}: the guard was not outrun",
+              not any("guard was outrun" in l for l in lines))
+
     print(f"\n{'ALL PASS' if failed == 0 else 'FAILURES'} — {passed} passed, {failed} failed\n")
     return 0 if failed == 0 else 1
 
@@ -1494,6 +1527,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--log-dir", type=Path, default=None,
                         help="Log directory (default: $JACK_PIPELINE_LOG_DIR or "
                              "data/pipeline_state/logs).")
+    parser.add_argument("--pacing", type=float, default=None,
+                        help="Seconds between Tiingo requests, passed to tiingo_pull.py. "
+                             "Omit to use its default (1.0). Tiingo does not rate limit per "
+                             "second or minute, so this changes the wall clock and which "
+                             "hourly bucket the requests land in, not the request count.")
     parser.add_argument("--max-fail-pct", type=float, default=5.0,
                         help="Stop the chain when more than this %% of tickers fail the pull "
                              "(default: 5.0).")
