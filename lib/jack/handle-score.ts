@@ -17,15 +17,29 @@ export const HSCORE_EDGES = [0.036, 0.333, 0.456, 0.548, 0.657, 0.89] as const;
 
 export type SizeBucket = "full" | "half" | "skip";
 
-// Quintile → sizing directive. Q5,Q4,Q3 → full · Q1,Q2 → skip.
+// Quintile → sizing directive. Q5,Q4 → full · Q3 → half · Q1,Q2 → skip.
 // Index is the quintile 0..4 (0 = Q1 lowest score, 4 = Q5 highest).
-// Q3 promoted half→full 2026-07-20: a 15-year backtest showed Q3 profitable in all
-// 16 years (PF 2.24, avg +0.42R, no bear-year weakness). The "half" bucket remains a
-// valid directive for CSV-provided / legacy rows; no quintile maps to it now.
+//
+// Q3 REVERTED half←full 2026-08-25, undoing the 2026-07-20 promotion (0329ab5).
+// That promotion cited a 15-yr robustness read (Q3 profitable in all 16 years,
+// PF 2.24, avg +0.42R) — a reason not to SKIP Q3, but never a sizing sweep saying
+// full was the right size. The operating framework is Q5 full-plus / Q4 full /
+// Q3 half, so Q3 grades back to half.
+//
+// THIS IS A GRADING LABEL, NOT A RISK-DOLLAR CHANGE. TIER_RISK_PCT in
+// lib/jack/basket.ts is keyed by TIER and is deliberately untouched — Q3 stays at
+// 0.30% risk there. What moves is the recommended share count (recommendedSizing
+// maps full→fullShares, half→halfShares) and the bucket a trade is graded under.
+//
+// It also makes "half" a QUINTILE-REACHABLE bucket again. That matters beyond
+// sizing: JANLY's handle-score forward test gates its verdict on all three of
+// full/half/skip clearing n>=30, and with no quintile mapping to half that verdict
+// was structurally unreachable. The original three-way gate is correct as written
+// once half refills, so nothing in analytics.ts's gate or verdict logic changes.
 export const SIZE_MAP: Record<number, SizeBucket> = {
   4: "full",
   3: "full",
-  2: "full",
+  2: "half",
   1: "skip",
   0: "skip",
 };
@@ -243,7 +257,17 @@ export function handleScoreReference(): HandleScoreReference {
     frozen: true,
     source: "1,780-trade validated t05 cache (PF 1.933 ≈ validated 1.91)",
     hscore_edges: [...HSCORE_EDGES],
-    size_map: { Q5: "full", Q4: "full", Q3: "full", Q2: "skip", Q1: "skip" },
+    // DERIVED from SIZE_MAP, never restated. This payload is persisted to the DB as
+    // an auditable reference row, so a hardcoded copy here was a third source of
+    // truth for the quintile→bucket rule (alongside SIZE_MAP and the scanner's
+    // Drive JSON) and could silently disagree with what the board actually applied.
+    size_map: {
+      Q5: SIZE_MAP[4],
+      Q4: SIZE_MAP[3],
+      Q3: SIZE_MAP[2],
+      Q2: SIZE_MAP[1],
+      Q1: SIZE_MAP[0],
+    },
     features: [...HANDLE_FEATURES],
     note: "Edges FROZEN from the validated cache — re-issued only by handle_score_freeze on re-validation. Do NOT re-derive from live data.",
   };
