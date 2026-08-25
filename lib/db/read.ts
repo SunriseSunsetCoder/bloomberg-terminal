@@ -87,16 +87,53 @@ export interface SetupNeedingOutcome {
  * backtest parity. 130 > 120 is deliberate — it guarantees the full 120 exit bars
  * exist before a setup is ever considered resolvable.
  */
+/**
+ * MINIMUM AGE before a setup can be TERMINAL — the resolve-early gate.
+ *
+ * A setup is eligible for resolution the moment its outcome is DECIDED, not when
+ * it turns 195 days old. Terminal means one of:
+ *   · target hit          · stop hit
+ *   · never_fired (unconfirmed and the 15-bar window elapsed)
+ *   · >= TIME_STOP_BARS (120) bars since entry -> time-stop
+ *
+ * That decision needs BARS, which SQL does not have. So this query does not try to
+ * make it: it selects everything that could POSSIBLY be terminal, and replaySetup
+ * adjudicates. replaySetup already implements exactly this order and already
+ * returns `deferred` (writing nothing) for anything not yet decided — see its
+ * `scannedBars < timeStopBars` branch and detectFire's `sorted.length < windowEnd`
+ * branch. Nothing about HOW a setup resolves changes here; only WHEN it is offered.
+ *
+ * The floor is the earliest a verdict of ANY kind is possible: a setup younger than
+ * the 15-bar confirmation window cannot even be never_fired yet. 15 trading bars at
+ * the same ~1.5 calendar-days-per-trading-day approximation used before is ~23
+ * calendar days; 25 is a small, deliberate margin so a holiday-heavy stretch cannot
+ * offer a setup one bar early and waste a fetch on a certain `deferred`.
+ *
+ * This is NOT a parity constant. It changes only which rows are handed to the
+ * replay, never how the replay decides, so the live-vs-backtest comparison (the
+ * frozen raw-R PF 2.90 reference) is untouched. CONFIRM_WINDOW_BARS = 15,
+ * TIME_STOP_BARS = 120 and DEFAULT_RESOLUTION_DAYS = 130 are all unchanged.
+ *
+ * Deliberately NOT imported from outcome-tracker.ts: that module's only dependency
+ * on this file is `import type`, which compiles away, and introducing a runtime
+ * edge here would create a real cycle. The value is duplicated with this comment
+ * instead, and it is a floor rather than a parity figure, so drift is harmless.
+ */
+const MIN_RESOLVABLE_AGE_CALENDAR_DAYS = 25;
+
 export function getSetupsNeedingOutcomes(resolutionDays = 90): SetupNeedingOutcome[] {
   const db = getDb();
 
-  // Conservative trading-day → calendar-day gate. 90 trading days ≈ 126 calendar
-  // days of weekends + ~7 of holidays ≈ 133; 1.5× (135) keeps us safely past that
-  // so we don't prematurely resolve. The precise trading-day counting happens on
-  // real Tiingo bars inside the replay.
-  const calendarDays = Math.ceil(resolutionDays * 1.5);
+  // `resolutionDays` is RETAINED for the caller contract (runOutcomeTracker passes
+  // DEFAULT_RESOLUTION_DAYS = 130, and that constant is frozen) but it no longer
+  // gates anything: waiting 195 calendar days on every setup is what kept a trade
+  // that finished at bar 30 invisible for six months. The floor below replaces it.
+  // Anything older than the old gate is still selected — the new floor is strictly
+  // more permissive, so no setup that used to be offered is now withheld.
+  void resolutionDays;
+
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - calendarDays);
+  cutoff.setDate(cutoff.getDate() - MIN_RESOLVABLE_AGE_CALENDAR_DAYS);
   const cutoffIso = cutoff.toISOString().split("T")[0];
 
   const rows = db

@@ -23,6 +23,21 @@ import type { OutcomeRow } from "@/lib/db/write";
 export const DEFAULT_RESOLUTION_DAYS = 130;
 
 // ============================================================
+// FETCH CONCURRENCY — how many Tiingo histories are in flight at once.
+//
+// 8 is a deliberate middle: large enough that a few hundred candidates finish in
+// well under a minute, small enough that it cannot swamp this app's own
+// /api/tiingo proxy (which every fetch routes through) or arrive at Tiingo as a
+// burst. Tiingo does not rate limit per second or minute — only per hour — so this
+// is about not overwhelming the local proxy and our own event loop, NOT about
+// staying under a quota.
+//
+// Not a parity constant: it changes only how fast candidates are fetched, never
+// which ones resolve or how.
+// ============================================================
+export const OUTCOME_FETCH_CHUNK = 8;
+
+// ============================================================
 // PARITY CONSTANTS — these mirror the frozen backtest (cup_handle_15yr_history_1
 // .ipynb) that produced the raw-R reference in lib/jack/backtest-reference.ts.
 // Changing either one silently invalidates every live-vs-backtest comparison on
@@ -444,10 +459,26 @@ export async function runOutcomeTracker({
 
   const setups = dbRead.getSetupsNeedingOutcomes(resolutionDays);
 
-  // Fetch histories in parallel (Tiingo), then replay + write sequentially (SQLite).
-  const histories = await Promise.all(
-    setups.map((s) => fetchDailyBars(tiingoBase, s.ticker, s.handleLowDate))
-  );
+  // Fetch histories in BOUNDED BATCHES (Tiingo), then replay + write sequentially
+  // (SQLite).
+  //
+  // This was an unbounded Promise.all over every candidate. That was harmless while
+  // the 195-day gate kept the candidate list at roughly zero, but resolve-early
+  // offers every setup older than the confirmation window — hundreds on a seeded
+  // board — and firing hundreds of simultaneous requests through this app's own
+  // /api/tiingo proxy is the first thing that would break.
+  //
+  // STATELESS by design: fixed-size batches, no per-setup backoff, no persisted
+  // deferral counters, no schema change. A setup that is still running is simply
+  // re-offered on the next pass, exactly as it would have been before.
+  const histories: Array<{ bars: Bar[]; error?: string }> = [];
+  for (let i = 0; i < setups.length; i += OUTCOME_FETCH_CHUNK) {
+    const chunk = setups.slice(i, i + OUTCOME_FETCH_CHUNK);
+    const batch = await Promise.all(
+      chunk.map((s) => fetchDailyBars(tiingoBase, s.ticker, s.handleLowDate))
+    );
+    histories.push(...batch);
+  }
 
   const summary: OutcomesSummary = {
     ok: true,
