@@ -147,7 +147,11 @@ enable_utf8_stdio()
 # papermill's progress and tracebacks above all. Without it a child writes cp1252
 # bytes that this parent then decodes as UTF-8, producing the mojibake that made
 # em-dashes render as replacement characters in earlier run logs.
-CHILD_ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8:replace"}
+CHILD_ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8:replace",
+             # Lets a stage script say what happens NEXT accurately: under the
+             # orchestrator ingest follows the detector in seconds, standalone it
+             # does not. run_detector.py reads this for its completion alert.
+             "JACK_ORCHESTRATED": "1"}
 
 
 # ============================================================================
