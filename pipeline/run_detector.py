@@ -524,12 +524,27 @@ def run(data_dir: Path, out_dir: Path, check_only: bool) -> int:
 
     total = sum(counts.values())
     log(f"WATCHLIST: {watchlist_csv}")
+    # WHAT HAPPENS NEXT — stated accurately for HOW THIS WAS INVOKED.
+    #
+    # The old line read "Board not updated yet — ingest is Phase 4." That was true
+    # while ingest did not exist, and became actively misleading the moment it
+    # shipped: under the nightly orchestrator ingest runs seconds after this
+    # message, so the alert announced the board would NOT update immediately
+    # before it did.
+    #
+    # Standalone and orchestrated are genuinely different, so the message says
+    # which. run_daily.py marks its children with JACK_ORCHESTRATED.
+    next_step = (
+        "Ingest follows now — the board updates in moments."
+        if env("JACK_ORCHESTRATED")
+        else "Board not updated yet — run pipeline/ingest.py to update it."
+    )
     send_telegram(
         f"🔎 <b>Detector run complete</b>\n"
         f"{total} setups · {detail}\n"
         f"{stamp_detail}\n"
         f"{watchlist_csv.name}\n\n"
-        f"<i>Board not updated yet — ingest is Phase 4.</i>"
+        f"<i>{next_step}</i>"
     )
     # stdout contract for the Phase 7 orchestrator: last line is the watchlist path.
     print(str(watchlist_csv))
