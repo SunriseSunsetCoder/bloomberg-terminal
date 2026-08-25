@@ -6,7 +6,7 @@ pipeline/run_daily.py — JACK daily pipeline, PHASE 7: the orchestrator.
 Chains the proven stage scripts in order and STOPS at the first failure:
 
     calendar guard -> tiingo_pull.py -> run_detector.py (--check-only, then real)
-                   -> ingest.py -> Telegram fire alert (Phase 5)
+                   -> ingest.py -> Telegram fire alert -> outcome replay
 
     python pipeline/run_daily.py                  # the nightly run
     python pipeline/run_daily.py --skip-pull      # detect+ingest on the current corpus
@@ -41,6 +41,20 @@ EXIT CODES — the tens digit names the stage that failed
     45  INGEST wrote nothing / could not verify (ingest exit 6)
 
     50  ALERT failed (RESERVED, and deliberately never returned — see below)
+
+    60  OUTCOMES failed, unclassified
+    61  OUTCOMES could not reach JACK
+    62  OUTCOMES HTTP error from /api/jack-outcomes
+    63  OUTCOMES refused by the route (ok:false)
+
+WHY 60s ARE RETURNED BUT 50 IS NOT
+    Both stages run after the board is written, but they fail differently. A broken
+    alert means tonight's ping did not arrive — annoying, self-correcting, and the
+    board is still right, so it stays exit 0 and shouts in the log. A broken outcome
+    replay means the theoretical-outcome record stopped accruing, which is NOT
+    self-correcting: if the app is unreachable tonight it is likely unreachable
+    tomorrow, and JANLY quietly starves exactly as it did for months. That deserves a
+    red Last Run Result. It still cannot abort anything — it runs last.
 
 Task Scheduler surfaces this as "Last Run Result", so a glance at the task
 history names the failing stage without opening a log.
@@ -180,6 +194,11 @@ EXIT_INGEST_NOTHING_WRITTEN = 45
 
 EXIT_ALERT_GENERIC = 50
 
+EXIT_OUTCOMES_GENERIC = 60
+EXIT_OUTCOMES_UNREACHABLE = 61
+EXIT_OUTCOMES_HTTP = 62
+EXIT_OUTCOMES_REFUSED = 63
+
 # child exit code -> orchestrator exit code, per stage
 PULL_CODE_MAP: Dict[int, int] = {2: EXIT_PULL_CANNOT_START, 3: EXIT_PULL_NETWORK}
 DETECT_CODE_MAP: Dict[int, int] = {2: EXIT_DETECT_PRECONDITION, 3: EXIT_DETECT_NOTEBOOK}
@@ -209,6 +228,10 @@ EXIT_MEANING: Dict[int, str] = {
     EXIT_INGEST_NO_PERSISTENCE: "INGEST persistence unavailable",
     EXIT_INGEST_NOTHING_WRITTEN: "INGEST wrote nothing",
     EXIT_ALERT_GENERIC: "ALERT failed",
+    EXIT_OUTCOMES_GENERIC: "OUTCOMES failed (unclassified)",
+    EXIT_OUTCOMES_UNREACHABLE: "OUTCOMES could not reach JACK",
+    EXIT_OUTCOMES_HTTP: "OUTCOMES HTTP error from /api/jack-outcomes",
+    EXIT_OUTCOMES_REFUSED: "OUTCOMES refused by the route (ok:false)",
 }
 
 
@@ -455,7 +478,7 @@ def run_stage(
 # ============================================================================
 
 def stage_pull(tee: Tee, args, run_date: date) -> int:
-    tee.rule("STAGE 1/4 — TIINGO PULL")
+    tee.rule("STAGE 1/5 — TIINGO PULL")
 
     if args.skip_pull:
         tee.line("--skip-pull: using the corpus as it stands. No requests made.")
@@ -551,7 +574,7 @@ def stage_pull(tee: Tee, args, run_date: date) -> int:
 
 
 def stage_detect(tee: Tee, args) -> Tuple[int, Optional[Path]]:
-    tee.rule("STAGE 2/4 — DETECTOR")
+    tee.rule("STAGE 2/5 — DETECTOR")
 
     base: List[str] = [str(PIPELINE_DIR / "run_detector.py")]
     if args.data_dir:
@@ -599,7 +622,7 @@ def stage_detect(tee: Tee, args) -> Tuple[int, Optional[Path]]:
 
 
 def stage_ingest(tee: Tee, args, watchlist: Optional[Path]) -> Tuple[int, List[str]]:
-    tee.rule("STAGE 3/4 — INGEST")
+    tee.rule("STAGE 3/5 — INGEST")
 
     if args.dry_run:
         tee.line("--dry-run: nothing to ingest (the detector did not run).")
@@ -635,7 +658,7 @@ def stage_alert(tee: Tee, args, ingest_lines: Sequence[str]) -> int:
     Never returns non-zero. The board is already written by this point; an
     alerting problem must not turn a good night into a red Last Run Result.
     """
-    tee.rule("STAGE 4/4 — ALERT")
+    tee.rule("STAGE 4/5 — ALERT")
     try:
         return _alert_body(tee, args, ingest_lines)
     except Exception as exc:  # noqa: BLE001
@@ -713,6 +736,92 @@ def _alert_body(tee: Tee, args, ingest_lines: Sequence[str]) -> int:
     except Exception as exc:  # noqa: BLE001 — alerting must never fail the run
         alert_problem(tee, "the alert send raised",
                       "{}: {}".format(type(exc).__name__, exc))
+
+    return EXIT_OK
+
+
+def stage_outcomes(tee: Tee, args) -> int:
+    """STAGE 5/5 — replay theoretical outcomes for every setup now resolvable.
+
+    POSTs /api/jack-outcomes, the same runOutcomeTracker the manual UPDATE OUTCOMES
+    button calls. This is what fills the `outcomes` table, which is the sole source
+    for JANLY and for JSCORE's paper-replay arm.
+
+    WHY THIS IS A PIPELINE STAGE AND NOT A SCHEDULER TASK
+    ----------------------------------------------------
+    It used to be neither, in practice. lib/jack/outcomes-refresh.ts registered a 24h
+    task with the in-Next scheduler, but that registration is a SIDE EFFECT of an HTTP
+    route being imported (init-scheduler / market-data). Next loads route modules
+    lazily, so a freshly restarted server that nobody had poked had no outcome task
+    registered at all — the scheduler ticked over an empty list and outcomes silently
+    never accrued. A restart disarmed it invisibly.
+
+    Making it a stage removes that failure mode entirely: the nightly run either does
+    it or reports a code saying it did not. The scheduler registration is removed in
+    the same change, so there is exactly ONE thing replaying outcomes and no duplicate
+    Tiingo fetches.
+
+    RUNS LAST, AND FAILS LOUD WITHOUT ABORTING
+    ------------------------------------------
+    Nothing follows it, so a failure cannot cost the board or the alert — those are
+    already done by the time this starts. But it does NOT swallow the failure: it
+    returns a 60-series code so Task Scheduler's Last Run Result names this stage.
+    A missed pass is recoverable tomorrow; a SILENTLY missed pass is what starved
+    JANLY for months, so silence is the one option not on the table.
+    """
+    tee.rule("STAGE 5/5 — OUTCOMES")
+
+    if args.dry_run:
+        tee.line("--dry-run: no ingest ran, so there is nothing new to resolve.")
+        return EXIT_OK
+
+    if args.skip_outcomes:
+        tee.line("--skip-outcomes: theoretical-outcome replay skipped by request.")
+        return EXIT_OK
+
+    base = board_base_url()
+    url = base + "/api/jack-outcomes"
+    tee.line("replaying outcomes: POST " + url)
+    tee.line("this can run for MINUTES — one Tiingo fetch per resolvable setup, "
+             "in batches of OUTCOME_FETCH_CHUNK.")
+
+    started = time.time()
+    payload, err, code = post_outcomes(url)
+    elapsed = (time.time() - started) / 60.0
+
+    if payload is None:
+        outcomes_problem(tee, "the outcome replay did not complete", err)
+        tee.line(f"elapsed {elapsed:.1f} min")
+        _notify(tee, "outcome replay FAILED", f"{err}\nThe board and alert were unaffected.")
+        return code
+
+    if payload.get("ok") is False:
+        detail = str(payload.get("error") or payload.get("message") or "route returned ok:false")
+        outcomes_problem(tee, "the route refused the replay", detail)
+        _notify(tee, "outcome replay REFUSED", detail)
+        return EXIT_OUTCOMES_REFUSED
+
+    # ---- success: report what actually moved --------------------------------
+    def n(key: str) -> int:
+        v = payload.get(key)
+        return int(v) if isinstance(v, (int, float)) else 0
+
+    tee.line(
+        "candidates {} · processed {} · target {} · stop {} · timeout {} · "
+        "never_fired {} · deferred {} · skipped {}".format(
+            n("candidates"), n("processed"), n("target"), n("stop"), n("timeout"),
+            n("never_fired"), n("deferred"), n("skipped"))
+    )
+    tee.line(f"elapsed {elapsed:.1f} min")
+    tee.line("`deferred` is CORRECT, not a stall — those trades are still inside the")
+    tee.line("120-bar window, write nothing, and are re-offered tomorrow.")
+
+    if n("skipped") > 0:
+        # Skipped means a bar fetch failed. Not fatal, but it silently shrinks the
+        # sample, so it is called out rather than buried in the numbers above.
+        tee.line("")
+        tee.line(f"NOTE: {n('skipped')} setup(s) skipped — bar fetch failed for those. "
+                 f"They stay in the queue and retry tomorrow.")
 
     return EXIT_OK
 
@@ -1053,6 +1162,65 @@ def send_test_alert() -> int:
 
 
 
+# The replay walks every resolvable setup and fetches bars per ticker, so it is
+# minutes, not seconds. Generous on purpose: a client-side timeout mid-pass would
+# report failure for work the server is still correctly doing, and outcomes are
+# written per setup as it goes, so a truncated read loses the REPORT, not the data.
+OUTCOMES_TIMEOUT = 3600
+
+
+def post_outcomes(url: str) -> Tuple[Optional[dict], str, int]:
+    """POST /api/jack-outcomes. Returns (payload, "", EXIT_OK) or (None, reason, code).
+
+    The exit code is chosen HERE so the caller does not have to classify transport
+    failures a second time — same shape as the stage code maps above.
+    """
+    try:
+        req = urllib.request.Request(
+            url,
+            data=b"{}",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=OUTCOMES_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:200].strip()
+        except Exception:  # noqa: BLE001
+            pass
+        return None, "HTTP {}{}".format(exc.code, ": " + detail if detail else ""), EXIT_OUTCOMES_HTTP
+    except Exception as exc:  # noqa: BLE001
+        return None, "{}: {} (is the app running at {}?)".format(
+            type(exc).__name__, exc, url), EXIT_OUTCOMES_UNREACHABLE
+
+    try:
+        return json.loads(raw), "", EXIT_OK
+    except (ValueError, TypeError):
+        return None, "response was not JSON: {!r}".format(raw[:200]), EXIT_OUTCOMES_GENERIC
+
+
+# Outcome-stage failures are recorded the same way alert failures are: exit code
+# AND a banner AND the RESULT block, so a bookkeeping failure can never be silent.
+OUTCOME_PROBLEMS: List[str] = []
+
+
+def outcomes_problem(tee: "Tee", what: str, detail: str = "") -> None:
+    """Record an outcomes failure and shout about it. Never raises."""
+    OUTCOME_PROBLEMS.append(what + ((" — " + detail) if detail else ""))
+    tee.line("")
+    tee.line("!" * 72, stamp=False)
+    tee.line("!! OUTCOMES FAILED: " + what)
+    if detail:
+        tee.line("!! " + detail)
+    tee.line("!! The board IS updated and the alert WAS sent — this is the")
+    tee.line("!! theoretical-outcome replay, which feeds JANLY and JSCORE's paper arm.")
+    tee.line("!! Recoverable: tomorrow's run retries the same queue.")
+    tee.line("!" * 72, stamp=False)
+
+
+
 def _notify(tee: Tee, headline: str, detail: str) -> None:
     """Best-effort Telegram. A notification problem must never change the exit code."""
     try:
@@ -1138,6 +1306,8 @@ def selftest() -> int:
         EXIT_INGEST_GENERIC, EXIT_INGEST_NO_WATCHLIST, EXIT_INGEST_UNREACHABLE,
         EXIT_INGEST_FLOOR_GUARD, EXIT_INGEST_NO_PERSISTENCE, EXIT_INGEST_NOTHING_WRITTEN,
         EXIT_ALERT_GENERIC,
+        EXIT_OUTCOMES_GENERIC, EXIT_OUTCOMES_UNREACHABLE,
+        EXIT_OUTCOMES_HTTP, EXIT_OUTCOMES_REFUSED,
     ]
     check("every code is distinct", len(codes) == len(set(codes)))
     check("every code has a meaning", all(c in EXIT_MEANING for c in codes))
@@ -1490,6 +1660,62 @@ def selftest() -> int:
         check(f"  {label}: the guard was not outrun",
               not any("guard was outrun" in l for l in lines))
 
+    print("\n[15] OUTCOMES stage — codes, ordering, and fail-loud-without-aborting")
+    # The 60s band, added when the replay became stage 5/5.
+    ocodes = (EXIT_OUTCOMES_GENERIC, EXIT_OUTCOMES_UNREACHABLE,
+              EXIT_OUTCOMES_HTTP, EXIT_OUTCOMES_REFUSED)
+    check("outcomes codes are the 60s", all(60 <= c < 70 for c in ocodes), str(ocodes))
+    check("  each is distinct", len(set(ocodes)) == len(ocodes))
+    check("  each has a meaning", all(c in EXIT_MEANING for c in ocodes))
+    check("  and none collides with an earlier stage's code",
+          not set(ocodes) & {EXIT_OK, EXIT_ORCHESTRATOR, EXIT_PULL_GENERIC,
+                             EXIT_PULL_CANNOT_START, EXIT_PULL_NETWORK, EXIT_PULL_TIER_CAP,
+                             EXIT_PULL_TOO_MANY_FAILURES, EXIT_DETECT_GENERIC,
+                             EXIT_DETECT_PRECONDITION, EXIT_DETECT_NOTEBOOK,
+                             EXIT_INGEST_GENERIC, EXIT_INGEST_NO_WATCHLIST,
+                             EXIT_INGEST_UNREACHABLE, EXIT_INGEST_FLOOR_GUARD,
+                             EXIT_INGEST_NO_PERSISTENCE, EXIT_INGEST_NOTHING_WRITTEN,
+                             EXIT_ALERT_GENERIC})
+
+    # post_outcomes classifies transport failures itself — an unreachable host must
+    # come back as 61, not as a generic error the stage has to re-interpret.
+    _p, _err, _c = post_outcomes("http://127.0.0.1:9/api/jack-outcomes")  # port 9 = discard
+    check("unreachable host -> EXIT_OUTCOMES_UNREACHABLE", _c == EXIT_OUTCOMES_UNREACHABLE, str(_c))
+    check("  and payload is None with a reason", _p is None and bool(_err))
+
+    # RUNS LAST: --skip-outcomes must not disturb anything before it, and the stage
+    # must be reachable only after alert. Verified structurally on the source so a
+    # future reorder that puts a minutes-long replay ahead of the alert fails here.
+    _src = Path(__file__).read_text(encoding="utf-8")
+    _alert_at = _src.index("code = stage_alert(tee, args, ingest_lines)")
+    _outcomes_at = _src.index("code = stage_outcomes(tee, args)")
+    check("stage_outcomes is wired AFTER stage_alert in main()", _alert_at < _outcomes_at)
+    check("  nothing follows it, so it cannot abort the chain",
+          "stage_outcomes(tee, args)" in _src.split("code = stage_outcomes(tee, args)")[1][:200]
+          or _src.split("code = stage_outcomes(tee, args)")[1].strip().startswith("return code"))
+
+    # Fail-loud plumbing: a recorded problem must reach BOTH the banner and RESULT.
+    _saved = list(OUTCOME_PROBLEMS)
+    OUTCOME_PROBLEMS.clear()
+    try:
+        outcomes_problem(Tee(None), "probe failure", "probe detail")
+        check("outcomes_problem records the failure", len(OUTCOME_PROBLEMS) == 1)
+        check("  and keeps the detail", "probe detail" in OUTCOME_PROBLEMS[0])
+        import io as _io2, contextlib as _ctx2
+        _buf = _io2.StringIO()
+        with _ctx2.redirect_stdout(_buf):
+            main(["--date", "2026-08-22", "--dry-run", "--log-dir",
+                  str(Path(os.environ.get("TEMP", ".")) / "jack_selftest_logs")])
+        _out = _buf.getvalue()
+        check("  RESULT line is annotated [OUTCOMES FAILED xN]", "[OUTCOMES FAILED x1" in _out,
+              [l for l in _out.splitlines() if "exit " in l][-1:] and
+              [l for l in _out.splitlines() if "exit " in l][-1] or "")
+        check("  and the RESULT block explains the board was unaffected",
+              "board and the alert were NOT affected" in _out)
+    finally:
+        OUTCOME_PROBLEMS.clear()
+        OUTCOME_PROBLEMS.extend(_saved)
+
     print(f"\n{'ALL PASS' if failed == 0 else 'FAILURES'} — {passed} passed, {failed} failed\n")
     return 0 if failed == 0 else 1
 
@@ -1509,7 +1735,8 @@ def _cp1252_ok(ch: str) -> bool:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="JACK Phase 7 — nightly orchestrator: pull -> detect -> ingest -> alert.",
+        description="JACK Phase 7 — nightly orchestrator: pull -> detect -> ingest -> "
+                    "alert -> outcomes.",
     )
     parser.add_argument("--skip-pull", action="store_true",
                         help="Skip the Tiingo pull and run detect+ingest on the corpus as it "
@@ -1538,6 +1765,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--no-floor-guard", action="store_true",
                         help="Pass --no-floor-guard to ingest. Use only for a known-good "
                              "deliberate shrink.")
+    parser.add_argument("--skip-outcomes", action="store_true",
+                        help="Skip the outcome-replay stage. The board and alert still "
+                             "run; only the theoretical-outcome bookkeeping is skipped.")
     parser.add_argument("--no-alert", action="store_true",
                         help="Render the Phase 5 alert into the log but do NOT send it. "
                              "For previewing the message without pinging the channel.")
@@ -1619,6 +1849,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return code
 
         code = stage_alert(tee, args, ingest_lines)
+        if code != EXIT_OK:
+            return code
+
+        # OUTCOMES RUNS LAST, DELIBERATELY. It is bookkeeping, it can run for
+        # minutes over hundreds of setups, and it cannot change what the alert
+        # said (the alert reads the BOARD — setups+decisions — while the tracker
+        # writes only `outcomes`). Putting it here means a slow or hung outcomes
+        # pass can never delay the one time-sensitive deliverable of the night.
+        #
+        # It also means "does not abort the chain" is structural rather than a
+        # promise: there is nothing after it to abort. Its exit code is still
+        # returned, so a failure is visible in Task Scheduler's Last Run Result.
+        code = stage_outcomes(tee, args)
         return code
 
     except KeyboardInterrupt:
@@ -1640,6 +1883,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         suffix = ""
         if ALERT_PROBLEMS:
             suffix = f"  [ALERT DEGRADED x{len(ALERT_PROBLEMS)} — see below]"
+        if OUTCOME_PROBLEMS:
+            suffix += f"  [OUTCOMES FAILED x{len(OUTCOME_PROBLEMS)} — see below]"
         tee.line(f"exit {code} — {EXIT_MEANING.get(code, 'unknown')}{suffix}")
         if ALERT_PROBLEMS:
             tee.line("!" * 72, stamp=False)
@@ -1648,6 +1893,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 tee.line("!!   · " + problem)
             tee.line("!! Exit stays 0 on purpose — the board is written and correct.")
             tee.line("!! Do NOT read 'no alert tonight' as 'no fires tonight'.")
+            tee.line("!" * 72, stamp=False)
+        if OUTCOME_PROBLEMS:
+            tee.line("!" * 72, stamp=False)
+            tee.line("!! THE OUTCOME REPLAY DID NOT COMPLETE:")
+            for problem in OUTCOME_PROBLEMS:
+                tee.line("!!   · " + problem)
+            tee.line("!! The board and the alert were NOT affected — this is the")
+            tee.line("!! bookkeeping that feeds JANLY and JSCORE's paper arm.")
+            tee.line("!! Tomorrow's run retries the same queue. If this repeats,")
+            tee.line("!! JANLY is quietly starving: check that the app is reachable.")
             tee.line("!" * 72, stamp=False)
         tee.line(f"elapsed {(time.time() - started) / 60:.1f} min")
         tee.line(f"log: {log_path}")
