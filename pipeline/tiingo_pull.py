@@ -167,10 +167,28 @@ FAILURE_LEDGER = STATE_DIR / "pull_failures.csv"
 
 TIINGO_BASE = "https://api.tiingo.com/tiingo/daily"
 
-# Pacing between requests. 1.0s = 3,600/hr, comfortably under the paid tier's
-# 10,000/hr ceiling with room for the app's own Tiingo traffic on the same
-# account (the nightly VALIDATE fires its own burst). Tune once the plan is
-# confirmed; do not drop below ~0.4s without re-checking the hourly cap.
+# Default pacing between requests. Overridable with --pacing.
+#
+# WHAT TIINGO ACTUALLY LIMITS (checked against their docs 2026-08-24):
+#   "We do not rate limit to minute or second." The limits are HOURLY requests,
+#   DAILY requests, and MONTHLY bandwidth only. Power tier: 10,000/hr,
+#   100,000/day, 40GB/month. Free tier: 50/hr, 1,000/day.
+#
+# So pacing does NOT change whether we breach a limit — the request COUNT is
+# fixed at one per ticker (~1,823) however fast we send them. Pacing changes two
+# things only:
+#   · wall clock (1.0s = ~34 min; 0.1s = ~3 min)
+#   · WHICH hourly bucket(s) the requests land in. A 34-minute run can straddle
+#     two buckets (~900 + ~900); a 3-minute run puts all ~1,823 in ONE. That is
+#     the only real difference, and 1,823 is 18% of the Power tier's 10,000/hr.
+#
+# The limit the content guard defends against — "You have run over your 500
+# symbol look up limit" — is a MONTHLY UNIQUE-SYMBOL cap. Pacing cannot affect
+# it at all: the same 1,823 distinct symbols are requested either way.
+#
+# 1.0s remains the default because it is the paced value proven in production.
+# Faster is believed safe on the evidence above; prove it on a watched run
+# before making it the scheduled default.
 PACING_SECONDS = 1.0
 
 REQUEST_TIMEOUT = 30  # seconds per request
@@ -556,11 +574,47 @@ def fetch_raw(ticker: str, start: date, end: date, token: str) -> str:
     )
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            _log_rate_headers_once(resp)
             return resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError:
         raise
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as exc:
         raise ConnectionLayerError(f"{type(exc).__name__}: {exc}") from exc
+
+
+# Logged ONCE per run, from the first successful response.
+_RATE_HEADERS_LOGGED = False
+
+
+def _log_rate_headers_once(resp) -> None:
+    """Record whatever Tiingo says about our limits, from the response headers.
+
+    We were pacing at 1.0s against an ASSUMED 10,000/hr ceiling. Tiingo's docs say
+    the limits are hourly/daily/bandwidth and that they do NOT rate limit per
+    second or minute — but the docs describe the PLAN, not this account. If Tiingo
+    returns usage headers, one line in the log settles the real numbers instead of
+    inferring them, and it costs nothing: the response is already in hand.
+
+    Best effort in every direction — a header that is absent, renamed, or
+    unreadable must never disturb a pull.
+    """
+    global _RATE_HEADERS_LOGGED
+    if _RATE_HEADERS_LOGGED:
+        return
+    _RATE_HEADERS_LOGGED = True
+    try:
+        interesting = {
+            k: v for k, v in resp.headers.items()
+            if any(t in k.lower() for t in ("rate", "limit", "quota", "usage", "remaining"))
+        }
+        if interesting:
+            log("Tiingo limit headers: "
+                + " · ".join(f"{k}={v}" for k, v in sorted(interesting.items())))
+        else:
+            log("Tiingo returned no rate/limit headers — hourly usage is only "
+                "visible on the account page (tiingo.com/account/usage).")
+    except Exception as exc:  # noqa: BLE001 — diagnostics must never break a pull
+        log(f"(could not read response headers: {type(exc).__name__}: {exc})")
 
 
 def validate_payload(body: str) -> Tuple[Optional[List[dict]], Optional[str]]:
@@ -919,7 +973,8 @@ def build_alert(today: date, ok: int, up_to_date: int, failures: List[TickerResu
     return "\n".join(lines)
 
 
-def run_pull(data_dir: Path, today: date, dry_run: bool) -> int:
+def run_pull(data_dir: Path, today: date, dry_run: bool,
+             pacing: float = PACING_SECONDS) -> int:
     # ---- FATAL 1: no token --------------------------------------------------
     token = env("TIINGO_API_KEY")
     if not token:
@@ -1006,7 +1061,7 @@ def run_pull(data_dir: Path, today: date, dry_run: bool) -> int:
 
         # Pace only when we actually made a request.
         if not dry_run and result.status != "UP_TO_DATE" and idx < len(tickers):
-            time.sleep(PACING_SECONDS)
+            time.sleep(pacing)
 
     elapsed = time.time() - started
 
@@ -1053,6 +1108,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="Run date YYYY-MM-DD (default: today). Testing aid.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Report the planned request window per ticker. No requests, no writes.")
+    parser.add_argument("--pacing", type=float, default=PACING_SECONDS,
+                        help=f"Seconds to sleep between requests (default: {PACING_SECONDS}). "
+                             f"Tiingo does NOT rate limit per second or minute -- only per hour "
+                             f"({PACING_SECONDS}s spreads ~1,823 requests over ~34 min; 0.1 "
+                             f"compresses them into ~3 min and one hourly bucket). 0 disables "
+                             f"pacing entirely.")
     parser.add_argument("--digest", action="store_true",
                         help="Emit the weekly repeat-failure digest and exit. Makes no requests.")
     args = parser.parse_args(argv)
@@ -1071,8 +1132,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         send_telegram(message)
         return 0
 
+    if args.pacing < 0:
+        log(f"Invalid --pacing: {args.pacing} (must be >= 0)")
+        return 2
+    if args.pacing != PACING_SECONDS:
+        # Say it out loud in the log. An unattended run must never leave the
+        # operator guessing which pacing produced a given night's timings.
+        log(f"PACING OVERRIDE: {args.pacing}s between requests (default "
+            f"{PACING_SECONDS}s). The REQUEST COUNT is unchanged -- one per ticker "
+            f"either way -- so this moves the wall clock and which hourly bucket "
+            f"the requests land in, not whether a limit is breached.")
+
     data_dir = args.data_dir or Path(env("JACK_CORPUS_DIR") or DEFAULT_DATA_DIR)
-    return run_pull(data_dir.expanduser().resolve(), run_date, args.dry_run)
+    return run_pull(data_dir.expanduser().resolve(), run_date, args.dry_run, args.pacing)
 
 
 if __name__ == "__main__":
