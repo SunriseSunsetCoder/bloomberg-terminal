@@ -189,3 +189,9 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+// Module marker: keeps this script's top-level `main` out of the global scope,
+// where it collided with an ambient declaration and broke `tsc --noEmit`
+// (TS2393). Every other script under scripts/ is already a module; this file
+// was the sole exception.
+export {};
