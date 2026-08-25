@@ -241,9 +241,11 @@ export function computeAnalytics(rows: AnalyticsRow[], asOf?: string): JackAnaly
     backtestReference: [
       { bucket: "full", quintile: "Q5", isPf: 4.2, oosPf: 4.36 },
       { bucket: "full", quintile: "Q4", isPf: 2.13, oosPf: 3.03 },
-      // Q3 promoted half→full 2026-07-20 (15-yr backtest, PF 2.24 all 16 yrs). isPf/oosPf
-      // below are the FROZEN original t05 reference numbers, kept as-is for the record.
-      { bucket: "full", quintile: "Q3", isPf: 1.38, oosPf: 1.65 },
+      // Q3 REVERTED to half 2026-08-25, undoing the 2026-07-20 promotion. isPf/oosPf
+      // below are the FROZEN original t05 reference numbers, kept as-is for the record
+      // (they are a different, deliberately unreconciled computation from the PF 2.24
+      // the promotion cited — see backtest-reference.ts "Do not merge them").
+      { bucket: "half", quintile: "Q3", isPf: 1.38, oosPf: 1.65 },
       { bucket: "skip", quintile: "Q2", isPf: 1.79, oosPf: 0.87 },
       { bucket: "skip", quintile: "Q1", isPf: 1.2, oosPf: 1.1 },
     ],

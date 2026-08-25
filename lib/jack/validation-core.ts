@@ -476,10 +476,27 @@ function parseCsvRow(headerCols: string[], rowLine: string, today: Date, delim: 
   // frozen edges if the CSV carried a score but no bucket.
   const handleScore = getNum("handle_score", "hscore", "handle_quality_score");
   const bucketRaw = (get("size_bucket") ?? get("bucket") ?? "").toLowerCase().trim();
+
+  // SIZE_MAP IS AUTHORITATIVE — the code decides the bucket, not the CSV column.
+  //
+  // This precedence used to be the other way round: the scanner's size_bucket column
+  // won, and bucketForScore (i.e. SIZE_MAP) was only consulted when the column was
+  // absent. That gave the quintile→bucket rule TWO sources of truth — SIZE_MAP in
+  // this repo and the scanner's handle_score_thresholds.json on Drive — which had to
+  // be regenerated in lockstep or they silently disagreed. Commit 0329ab5 needed
+  // exactly that dual edit, and a repo-only change would have been inert.
+  //
+  // Now: given a handle_score, the bucket is DERIVED here from the frozen
+  // HSCORE_EDGES + SIZE_MAP. The CSV column is ignored when a score is present, so
+  // the Drive JSON can no longer drift the live grading.
+  //
+  // The CSV column remains the fallback for rows carrying NO handle_score (older
+  // exports, hand-made CSVs) — otherwise those rows would lose their bucket entirely.
   let sizeBucket: SizeBucket | undefined =
-    bucketRaw === "full" || bucketRaw === "half" || bucketRaw === "skip" ? bucketRaw : undefined;
-  if (sizeBucket === undefined && handleScore !== undefined) {
-    sizeBucket = bucketForScore(handleScore) ?? undefined;
+    handleScore !== undefined ? bucketForScore(handleScore) ?? undefined : undefined;
+  if (sizeBucket === undefined) {
+    sizeBucket =
+      bucketRaw === "full" || bucketRaw === "half" || bucketRaw === "skip" ? bucketRaw : undefined;
   }
 
   // Scanner classification columns (by-name lookup — order-agnostic; a missing
