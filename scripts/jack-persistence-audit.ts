@@ -98,61 +98,90 @@ async function main(): Promise<void> {
   for (const s of bySource) line(`     source ${s.outcome_source.padEnd(20)} ${s.n}`);
 
   // ---- 4. WHY outcomes is the size it is -----------------------------------
-  head("4. THE 195-DAY GATE — why outcomes may legitimately be near-empty");
+  //
+  // This section ASKS getSetupsNeedingOutcomes rather than re-deriving its gate.
+  //
+  // It used to recompute ceil(DEFAULT_RESOLUTION_DAYS * 1.5) = 195 days itself and
+  // count rows against that. That was accurate only while the two happened to
+  // agree. Once resolve-early-on-exit moved the gate to a ~25-day floor — while
+  // deliberately leaving DEFAULT_RESOLUTION_DAYS = 130 frozen — the mirror would
+  // have kept reporting "0 eligible" while the tracker resolved hundreds. An audit
+  // that reads plausible and reports the wrong thing is the exact failure this
+  // tool exists to catch, so it now derives everything from the real function and
+  // hardcodes no cutoff at all. It therefore stays correct under BOTH the old and
+  // the new gate.
+  head("4. THE ELIGIBILITY GATE — asked, not re-derived");
+
   const { DEFAULT_RESOLUTION_DAYS } = await import("../lib/jack/outcome-tracker");
-  const calendarDays = Math.ceil(DEFAULT_RESOLUTION_DAYS * 1.5);
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - calendarDays);
-  const cutoffIso = cutoff.toISOString().split("T")[0];
-  line(`     DEFAULT_RESOLUTION_DAYS = ${DEFAULT_RESOLUTION_DAYS}`);
-  line(`     calendar gate           = ceil(${DEFAULT_RESOLUTION_DAYS} * 1.5) = ${calendarDays} days`);
-  line(`     cutoff                  = ${cutoffIso}`);
-  line("");
-  line("     getSetupsNeedingOutcomes only considers setups whose handle_low_date");
-  line("     is ON OR BEFORE that cutoff. Anything newer CANNOT have an outcome");
-  line("     yet, BY DESIGN — resolving early would fabricate results.");
+  const { getSetupsNeedingOutcomes } = await import("../lib/db/read");
 
-  q("setups eligible vs too-recent",
-    "SELECT COUNT(*) FROM setups WHERE handle_low_date <= @cutoff");
-  const elig = one<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM setups WHERE handle_low_date <= @cutoff`, { cutoff: cutoffIso }).n;
-  const tooNew = one<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM setups WHERE handle_low_date > @cutoff`, { cutoff: cutoffIso }).n;
-  line(`     setups old enough to resolve : ${elig}`);
-  line(`     setups TOO RECENT to resolve : ${tooNew}   <- these are your forward test`);
+  q("the tracker's ACTUAL work queue (the function itself, not a copy of its rule)",
+    "getSetupsNeedingOutcomes(DEFAULT_RESOLUTION_DAYS).length");
+  const queue = getSetupsNeedingOutcomes(DEFAULT_RESOLUTION_DAYS);
+  const pending = queue.length;
 
-  q("eligible AND still missing an outcome (the tracker's actual work queue)",
-    "SELECT COUNT(*) FROM setups s WHERE s.handle_low_date <= @cutoff AND geometry NOT NULL AND NOT EXISTS(outcome)");
-  const pending = one<{ n: number }>(
-    `SELECT COUNT(*) AS n
-       FROM setups s
-      WHERE s.handle_low_date <= @cutoff
-        AND s.breakout_level IS NOT NULL AND s.stop IS NOT NULL AND s.t05_target IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM outcomes o WHERE o.setup_id = s.id AND o.exit_reason IS NOT NULL)`,
-    { cutoff: cutoffIso }
-  ).n;
-  line(`     eligible, geometry OK, NOT yet resolved : ${pending}`);
-  line("");
-  if (pending > 0) {
-    line("     >> NON-ZERO: the outcome tracker has work queued and has not done it.");
-    line("        That points at the 24h job NOT RUNNING (check JACK_SELF_BASE_URL");
-    line("        on the VPS — the auto-outcome replay needs it) rather than at a");
-    line("        write failure. Worth chasing.");
-  } else {
-    line("     >> ZERO: every setup old enough to resolve HAS been resolved.");
-    line("        The tracker is keeping up; nothing is being dropped.");
+  // The universe the gate is selecting FROM: replayable, no theoretical outcome yet.
+  const replayableSql = `
+    SELECT COUNT(*) AS n
+      FROM setups s
+     WHERE s.breakout_level IS NOT NULL AND s.stop IS NOT NULL AND s.t05_target IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM outcomes o WHERE o.setup_id = s.id AND o.exit_reason IS NOT NULL)`;
+  q("replayable and unresolved, regardless of age", replayableSql);
+  const replayable = one<{ n: number }>(replayableSql).n;
+  const withheld = replayable - pending;
+
+  line(`     replayable + unresolved (any age) : ${replayable}`);
+  line(`     OFFERED by the gate right now     : ${pending}`);
+  line(`     WITHHELD as too recent            : ${withheld}`);
+
+  // The floor is INFERRED from what the gate actually returned, so this line is
+  // right whichever gate is in force. Pre-resolve-early it prints ~195 days;
+  // after, ~25.
+  if (queue.length > 0) {
+    const newest = queue.reduce((a, b) => (a.handleLowDate > b.handleLowDate ? a : b));
+    const ageDays = Math.round(
+      (Date.now() - new Date(`${newest.handleLowDate}T00:00:00Z`).getTime()) / 86_400_000
+    );
+    line("");
+    line(`     newest OFFERED setup    : ${newest.ticker} @ ${newest.handleLowDate} (${ageDays}d old)`);
+    line(`     => the effective floor is AT MOST ~${ageDays} calendar days.`);
+    line("        resolve-early-on-exit sets it to ~25 (the 15-bar confirmation");
+    line("        window, the earliest ANY verdict — including never_fired — is");
+    line("        possible). Before that change it was ~195.");
+  } else if (replayable > 0) {
+    line("");
+    line("     Nothing offered although replayable rows exist, so every one of them");
+    line("     is younger than the gate's floor. Under the ~195-day gate that is");
+    line("     expected early in a forward test; under resolve-early (~25 days) it");
+    line("     would mean the board is barely three weeks old.");
   }
 
-  const missingGeom = one<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM setups s
-      WHERE s.handle_low_date <= @cutoff
-        AND (s.breakout_level IS NULL OR s.stop IS NULL OR s.t05_target IS NULL)`,
-    { cutoff: cutoffIso }
-  ).n;
-  line(`     eligible but UNREPLAYABLE (missing geometry): ${missingGeom}`);
+  line("");
+  line(`     (DEFAULT_RESOLUTION_DAYS = ${DEFAULT_RESOLUTION_DAYS} — still the value passed in, and`);
+  line("      still frozen. Whether it GATES anything is the function's business,");
+  line("      which is why this section no longer assumes it does.)");
+
+  line("");
+  if (pending > 0) {
+    line("     >> NON-ZERO: the tracker has work queued. If outcomes is not growing,");
+    line("        that points at the 24h job NOT RUNNING (check JACK_SELF_BASE_URL");
+    line("        on the VPS — the auto-outcome replay needs it) rather than at a");
+    line("        write failure. Note a queued setup may still come back `deferred`");
+    line("        and write nothing: that is correct, not a stall.");
+  } else {
+    line("     >> ZERO: nothing is currently eligible. The tracker has no work to do,");
+    line("        so an empty outcomes table is expected rather than a failure.");
+  }
+
+  const missingGeomSql = `
+    SELECT COUNT(*) AS n FROM setups s
+     WHERE s.breakout_level IS NULL OR s.stop IS NULL OR s.t05_target IS NULL`;
+  q("UNREPLAYABLE at any age (missing geometry)", missingGeomSql);
+  const missingGeom = one<{ n: number }>(missingGeomSql).n;
+  line(`     setups that can NEVER be replayed: ${missingGeom}`);
   if (missingGeom > 0) {
-    line("        These can never get an outcome — no rim/stop/target to replay.");
-    line("        Permanently invisible to both JSCORE and JANLY.");
+    line("        No rim/stop/target to replay — permanently invisible to both");
+    line("        JSCORE and JANLY, however long they age.");
   }
 
   // ---- 5. What the two surfaces ACTUALLY receive ----------------------------
