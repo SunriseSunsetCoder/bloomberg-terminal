@@ -1,0 +1,4 @@
+# Keep LF on every checkout: the prereg log must not churn, and the frozen
+# notebook sha256s in S3_DRILL_PREREG.md (P2) are of the LF bytes.
+*.md    text eol=lf
+*.ipynb text eol=lf

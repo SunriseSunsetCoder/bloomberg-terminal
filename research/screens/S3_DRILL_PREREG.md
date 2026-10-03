@@ -62,8 +62,8 @@ No changes allowed. Results are appended to P3.
 
 | event | read on | IJR − IWM | pass? | secondary | commit |
 |---|---|---|---|---|---|
-| June 2025 recon (OOS, frozen rule) | 2026-10-03 | −0.40% (as reported) | OOS read: **mixed** | — | S3 close commit |
-| June 2026 recon (OOS, frozen rule) | 2026-10-03 | +1.18% (as reported) | OOS read: **mixed** | — | S3 close commit |
+| June 2025 recon (OOS, frozen rule) | 2026-10-03 | raw −0.99% | **no** (net excess ≤ 0) | excess −0.40%, net of base cost −0.49%, pct 32; OOS read: **mixed** (1/2 net excess > 0) | 10b7c16 |
+| June 2026 recon (OOS, frozen rule) | 2026-10-03 | raw +1.02% | **yes** (net excess > 0) | excess +1.18%, net of base cost +1.09%, pct 75; OOS read: **mixed** (1/2 net excess > 0) | 10b7c16 |
 | December 2026 recon (P1) | | | | | |
 | June 2027 recon (P4) | | | | | |
 | December 2027 recon (P4) | | | | | |
@@ -73,8 +73,12 @@ No changes allowed. Results are appended to P3.
 - **In-sample drill verdict (2011-2024): FAIL.**
   - Plateau failed: the 10- and 15-day cells are negative.
   - Mean excess under stress costs is negative.
-- **OOS read (June 2025 + June 2026, frozen rule, opened once): mixed.** June 2025 −0.40%, June 2026 +1.18%,
-  as reported from `s3_drill_oos.ipynb`; the full rows are in `results/screens/s3_drill_oos/oos_events.csv`.
+- **OOS read (June 2025 + June 2026, frozen rule, opened once): mixed (1/2 net excess > 0).**
+  - June 2025: raw −0.99%, excess −0.40%, net of base cost −0.49%, pct 32.
+  - June 2026: raw +1.02%, excess +1.18%, net of base cost +1.09%, pct 75.
+
+  Excess is vs the same-year baseline, before costs. The full rows are in
+  `results/screens/s3_drill_oos/oos_events.csv`.
 - **No rule, cost or threshold was changed** after any result was seen.
 - **S3 is closed as a strategy.** P1 (December 2026) and P4 (June/December 2027) stay registered exactly as
   written. Their results go in P3 for the log only and will not reopen S3.
