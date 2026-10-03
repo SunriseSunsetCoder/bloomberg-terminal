@@ -276,7 +276,8 @@ Three calendar screens. Everything below is PRE-REGISTERED (statistic, sign, ver
 Lockbox: every series cut at 2024-12-31 at load; Tiingo pulls request `endDate=2024-12-31`.
 
 **Verdict rule (all screens):** *worth drilling* iff the primary statistic is > 0 in the most recent era
-(2020-2024) **and** > 0 in at least ⌈2/3·N⌉ of the N years (S1/S2: 10 of 15, 2010-2024; S3: 10 of 14, 2011-2024).
+(2020-2024) **and** > 0 in at least ⌈2/3·N⌉ of the N years (S1/S2: 10 of 15, 2010-2024 — 2010 is partial: labels start at the first COMPLETE month in the
+data, 2010-04 for a corpus starting 2010-03-04, so the first era is shortened; S3: 10 of 14, 2011-2024).
 Otherwise *not worth drilling*. t-stats are reported for context, not used by the rule.
 
 - **S1 turn-of-month (SPY close-to-close).** Day offsets: −1 = month's last trading day, +1 = next month's
@@ -333,16 +334,29 @@ print(f'SPY returns {r_spy.index[0].date()} .. {r_spy.index[-1].date()}  n={len(
     ("markdown", "## S1 — turn of month"),
     ("code", r'''
 # ===== Cell 2 — S1 turn-of-month =====
-LCAL = CAL[CAL >= pd.Timestamp('2010-01-01')]            # label complete months only (2010-01 .. 2024-12)
-assert LCAL[0] == pd.Timestamp('2010-01-04'), 'Jan-2010 must be complete for month-start labels'
+# First COMPLETE month = first month whose prior month-end is in the data, i.e. the month after the data's
+# first (possibly partial) month. Corpus SPY starts 2010-03-04 -> labels start 2010-04. Derived, not hardcoded.
+MPER = CAL.to_period('M')
+FIRST_M = MPER[0] + 1
+assert (MPER == FIRST_M - 1).any() and (MPER == FIRST_M).any()
+LCAL = CAL[MPER >= FIRST_M]                              # label complete months only (FIRST_M .. 2024-12)
 lab = pd.DataFrame(index=LCAL); lab['ym'] = LCAL.to_period('M')
 fwd = lab.groupby('ym').cumcount() + 1
 bwd = lab.groupby('ym').cumcount(ascending=False) + 1
 assert not ((fwd <= 5) & (bwd <= 5)).any()
 OFF = pd.Series(np.where(fwd <= 5, fwd, np.where(bwd <= 5, -bwd, 0)), index=LCAL)
 s1 = pd.DataFrame({'r': r_spy, 'off': OFF.reindex(r_spy.index)})
+s1 = s1[s1.index >= LCAL[0]]                             # S1 AND S2 start at the first complete month
+assert s1['off'].notna().all()
 s1['year'] = s1.index.year
 other = s1['off'] == 0
+print(f'SPY data starts {CAL[0].date()}; first complete month {FIRST_M} -> S1/S2 labels start {LCAL[0].date()}')
+for e, (lo, hi) in ERAS.items():
+    ix = s1.index[(s1['year'] >= lo) & (s1['year'] <= hi)]
+    print(f'  era {e}: {ix[0].date()} .. {ix[-1].date()}  ({len(ix)} days, {ix.to_period("M").nunique()} months)'
+          + ('  <- SHORTENED first era' if ix[0].year == lo and ix[0].month > 1 else ''))
+if LCAL[0].month > 1:
+    print(f'  NOTE: {LCAL[0].year} is a partial year ({13 - LCAL[0].month} months) but counts as one of the per-year votes.')
 
 def era_mask(df, e): lo, hi = ERAS[e]; return (df['year'] >= lo) & (df['year'] <= hi)
 
