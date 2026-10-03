@@ -24,6 +24,10 @@ CI_LEVEL, BOOT_REPS = 0.90, 2000
 P2_DIR = OUT_DIR/'pack2'; CACHE = P2_DIR/'cache'; CACHE.mkdir(parents=True, exist_ok=True)
 ASSET_FILE, U1_FILE, PROTO_FILE = P2_DIR/'asset_class.csv', P2_DIR/'u1_etfs.csv', P2_DIR/'pack2_protocol.json'
 UNIVS = ['U1', 'U2']
+# Reviewed 2026-10-03 (Step 0 output): Tiingo rows misclassify these; shared by both notebooks.
+ASSET_OVERRIDES = {'PAM': 'Stock',     # Pampa Energia SA (ADR), listed as ETF
+                   'BNY': 'Stock',     # BNY Mellon (ticker from BK, 2024); old BNY row was a fund
+                   'ERO': 'Stock'}     # Ero Copper; old ERO row was an exchange-traded note
 CONFIGS = ([dict(name=f'S4_{tg}_{ex}_{st}', screen='S4', family=f'S4_{tg}', trig=tg, mode=(0 if ex == 'X1' else 1),
                  hold=S4_HOLD, stop=(st == 'stop10'))
             for tg in ['T1', 'T2', 'T3'] for ex in ['X1', 'X2'] for st in ['nostop', 'stop10']]
@@ -315,8 +319,15 @@ def calendar_consts(cal):
     YIDX = np.where((YEAR_T >= Y0) & (YEAR_T < Y0 + NY), YEAR_T - Y0, -1).astype(np.int64)
 
 
+def read_assets():
+    """ASSET_FILE with the reviewed ASSET_OVERRIDES applied."""
+    A = pd.read_csv(ASSET_FILE).fillna({'name': ''})
+    A['asset_class'] = [ASSET_OVERRIDES.get(t, c) for t, c in zip(A['ticker'], A['asset_class'])]
+    return A
+
+
 def asset_masks(tickers):
-    A = pd.read_csv(ASSET_FILE).set_index('ticker').reindex(tickers)
+    A = read_assets().set_index('ticker').reindex(tickers)
     u1 = set(pd.read_csv(U1_FILE)['ticker'])
     is_u1 = np.array([t in u1 for t in tickers])
     is_stock = A['asset_class'].isin(['Stock', 'Unknown']).to_numpy() & ~is_u1
@@ -370,7 +381,10 @@ N_SEEDS = int(os.environ.get('PACK2_SEEDS', 16)); POWER_SEEDS = int(os.environ.g
 M_STEPS, ON_FRAC, MKT_SD = 12, 0.2, 0.01
 MKT_MU = float(os.environ.get('PACK2_MKT_MU', 0.0003))       # market drift per day (env override: diagnostics only)
 PLANT_REV, PLANT_VOL = 0.005, 0.001
-U1_FORCE_INCLUDE, U1_FORCE_EXCLUDE = set(), set()      # manual overrides after review (logged in the file)
+U1_FORCE_INCLUDE = set()                                # manual overrides after review
+U1_FORCE_EXCLUDE = {'CEF': 'closed-end trust (trades vs NAV), not an ETF',     # reviewed 2026-10-03
+                    'KYN': 'closed-end fund, not an ETF',
+                    'UTG': 'closed-end fund, not an ETF'}
 LEV_RE = re.compile(r'(\b-?[1-4](\.\d+)?x\b|ultra|\bbear\b|inverse|leveraged|\bvix\b|(?<!low )(?<!min )volatility'
                     r'|\bshort\b(?![- ](term|duration|maturity|treasury|bond)))', re.I)
 '''),
@@ -407,10 +421,10 @@ if not ASSET_FILE.exists():
             names[tk] = f'?? {e!r}'[:60]
     A['name'] = A['ticker'].map(names).fillna('')
     A.to_csv(ASSET_FILE, index=False)
-A = pd.read_csv(ASSET_FILE).fillna({'name': ''})
+A = read_assets()
 etf = A[A.asset_class == 'ETF'].copy()
 etf['exclude_reason'] = etf['name'].map(lambda s: (m.group(0) if (m := LEV_RE.search(s)) else ''))
-etf.loc[etf.ticker.isin(U1_FORCE_EXCLUDE), 'exclude_reason'] = 'manual exclude'
+etf.loc[etf.ticker.isin(U1_FORCE_EXCLUDE), 'exclude_reason'] = etf.ticker.map(U1_FORCE_EXCLUDE)
 etf.loc[etf.ticker.isin(U1_FORCE_INCLUDE), 'exclude_reason'] = ''
 U1L = etf[etf.exclude_reason == ''][['ticker', 'name']]
 print('asset classes:', A.asset_class.value_counts().to_dict())
@@ -421,8 +435,8 @@ print(etf[etf.exclude_reason != ''][['ticker', 'name', 'exclude_reason']].to_str
 amb = A[A.asset_class.str.startswith('Ambiguous')]
 print(f'\nAmbiguous (in neither universe): {len(amb)} {amb.ticker.tolist()}')
 print(f'Unknown (treated as stocks for U2): {int((A.asset_class == "Unknown").sum())}')
-if not U1_FILE.exists() or not U1_APPROVED:
-    U1L.to_csv(U1_FILE, index=False)
+U1L.to_csv(U1_FILE, index=False)          # always rewritten from the current list; the protocol records its sha
+print(f'asset overrides applied: {ASSET_OVERRIDES}')
 if len(U1L) < 30: print(f'\n!! U1 has only {len(U1L)} names: U1 results are DESCRIPTIVE ONLY')
 assert U1_APPROVED, 'Review the U1 list above (pack2/u1_etfs.csv), then set U1_APPROVED = True and re-run.'
 IS_STOCK, IS_U1 = asset_masks(TICKERS); I_SPY = TICKERS.index('SPY')
