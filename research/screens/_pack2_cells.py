@@ -363,6 +363,13 @@ type). The own-exit version was tried first and FAILED this protocol on drift wo
 collect more market drift: S4 families at pct 64-66, t ≈ 3, pooled 25%); with drift off it passed — so the bias is
 holding-time × drift, and matching the duration removes it.
 
+**Binding run (decision 2026-10-03):** the first 16-seed run failed the pass-rate checks for S4 (centring passed:
+families 58-59, |t| ≤ 1.7). The protocol is re-run ONCE at 64 seeds with the same checks. That run replaces the
+16-seed result (archived as `*_16seed_superseded`) and is binding either way: if S4 fails, S4 stays off real data and
+there are no reruns. The notebook refuses to overwrite a ≥ 64-seed protocol file. **Gates are per screen:** S4
+(families T1-T3 + the S4 pooled rate), S5 (its family + the S5 pooled rate) and S6 (per universe) are each gated on
+their own checks and power.
+
 **Checks (decisions 2026-10-03):**
 - SELECTION null, at the verdict threshold: pooled share of (seed × config × universe) with pct >= 90 must be
   <= 15% (calibrated ≈ 10%); per family (S4_T1, S4_T2, S4_T3, S5): mean pct over the 16 per-seed values in [40, 60],
@@ -377,7 +384,8 @@ holding-time × drift, and matching the duration removes it.
 '''),
         ("code", "# ===== Cell 0 — config =====\n" + CONFIG + r'''
 U1_APPROVED = False or os.environ.get('PACK2_U1_APPROVED') == '1'   # set True after reviewing u1_etfs.csv
-N_SEEDS = int(os.environ.get('PACK2_SEEDS', 16)); POWER_SEEDS = int(os.environ.get('PACK2_POWER_SEEDS', 4))
+BINDING_SEEDS = 64                                       # 2026-10-03: the 64-seed run is binding, run ONCE
+N_SEEDS = int(os.environ.get('PACK2_SEEDS', BINDING_SEEDS)); POWER_SEEDS = int(os.environ.get('PACK2_POWER_SEEDS', 4))
 M_STEPS, ON_FRAC, MKT_SD = 12, 0.2, 0.01
 MKT_MU = float(os.environ.get('PACK2_MKT_MU', 0.0003))       # market drift per day (env override: diagnostics only)
 PLANT_REV, PLANT_VOL = 0.005, 0.001
@@ -527,6 +535,16 @@ def run_world(seed, plant=False, cfgs=CONFIGS, univs=UNIVS, s6=True):
     return recs, s6r
 
 
+# ONE binding 64-seed run (decision 2026-10-03): it replaces the 16-seed result; no further reruns.
+OLD = json.load(open(PROTO_FILE)) if PROTO_FILE.exists() else None
+if OLD and OLD.get('n_seeds', 0) >= BINDING_SEEDS and os.environ.get('PACK2_TEST') != '1':
+    raise RuntimeError(f'binding {OLD["n_seeds"]}-seed protocol already written {OLD["written_utc"]} — no reruns')
+if OLD:                                                 # keep the superseded run for the record
+    tag = f'{OLD.get("n_seeds", 0)}seed_superseded'
+    for f_ in [PROTO_FILE, P2_DIR/'protocol_records.csv', P2_DIR/'protocol_s6.csv']:
+        if f_.exists(): f_.rename(f_.with_name(f'{f_.stem}_{tag}{f_.suffix}'))
+    print(f'archived the superseded {OLD.get("n_seeds")}-seed protocol files (*_{tag})')
+
 REC, S6R = [], []
 for seed in range(N_SEEDS):
     t0 = time.time(); r_, s_ = run_world(seed); REC += r_; S6R += s_
@@ -568,9 +586,18 @@ for f, g in ok_rec.groupby('family'):
 FAM = pd.DataFrame(fam_rows).T
 fam_ok = bool(len(FAM) == 4 and FAM.mean_pct.between(40, 60).all() and (FAM.t.abs() < 2.5).all()
               and (FAM.binom_p >= 0.05).all())
-SEL_OK = bool(pooled <= 0.15 and fam_ok)
-print(f'SELECTION null: pooled pass rate (pct >= {PCT_PASS:.0f}) {pooled:.1%} (<= 15%)')
-print(FAM.round(3).to_string()); print('family checks:', 'PASS' if fam_ok else 'FAIL')
+SCREEN_FAMS = {'S4': ['S4_T1', 'S4_T2', 'S4_T3'], 'S5': ['S5']}
+SCREEN_OK, POOLED = {}, {}                              # gate PER SCREEN (decision 2026-10-03)
+for scr, fams in SCREEN_FAMS.items():
+    g = ok_rec[ok_rec.screen == scr]; POOLED[scr] = float((g.pct >= PCT_PASS).mean()) if len(g) else np.nan
+    F = FAM.reindex(fams)
+    SCREEN_OK[scr] = bool(all(f in FAM.index for f in fams) and F.mean_pct.between(40, 60).all()
+                          and (F.t.abs() < 2.5).all() and (F.binom_p >= 0.05).all() and POOLED[scr] <= 0.15)
+SEL_OK = all(SCREEN_OK.values())
+print(f'SELECTION null: pooled pass rate (pct >= {PCT_PASS:.0f}) all {pooled:.1%} | '
+      + ' | '.join(f'{k} {v:.1%}' for k, v in POOLED.items()) + '  (<= 15% per screen)')
+print(FAM.round(3).to_string()); print('family checks (all):', 'PASS' if fam_ok else 'FAIL')
+for scr in SCREEN_FAMS: print(f'  {scr}: {"PASS" if SCREEN_OK[scr] else "FAIL -> STOP (stays off real data)"}')
 print('by universe:'); print(ok_rec.groupby(['family', 'universe']).pct.agg(['mean', 'count']).round(1).to_string())
 
 FH_ALLOWED, fh_rows = {}, {}
@@ -594,32 +621,35 @@ for u, g in S6R.groupby('universe'):
     S6_OK[u] = bool(np.isfinite(t_) and abs(t_) < 2.5 and lo_rate <= 0.15)
     s6_rows[u] = dict(mean=v.mean(), t=t_, ci_lo_pos_rate=lo_rate, ok=S6_OK[u])
 print('\nS6 top decile - universe:'); print(pd.DataFrame(s6_rows).T.to_string())
-print('\nSELECTION NULL:', 'PASS' if SEL_OK else 'FAIL -> STOP (S4/S5 stay off real data)')
+print('\nSELECTION NULL per screen:', {k: 'PASS' if v else 'FAIL' for k, v in SCREEN_OK.items()})
 '''),
         ("code", r'''
 # ===== Cell 6 — power (only if the null passed) + write the protocol file =====
-POWER_OK, PW = False, pd.DataFrame()
-if SEL_OK:
-    pcfg = [c for c in CONFIGS if c['family'] == 'S4_T1' or c['name'] == 'S5_h20']
+POWER, PW = {'S4': False, 'S5': False}, pd.DataFrame()
+pcfg = [c for c in CONFIGS if (SCREEN_OK['S4'] and c['family'] == 'S4_T1') or (SCREEN_OK['S5'] and c['name'] == 'S5_h20')]
+if pcfg:                                                # power only for screens whose null passed
     rows = []
     for s in range(POWER_SEEDS):
         r_, _ = run_world(1000 + s, plant=True, cfgs=pcfg, univs=['U2'], s6=False); rows += r_
-    PW = pd.DataFrame(rows)
-    det_s4 = PW[PW.family == 'S4_T1'].groupby('seed').pct.mean() >= PCT_PASS
-    det_s5 = PW[PW.cfg == 'S5_h20'].set_index('seed').pct >= PCT_PASS
-    need = int(math.ceil(0.75 * POWER_SEEDS))
-    POWER_OK = bool(det_s4.sum() >= need and det_s5.sum() >= need)
+    PW = pd.DataFrame(rows); need = int(math.ceil(0.75 * POWER_SEEDS))
     print(PW[['seed', 'cfg', 'n', 'pct']].to_string(index=False))
-    print(f'power: S4_T1 detected {int(det_s4.sum())}/{POWER_SEEDS}, S5_h20 {int(det_s5.sum())}/{POWER_SEEDS} '
-          f'(need {need}) -> {"PASS" if POWER_OK else "FAIL"}')
+    if SCREEN_OK['S4']:
+        det = PW[PW.family == 'S4_T1'].groupby('seed').pct.mean() >= PCT_PASS
+        POWER['S4'] = bool(det.sum() >= need); print(f'power S4 (S4_T1): {int(det.sum())}/{POWER_SEEDS} (need {need})')
+    if SCREEN_OK['S5']:
+        det = PW[PW.cfg == 'S5_h20'].set_index('seed').pct >= PCT_PASS
+        POWER['S5'] = bool(det.sum() >= need); print(f'power S5 (S5_h20): {int(det.sum())}/{POWER_SEEDS} (need {need})')
+POWER_OK = bool(any(SCREEN_OK.values()) and all(POWER[s] for s in SCREEN_OK if SCREEN_OK[s]))
 PROTO = dict(written_utc=pd.Timestamp.now(tz='UTC').isoformat(), n_seeds=N_SEEDS, n_draws=N_DRAWS,
              power_seeds=POWER_SEEDS, selection_null_ok=SEL_OK, pooled_pass_rate=pooled,
+             screen_ok=SCREEN_OK, pooled_by_screen=POOLED, power=POWER,
              families=json.loads(FAM.to_json(orient='index')), power_ok=POWER_OK, fh_allowed=FH_ALLOWED,
              fh=fh_rows, s6_ok=S6_OK, s6=s6_rows, u1_sha=sha(U1_FILE), n_u1=int(IS_U1.sum()))
 json.dump(PROTO, open(PROTO_FILE, 'w'), indent=1, default=float)
 print(f'\nwrote {PROTO_FILE}')
-print(f'SUMMARY: selection null {"PASS" if SEL_OK else "FAIL"} | power {"PASS" if POWER_OK else "FAIL/not run"} | '
-      f'FH allowed {FH_ALLOWED} | S6 ok {S6_OK}')
+RUNNABLE = {s: bool(SCREEN_OK[s] and POWER[s]) for s in SCREEN_OK}
+print(f'SUMMARY ({N_SEEDS} seeds): null {SCREEN_OK} | power {POWER} | real data -> S4 {RUNNABLE["S4"]}, '
+      f'S5 {RUNNABLE["S5"]}, S6 {S6_OK} | FH allowed {FH_ALLOWED}')
 '''),
     ]
 
@@ -629,8 +659,8 @@ print(f'SUMMARY: selection null {"PASS" if SEL_OK else "FAIL"} | power {"PASS" i
 # Screen pack 2 — S4 dip-in-uptrend, S5 abnormal volume / quiet price, S6 overnight momentum (TRIALS)
 
 Chart-only screens on the Drive corpus. **Gated:** runs only with `pack2/pack2_protocol.json` from
-`screen_pack2_protocol.ipynb` (16-seed martingale protocol). S4/S5 need `selection_null_ok` and `power_ok`; S6
-needs `s6_ok` for that universe; fixed horizons are only those the protocol allowed. The U1 file must be the one the
+`screen_pack2_protocol.ipynb` (binding 64-seed martingale protocol). Gates are PER SCREEN: S4 and S5 each need their
+own `screen_ok` and `power`; S6 needs `s6_ok` for that universe; fixed horizons are only those the protocol allowed. The U1 file must be the one the
 protocol validated (sha256).
 
 **Lockbox:** every series cut at 2024-12-31 at load; IS entries 2011-01-03 .. 2023-12-29 (2024 bars only resolve
@@ -659,13 +689,13 @@ TRIAL_LOG, TRIAL_RET = OUT_DIR/'screens_trial_log.csv', OUT_DIR/'screens_trial_r
 # ===== Cell 2 — gate on the protocol file =====
 assert PROTO_FILE.exists(), 'run screen_pack2_protocol.ipynb first'
 PROTO = json.load(open(PROTO_FILE))
-assert PROTO['n_seeds'] >= 16 or os.environ.get('PACK2_TEST') == '1', 'protocol must use >= 16 seeds'
+assert PROTO['n_seeds'] >= 64 or os.environ.get('PACK2_TEST') == '1', 'needs the binding 64-seed protocol'
 assert PROTO['u1_sha'] == sha(U1_FILE), 'U1 list changed since the protocol ran — re-run the protocol'
-RUN_S45 = bool(PROTO['selection_null_ok'] and PROTO['power_ok'])
+RUN = {s: bool(PROTO['screen_ok'][s] and PROTO['power'][s]) for s in ['S4', 'S5']}   # per-screen gate
 FH_ALLOWED = {k: [int(h) for h in v] for k, v in PROTO['fh_allowed'].items()}
 S6_OK = PROTO['s6_ok']
-print(f'protocol {PROTO["written_utc"]}: selection null {PROTO["selection_null_ok"]}, power {PROTO["power_ok"]} '
-      f'-> S4/S5 {"RUN" if RUN_S45 else "STOPPED"} | FH allowed {FH_ALLOWED} | S6 {S6_OK}')
+print(f'protocol {PROTO["written_utc"]} ({PROTO["n_seeds"]} seeds): null {PROTO["screen_ok"]}, power {PROTO["power"]} '
+      + '-> ' + ', '.join(f'{s} {"RUN" if v else "STOPPED"}' for s, v in RUN.items()) + f' | S6 {S6_OK} | FH {FH_ALLOWED}')
 '''),
         ("code", r'''
 # ===== Cell 3 — real panels, indicators, universes =====
@@ -685,8 +715,8 @@ print(f'[{time.time()-t0:.0f}s]')
 RES = {}
 def pct_(x): return f'{x:+.2%}' if np.isfinite(x) else 'nan'
 
-if RUN_S45:
-    for cfg in CONFIGS:
+for cfg in [c for c in CONFIGS if RUN[c['screen']]]:
+    if True:
         for u in UNIVS:
             t0 = time.time()
             RES[(cfg['name'], u)] = run_cfg(CTX, cfg, u, N_DRAWS, 7 + len(RES), FH_ALLOWED[cfg['screen']])
@@ -707,7 +737,7 @@ def trade_row(o):
                 yrs_pos=yrs_pos, VERDICT=verdict, _exc_y=exc_y)
 
 TAB = {}
-if RUN_S45:
+if RES:
     TAB = {k: trade_row(o) for k, o in RES.items()}
     T4 = pd.DataFrame({k: {c: v for c, v in r.items() if not c.startswith('_')} for k, r in TAB.items()}).T
     T4.index.names = ['rule', 'universe']
@@ -795,7 +825,8 @@ print('\nVERDICTS (era 2019-2023 > 0 AND >= 9/13 years > 0 AND [S4/S5] null pct 
 for _, r in LOG[~LOG.backfilled].iterrows():
     print(f'  {"WORTH DRILLING    " if r.verdict else "not worth drilling"}  {r.rule:22s} {r.universe}'
           + (f'  (pct {r.pct_null:.0f})' if pd.notna(r.pct_null) else ''))
-if not RUN_S45: print('  S4/S5: STOPPED by the protocol — no trials logged for them')
+for s_, v_ in RUN.items():
+    if not v_: print(f'  {s_}: STOPPED by the protocol — no trials logged for it')
 '''),
     ]
     return PROTO, REAL
