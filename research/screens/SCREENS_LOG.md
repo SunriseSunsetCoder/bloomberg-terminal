@@ -58,3 +58,20 @@ Notebooks: `screen_pack2_protocol.ipynb` (Step 0 U1 + martingale protocol) and `
 
 **Pack 2 outcome:** S4 and S5 are off real data (binding protocol). S6 was tested and closed. Nothing is worth
 drilling.
+
+## S4b — dip-in-uptrend time-series event study, SPY + 11 sector SPDRs (2026-10-03)
+Notebook: `s4b_event_study.ipynb`. 15 trials (3 triggers x X1/X2/H5/H10/H20). No disaster stop. Non-overlapping events
+per ETF. Excess is measured against a same-length, same-ETF baseline.
+
+### Part A — 16-seed martingale validation (23:29 UTC, run once): FAIL -> STOP (standing rule)
+| family | mean gross excess | t | mean q | t_q | share q ≥ 90 |
+|---|---|---|---|---|---|
+| T1 | +4.7 bp | 1.41 | 59.2 | 1.88 | 10.0% |
+| T2 | +5.8 bp | 1.66 | 60.4 | 2.13 | 11.3% |
+| T3 | +3.8 bp | 0.61 | 54.3 | 0.66 | 15.0% |
+
+- Pooled share q ≥ 90: 12.1% (≤ 15%, passes).
+- **Centring failed only on T2's mean q of 60.4**, which is outside the 40-60 band; every |t| < 2.5.
+- Power was not run, because the null failed. The plant size was still the approved +0.5%/bar.
+- On fixtures, the same plant came to only about +20 bp of gross excess per event, and power fell short (q 70-88).
+- **Real data was not touched:** the gate stopped Part B. No S4b trials were logged.
