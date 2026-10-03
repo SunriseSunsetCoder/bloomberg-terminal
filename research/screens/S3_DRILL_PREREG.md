@@ -62,8 +62,19 @@ No changes allowed. Results are appended to P3.
 
 | event | read on | IJR − IWM | pass? | secondary | commit |
 |---|---|---|---|---|---|
-| June 2025 recon (OOS, frozen rule) | | | | | |
-| June 2026 recon (OOS, frozen rule) | | | | | |
+| June 2025 recon (OOS, frozen rule) | 2026-10-03 | −0.40% (as reported) | OOS read: **mixed** | — | S3 close commit |
+| June 2026 recon (OOS, frozen rule) | 2026-10-03 | +1.18% (as reported) | OOS read: **mixed** | — | S3 close commit |
 | December 2026 recon (P1) | | | | | |
 | June 2027 recon (P4) | | | | | |
 | December 2027 recon (P4) | | | | | |
+
+## P5. Outcome — S3 CLOSED as a strategy (recorded 2026-10-03; no rule changes)
+
+- **In-sample drill verdict (2011-2024): FAIL.**
+  - Plateau failed: the 10- and 15-day cells are negative.
+  - Mean excess under stress costs is negative.
+- **OOS read (June 2025 + June 2026, frozen rule, opened once): mixed.** June 2025 −0.40%, June 2026 +1.18%,
+  as reported from `s3_drill_oos.ipynb`; the full rows are in `results/screens/s3_drill_oos/oos_events.csv`.
+- **No rule, cost or threshold was changed** after any result was seen.
+- **S3 is closed as a strategy.** P1 (December 2026) and P4 (June/December 2027) stay registered exactly as
+  written. Their results go in P3 for the log only and will not reopen S3.
