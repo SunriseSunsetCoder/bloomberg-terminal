@@ -36,8 +36,27 @@ its excess over the same-year baseline is recorded as secondary. FTSE Russell's 
 
 No changes allowed. Results are appended to P3.
 
-## P2. Drill primary rule — FROZEN AT: _(not yet; filled in by the freeze commit, before the 2025/2026 June OOS
-read and before 2026-12-11)_
+## P2. Drill primary rule — FROZEN 2026-10-03 (this commit), before any 2025+ IJR/IWM data was read
+
+- **Event:** each June Russell recon. The date is the last Friday of June, one week earlier if that Friday is the 29th/30th
+  (2025-06-27, 2026-06-26).
+- **Primary cell (0, 20):** entry at the recon close; exit at the close 20 trading days after the recon.
+  It was fixed from screen S3 and NOT re-picked from the drill grid.
+- **Statistic:** spread = compounded IJR − IWM (adjusted total return). Baseline = mean spread of all other
+  non-overlapping 20-bar windows that start in the same year. Excess = spread − baseline.
+- **Costs (base):** 5bp round trip on both legs + IWM borrow 0.5%/yr × 20/252 (9.0bp per event).
+- **OOS read (June 2025 + June 2026, opened ONCE by `s3_drill_oos.ipynb`):** *supports* = both events have excess net of
+  base cost > 0; *mixed* = one does; *against* = neither. Raw spread > 0 is reported alongside.
+- **OOS data opened:** IJR/IWM adjusted closes 2025-01-01 .. 2026-09-30 only, kept in `reference/oos/`. The 2026
+  baseline is a partial year. Everything else stays sealed after 2024-12-31.
+- **Gate:** the OOS notebook needs the in-sample null check passed (`null_check.json`). It reports, but is not
+  gated on, the in-sample drill verdict.
+- **Frozen files** (sha256 of the LF bytes as committed, i.e. the GitHub raw file):
+  - `s3_drill_oos.ipynb` `c6018db225241c23311198ff651410d6269490c10cceb3138f51b84a30108f6f`
+  - `s3_drill.ipynb` `f5144ba4e8b2bf5cae2b4aa0eb2dff992c5d99af98b9d4289d639509f870fd93`
+
+  Any later change to the in-sample drill (e.g. null-gate parameters) must leave `s3_drill_oos.ipynb` and this
+  rule untouched. Such a change is logged here as an amendment, and only before the OOS read.
 
 ## P3. Results log (append only)
 

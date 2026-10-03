@@ -515,6 +515,333 @@ pd.Series(V, name='worth_drilling').to_csv(OUT_DIR/'screen_pack1_verdicts.csv')
 '''),
 ]
 
-for name, cells in [("survivorship_check.ipynb", A_CELLS), ("screen_pack1.ipynb", B_CELLS)]:
-    (HERE / name).write_text(json.dumps(nb(cells), indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+# ======================================================= S3 drill (in-sample)
+RECON_RULE = r'''
+
+def rule_recon(y):
+    """June recon: last Friday of June, one week earlier if that Friday is the 29th/30th."""
+    fr = [d for d in pd.date_range(f'{y}-06-01', f'{y}-06-30') if d.weekday() == 4][-1]
+    return fr - pd.Timedelta(days=7) if fr.day >= 29 else fr
+
+'''
+
+D_CELLS = [
+    ("markdown", r'''
+# S3 drill — Russell June reconstitution, IJR − IWM (IN-SAMPLE 2011-2024)
+
+Pre-registration: `research/screens/S3_DRILL_PREREG.md` (P1 Dec-2026, P4 2027 forward tests, P2 frozen rule).
+Lockbox: IJR/IWM cut at 2024-12-31 at load. The June 2025/2026 recons are NOT read here; `s3_drill_oos.ipynb` reads
+them once, after the freeze commit.
+
+**Grid:** entry e ∈ {−5, −3, −1, 0} trading days vs the recon close × exit at recon + H, H ∈ {10, 15, 20, 30}
+(window length L = H − e). **Primary cell (0, 20)** is fixed from the screen and is NOT re-picked from the grid.
+
+**Per cell, per year:** spread = compounded IJR − IWM over the window. Baseline = mean spread of ALL other windows of
+the same length L that start in the same year and don't overlap the event window. Excess = spread − baseline.
+Percentile = share of those baseline windows below the event window. Across the 14 years: mean/median excess,
+hit rate, one-sided t, one-sided Wilcoxon, mean percentile (t vs 50), era means, leave-one-year-out.
+
+**Costs (event trade only):** round trip on both legs, 5bp base / 15bp stress, plus IWM borrow at 0.5%/yr base /
+3%/yr stress × L/252. The break-even round-trip cost is reported.
+
+**Drill verdict (pre-registered) = ALL of:**
+1. primary raw spread passes the screen rule (2020-24 mean > 0 AND ≥ 10/14 years > 0);
+2. primary excess NET of base costs passes the screen rule;
+3. plateau: the primary and its neighbours (0,15), (0,30), (−1,20) each have mean excess > 0 and ≥ 9/14 years > 0;
+4. leave-one-year-out: every fold's mean primary excess > 0.
+
+**Null check first (standing rule; fail = stop):** 16 martingale worlds. IJR/IWM daily returns are
+block-bootstrapped jointly in 20-day blocks, each leg is demeaned, and the real recon dates are kept. Pass iff the
+full-verdict pass rate is ≤ 10%, and every entry-offset family has mean percentile in [40, 60] with |t| < 2.5 and a
+per-cell screen-pass rate ≤ 15%. Power: +10bp/day planted in the 20 days after each recon must pass the full
+verdict in ≥ 13/16 seeds.
+'''),
+    ("code", "# ===== Cell 0 — config =====\n" + SETUP.strip("\n") + r'''
+
+RECON = {2011: '2011-06-24', 2012: '2012-06-22', 2013: '2013-06-28', 2014: '2014-06-27', 2015: '2015-06-26',
+         2016: '2016-06-24', 2017: '2017-06-23', 2018: '2018-06-22', 2019: '2019-06-28', 2020: '2020-06-26',
+         2021: '2021-06-25', 2022: '2022-06-24', 2023: '2023-06-23', 2024: '2024-06-28'}
+ENTRIES, HORIZONS = [-5, -3, -1, 0], [10, 15, 20, 30]
+PRIMARY, NEIGHBOURS = (0, 20), [(0, 15), (0, 30), (-1, 20)]
+ERAS = {'2011-2014': (2011, 2014), '2015-2019': (2015, 2019), '2020-2024': (2020, 2024)}; RECENT = '2020-2024'
+RT_COST = {'base': 5e-4, 'stress': 15e-4}            # round trip, both legs
+BORROW  = {'base': 0.005, 'stress': 0.03}            # IWM borrow, per year
+PLATEAU_MIN_POS = 9
+N_SEEDS, BLOCK, PLANT = 16, 20, 0.0010               # null worlds; planted +10bp/day
+NULL_MAX_PASS, FAM_PCT, FAM_T, FAM_MAX, POWER_MIN = 0.10, (40, 60), 2.5, 0.15, 13
+D_OUT = OUT_DIR/'s3_drill'; D_OUT.mkdir(parents=True, exist_ok=True)
+'''),
+    ("code", "# ===== Cell 1 — helpers + data =====\n" + HELPERS.strip("\n") + RECON_RULE + r'''
+for y, d in RECON.items():
+    assert pd.Timestamp(d) == rule_recon(y), (y, d, rule_recon(y))
+
+px = pd.concat({tk: load_px(ensure_ref(tk)).set_index('Date')['Close'] for tk in ['IJR', 'IWM']}, axis=1).dropna()
+assert px.index.max() <= CUT_DATE
+D = px.index; A0, B0 = px['IJR'].to_numpy(float), px['IWM'].to_numpy(float); YEAR = D.year.to_numpy()
+EV = {y: D.get_loc(pd.Timestamp(d)) for y, d in RECON.items()}
+assert all(i0 + max(HORIZONS) < len(D) and i0 + min(ENTRIES) >= 0 for i0 in EV.values())
+print(f'IJR/IWM common bars {D[0].date()} .. {D[-1].date()}  n={len(D)}; recons {len(EV)}')
+
+
+def need_years(n): return math.ceil(2 * n / 3)
+
+
+def cell_years(A, B, e, H):
+    """Per-year event spread, same-year same-length non-overlapping baseline, excess, percentile."""
+    L = H - e
+    sp = A[L:] / A[:-L] - B[L:] / B[:-L]              # sp[i] = spread of the window starting at bar i
+    yr = YEAR[:len(sp)]; rows = {}
+    for y, i0 in EV.items():
+        s, t = i0 + e, i0 + H
+        idx = np.where(yr == y)[0]; idx = idx[(idx + L < s) | (idx > t)]
+        base = sp[idx]; ev = sp[s]
+        rows[y] = (ev, base.mean(), ev - base.mean(), 100 * (base < ev).mean(), len(idx))
+    return pd.DataFrame.from_dict(rows, orient='index', columns=['spread', 'base', 'excess', 'pct', 'n_base'])
+
+
+def run_drill(A, B):
+    return {(e, H): cell_years(A, B, e, H) for e in ENTRIES for H in HORIZONS}
+
+
+def cost(k, L): return RT_COST[k] + BORROW[k] * L / 252
+
+
+def screen_pass(Y, col, c=0.0):
+    x = Y[col] - c; lo, hi = ERAS[RECENT]
+    return bool(x[(x.index >= lo) & (x.index <= hi)].mean() > 0 and (x > 0).sum() >= need_years(len(x)))
+
+
+def drill_verdict(cells):
+    Y = cells[PRIMARY]; L = PRIMARY[1] - PRIMARY[0]
+    return {'1 primary raw (screen rule)': screen_pass(Y, 'spread'),
+            '2 primary excess net base cost (screen rule)': screen_pass(Y, 'excess', cost('base', L)),
+            '3 plateau': all(bool(cells[k]['excess'].mean() > 0) and int((cells[k]['excess'] > 0).sum()) >= PLATEAU_MIN_POS
+                             for k in [PRIMARY] + NEIGHBOURS),
+            '4 LOYO min fold mean excess > 0': bool(min(Y['excess'].drop(y).mean() for y in Y.index) > 0)}
+
+
+def cell_stats(Y, L):
+    x = Y['excess']
+    out = {'mean_exc': x.mean(), 'med_exc': x.median(), 'n_pos': int((x > 0).sum()), 'n': len(x),
+           't_exc': stats.ttest_1samp(x, 0.0, alternative='greater').statistic,
+           'p_wilcoxon': stats.wilcoxon(x, alternative='greater').pvalue,
+           'mean_pct': Y['pct'].mean(), 't_pct': stats.ttest_1samp(Y['pct'], 50.0).statistic,
+           'mean_raw': Y['spread'].mean(), 'n_pos_raw': int((Y['spread'] > 0).sum())}
+    for e, (lo, hi) in ERAS.items():
+        sel = (x.index >= lo) & (x.index <= hi)
+        out[f'exc {e}'], out[f'raw {e}'] = x[sel].mean(), Y['spread'][sel].mean()
+    for k in RT_COST:
+        out[f'net_exc {k}'] = x.mean() - cost(k, L); out[f'n_pos_net {k}'] = int((x - cost(k, L) > 0).sum())
+    out['breakeven_rt'] = x.mean() - BORROW['base'] * L / 252
+    return out
+'''),
+    ("markdown", "## Null check — martingale worlds (must pass before real data)"),
+    ("code", r'''
+# ===== Cell 2 — null check (16 martingale seeds) + power (16 planted seeds) =====
+RA, RB = A0[1:] / A0[:-1] - 1, B0[1:] / B0[:-1] - 1
+
+
+def world(seed, plant=0.0):
+    rng = np.random.default_rng(seed); n = len(RA)
+    starts = rng.integers(0, n - BLOCK, size=n // BLOCK + 1)
+    idx = np.concatenate([np.arange(s, s + BLOCK) for s in starts])[:n]
+    ra, rb = RA[idx] - RA.mean(), RB[idx] - RB.mean()          # joint blocks keep correlation; zero drift
+    if plant:
+        for i0 in EV.values(): ra[i0:i0 + 20] += plant          # moves bar i0 -> i0+20 (after the recon close)
+    return np.concatenate([[1.0], np.cumprod(1 + ra)]), np.concatenate([[1.0], np.cumprod(1 + rb)])
+
+
+nulls, fam = [], {e: {'pct': [], 'pass': []} for e in ENTRIES}
+for seed in range(N_SEEDS):
+    cells = run_drill(*world(seed)); v = drill_verdict(cells)
+    nulls.append({'seed': seed, 'verdict': all(v.values()), **v})
+    for e in ENTRIES:   # ONE pct value per seed per family: its 4 horizons share one path (no pseudo-replication)
+        fam[e]['pct'].append(np.mean([cells[(e, H)]['pct'].mean() for H in HORIZONS]))
+        fam[e]['pass'] += [screen_pass(cells[(e, H)], 'excess') for H in HORIZONS]
+NULLS = pd.DataFrame(nulls).set_index('seed')
+FAM = pd.DataFrame({e: {'mean_pct': np.mean(f['pct']),
+                        't_pct': stats.ttest_1samp(f['pct'], 50.0).statistic,      # n = N_SEEDS
+                        'cell_pass_rate': np.mean(f['pass'])} for e, f in fam.items()}).T
+power = [all(drill_verdict(run_drill(*world(1000 + s, PLANT))).values()) for s in range(N_SEEDS)]
+
+pass_rate = float(NULLS['verdict'].mean())
+checks = {'verdict pass rate <= 10%': pass_rate <= NULL_MAX_PASS,
+          'family mean pct in [40,60]': bool(FAM['mean_pct'].between(*FAM_PCT).all()),
+          'family |t| < 2.5': bool((FAM['t_pct'].abs() < FAM_T).all()),
+          'family cell pass rate <= 15%': bool((FAM['cell_pass_rate'] <= FAM_MAX).all()),
+          f'power >= {POWER_MIN}/{N_SEEDS}': sum(power) >= POWER_MIN}
+NULL_OK = all(checks.values())
+print(NULLS.to_string()); print(f'\nverdict pass rate {pass_rate:.1%}')
+print('\nentry-offset families:'); print(FAM.round(3).to_string())
+print(f'\npower (planted +{PLANT*1e4:.0f}bp/day): {sum(power)}/{N_SEEDS}')
+for k, v in checks.items(): print(f'  {"PASS" if v else "FAIL"}  {k}')
+print('NULL CHECK:', 'PASS' if NULL_OK else 'FAIL -> STOP, do not read the real-data results')
+json.dump({'null_ok': NULL_OK, 'checks': checks, 'pass_rate': pass_rate, 'power': int(sum(power))},
+          open(D_OUT/'null_check.json', 'w'), indent=1)
+NULLS.to_csv(D_OUT/'null_seeds.csv'); FAM.to_csv(D_OUT/'null_families.csv')
+'''),
+    ("markdown", "## Real data (2011-2024)"),
+    ("code", r'''
+# ===== Cell 3 — grid on real data =====
+assert NULL_OK, 'null check failed — stop (standing rule)'
+CELLS = run_drill(A0, B0)
+ST = pd.DataFrame({k: cell_stats(Yc, k[1] - k[0]) for k, Yc in CELLS.items()}).T
+ST.index = pd.MultiIndex.from_tuples(ST.index, names=['entry', 'H'])
+pd.set_option('display.width', 250)
+show = ST[['mean_exc', 'med_exc', 'n_pos', 't_exc', 'p_wilcoxon', 'mean_pct', 't_pct', 'mean_raw', 'n_pos_raw',
+           'exc 2011-2014', 'exc 2015-2019', 'exc 2020-2024', 'net_exc base', 'net_exc stress', 'breakeven_rt']]
+print('All 16 cells (returns as fractions; primary = (0, 20)):'); print(show.astype(float).round(4).to_string())
+ST.to_csv(D_OUT/'cell_stats.csv')
+pd.concat({f'{e}_{H}': Yc for (e, H), Yc in CELLS.items()}, names=['cell', 'year']).to_csv(D_OUT/'cell_years.csv')
+
+import matplotlib.pyplot as plt
+M = ST['mean_exc'].astype(float).unstack('H') * 1e4; P = ST['n_pos'].unstack('H')
+fig, ax = plt.subplots(figsize=(6.5, 4)); lim = np.nanmax(np.abs(M.values))
+im = ax.imshow(M.values, cmap='RdBu', vmin=-lim, vmax=lim)
+ax.set_xticks(range(len(M.columns))); ax.set_xticklabels([f'+{h}' for h in M.columns])
+ax.set_yticks(range(len(M.index))); ax.set_yticklabels(M.index)
+ax.set_xlabel('exit: recon + H bars'); ax.set_ylabel('entry vs recon (bars)')
+for i in range(M.shape[0]):
+    for j in range(M.shape[1]):
+        ax.text(j, i, f'{M.values[i, j]:+.0f}bp\n{int(P.values[i, j])}/14', ha='center', va='center', fontsize=8)
+ax.set_title('Mean excess IJR−IWM vs same-length baseline'); fig.colorbar(im, ax=ax, label='bp')
+plt.tight_layout(); plt.savefig(D_OUT/'plateau_heatmap.png', dpi=110); plt.show()
+'''),
+    ("code", r'''
+# ===== Cell 4 — primary cell: per year, LOYO, costs =====
+Y = CELLS[PRIMARY]; L = PRIMARY[1] - PRIMARY[0]
+print(f'Primary {PRIMARY} per year:')
+print(Y.assign(**{c: Y[c].map(lambda x: f'{x:+.2%}') for c in ['spread', 'base', 'excess']},
+               pct=Y['pct'].round(0)).to_string())
+
+loyo = pd.DataFrame({y: {'mean_exc': Y['excess'].drop(y).mean(), 'n_pos': int((Y['excess'].drop(y) > 0).sum()),
+                         't': stats.ttest_1samp(Y['excess'].drop(y), 0.0, alternative='greater').statistic}
+                     for y in Y.index}).T
+loyo.index.name = 'left out'
+print('\nLeave-one-year-out (primary excess):'); print(loyo.round(4).to_string())
+print(f'  min fold mean {loyo["mean_exc"].min():+.4f} (without {loyo["mean_exc"].idxmin()})')
+x20 = Y['excess'].drop(2020)
+print(f'  WITHOUT 2020: mean {x20.mean():+.4f}, {int((x20 > 0).sum())}/{len(x20)} positive, '
+      f't {stats.ttest_1samp(x20, 0.0, alternative="greater").statistic:.2f}')
+best2 = list(Y['excess'].nlargest(2).index); xb2 = Y['excess'].drop(best2)
+print(f'  DROP BEST 2 {best2}: mean {xb2.mean():+.4f}, {int((xb2 > 0).sum())}/{len(xb2)} positive')
+loyo.to_csv(D_OUT/'primary_loyo.csv')
+no2020 = pd.Series({k: Yc['excess'].drop(2020).mean() for k, Yc in CELLS.items()})
+print('\nAll cells, mean excess WITHOUT 2020 (bp):'); print((no2020.unstack() * 1e4).round(0).to_string())
+
+print('\nCosts on the primary (per event):')
+for k in RT_COST:
+    print(f'  {k:6s}: rt {RT_COST[k]*1e4:.0f}bp + borrow {BORROW[k]:.1%}/yr x {L}/252 = {cost(k, L)*1e4:.1f}bp '
+          f'-> net mean excess {Y["excess"].mean() - cost(k, L):+.4f}, '
+          f'{int((Y["excess"] - cost(k, L) > 0).sum())}/14 positive')
+print(f'  break-even round trip (base borrow): {float(ST.loc[PRIMARY, "breakeven_rt"])*1e4:.0f}bp')
+'''),
+    ("code", r'''
+# ===== Cell 5 — drill verdict (pre-registered) =====
+V = drill_verdict(CELLS)
+for k, v in V.items(): print(f'  {"PASS" if v else "FAIL"}  {k}')
+DRILL_PASS = all(V.values())
+print('DRILL VERDICT:', 'PASS' if DRILL_PASS else 'FAIL')
+json.dump({'drill_pass': DRILL_PASS, 'criteria': V, 'null_ok': NULL_OK,
+           'primary': {'mean_exc': float(Y['excess'].mean()), 'n_pos': int((Y['excess'] > 0).sum()),
+                       'mean_raw': float(Y['spread'].mean())}},
+          open(D_OUT/'drill_verdict.json', 'w'), indent=1)
+'''),
+]
+
+# ======================================================= S3 drill (out-of-sample, ONCE)
+O_CELLS = [
+    ("markdown", r'''
+# S3 drill — OUT-OF-SAMPLE: June 2025 and June 2026 recons (OPENED ONCE)
+
+Applies the frozen primary rule (P2 in `research/screens/S3_DRILL_PREREG.md`) to two events and nothing else.
+No grid and no re-tuning. The notebook refuses to recompute once `OOS_RESULT.json` exists.
+
+- **Data opened:** IJR and IWM adjusted closes only, 2025-01-01 .. 2026-09-30, pulled to `reference/oos/`. The
+  in-sample notebooks never read that folder. The stock universe, SPY and RSP stay sealed for 2025+.
+- **Rule:** entry at the recon close, exit at recon + 20 bars. Spread = compounded IJR − IWM. Baseline = mean of all
+  other non-overlapping 20-bar windows starting in the same year (2026 is a partial year, through 2026-09-30).
+- **Per event:** raw spread, excess, excess net of base cost (5bp round trip + 0.5%/yr borrow × 20/252), percentile.
+- **OOS read (pre-registered):** *supports* = both events have excess net of base cost > 0; *mixed* = one does;
+  *against* = neither. Raw spread > 0 is reported alongside.
+'''),
+    ("code", "# ===== Cell 0 — config (FROZEN — must equal P2) =====\n" + SETUP.strip("\n") + r'''
+
+OOS_START, OOS_END = pd.Timestamp('2025-01-01'), pd.Timestamp('2026-09-30')
+FROZEN = {'entry': 0, 'horizon': 20, 'rt_cost': 5e-4, 'borrow': 0.005}
+RECON_OOS = {2025: '2025-06-27', 2026: '2026-06-26'}
+OOS_REF = REF_DIR/'oos'
+O_OUT = OUT_DIR/'s3_drill_oos'; O_OUT.mkdir(parents=True, exist_ok=True)
+MARKER = O_OUT/'OOS_RESULT.json'
+'''),
+    ("code", r'''
+# ===== Cell 1 — guards: opened once, in-sample null check passed =====
+if MARKER.exists():
+    print(open(MARKER).read())
+    raise RuntimeError('OOS already opened once — result above. Do not recompute.')
+nc = json.load(open(OUT_DIR/'s3_drill'/'null_check.json'))
+assert nc['null_ok'], 'in-sample null check did not pass — OOS stays sealed'
+dv = json.load(open(OUT_DIR/'s3_drill'/'drill_verdict.json'))
+print('in-sample drill verdict:', 'PASS' if dv['drill_pass'] else 'FAIL', dv['criteria'])
+''' + RECON_RULE + r'''
+for y, d in RECON_OOS.items():
+    assert pd.Timestamp(d) == rule_recon(y), (y, d, rule_recon(y))
+'''),
+    ("code", r'''
+# ===== Cell 2 — pull IJR/IWM 2025-01-01 .. 2026-09-30 into reference/oos/ =====
+def pull_oos(tk):
+    path = OOS_REF/f'{tk}_{OOS_START:%Y%m%d}_{OOS_END:%Y%m%d}.csv'
+    if path.exists():
+        print(f'{tk}: present at {path}'); return path
+    token = os.environ.get('TIINGO_API_KEY')
+    if not token:
+        from google.colab import userdata; token = userdata.get('TIINGO_API_KEY')
+    url = (f'https://api.tiingo.com/tiingo/daily/{tk}/prices?startDate={OOS_START:%Y-%m-%d}'
+           f'&endDate={OOS_END:%Y-%m-%d}&token={token}')
+    js = pd.DataFrame(json.load(urllib.request.urlopen(url, timeout=60)))
+    df = pd.DataFrame({'Date': pd.to_datetime(js['date']).dt.strftime('%Y-%m-%d'), 'Close': js['adjClose']})
+    OOS_REF.mkdir(parents=True, exist_ok=True); df.to_csv(path, index=False)
+    print(f'{tk}: pulled {len(df)} rows -> {path}'); return path
+
+OPX = {}
+for tk in ['IJR', 'IWM']:
+    d = pd.read_csv(pull_oos(tk)); d['Date'] = pd.to_datetime(d['Date'])
+    OPX[tk] = d.drop_duplicates('Date').set_index('Date')['Close'].sort_index()
+'''),
+    ("code", r'''
+# ===== Cell 3 — the one OOS computation =====
+assert not MARKER.exists()
+px = pd.concat(OPX, axis=1).dropna(); px = px[(px.index >= OOS_START) & (px.index <= OOS_END)]
+D = px.index; A, B = px['IJR'].to_numpy(float), px['IWM'].to_numpy(float); YEAR = D.year.to_numpy()
+e, H = FROZEN['entry'], FROZEN['horizon']; L = H - e
+c = FROZEN['rt_cost'] + FROZEN['borrow'] * L / 252
+sp = A[L:] / A[:-L] - B[L:] / B[:-L]; yr = YEAR[:len(sp)]
+rows = []
+for y, d in RECON_OOS.items():
+    i0 = D.get_loc(pd.Timestamp(d)); s, t = i0 + e, i0 + H
+    assert t < len(D), f'{y}: exit bar beyond {OOS_END.date()}'
+    idx = np.where(yr == y)[0]; idx = idx[(idx + L < s) | (idx > t)]
+    ev, base = sp[s], sp[idx].mean()
+    rows.append({'year': y, 'recon': d, 'exit': str(D[t].date()), 'spread': ev, 'base': base, 'excess': ev - base,
+                 'excess_net_base': ev - base - c, 'pct': 100 * (sp[idx] < ev).mean(), 'n_base': len(idx),
+                 'raw_pos': bool(ev > 0), 'net_excess_pos': bool(ev - base - c > 0)})
+OOS = pd.DataFrame(rows).set_index('year')
+k = int(OOS['net_excess_pos'].sum())
+READ = {2: 'supports', 1: 'mixed', 0: 'against'}[k]
+print(OOS.to_string()); print(f'\nOOS read (pre-registered): {READ}  ({k}/2 events with excess net of base cost > 0)')
+OOS.to_csv(O_OUT/'oos_events.csv')
+today = pd.Timestamp.now(tz='UTC')
+json.dump({'opened_utc': today.isoformat(), 'frozen': FROZEN, 'read': READ,
+           'events': json.loads(OOS.reset_index().to_json(orient='records'))}, open(MARKER, 'w'), indent=1)
+print('\nPaste into P3 of S3_DRILL_PREREG.md:')
+for y, r in OOS.iterrows():
+    print(f'| June {y} recon (OOS, frozen rule) | {today.date()} | {r.spread:+.2%} | '
+          f'{"yes" if r.raw_pos else "no"} (raw > 0) | excess {r.excess:+.2%}, net {r.excess_net_base:+.2%}, '
+          f'pct {r.pct:.0f}; OOS read: {READ} | |')
+'''),
+]
+
+for name, cells in [("survivorship_check.ipynb", A_CELLS), ("screen_pack1.ipynb", B_CELLS),
+                    ("s3_drill.ipynb", D_CELLS), ("s3_drill_oos.ipynb", O_CELLS)]:
+    (HERE / name).write_text(json.dumps(nb(cells), indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
     print("wrote", HERE / name)
