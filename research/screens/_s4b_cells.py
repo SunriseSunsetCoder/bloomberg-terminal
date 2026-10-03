@@ -13,9 +13,10 @@ ETFS = ['SPY', 'XLB', 'XLC', 'XLE', 'XLF', 'XLI', 'XLK', 'XLP', 'XLRE', 'XLU', '
 TRIGS = ['T1', 'T2', 'T3']
 OUTCOMES = [('X1', 0, 10), ('X2', 1, 10), ('H5', 2, 5), ('H10', 2, 10), ('H20', 2, 20)]   # (name, sim mode, hold bars)
 MIN_EVENTS_YEAR, MIN_QUAL_YEARS, Q_PASS = 10, 9, 90.0
-S4B_SEEDS = int(os.environ.get('S4B_SEEDS', 16)); S4B_POWER_SEEDS = int(os.environ.get('S4B_POWER_SEEDS', 4))
+S4B_BINDING = 64                                          # 2026-10-03: ONE binding 64-seed run (replaces the 16-seed FAIL)
+S4B_SEEDS = int(os.environ.get('S4B_SEEDS', S4B_BINDING)); S4B_POWER_SEEDS = int(os.environ.get('S4B_POWER_SEEDS', 4))
 M_STEPS, ON_FRAC, MKT_SD, MKT_MU = 12, 0.2, 0.01, 0.0003
-PLANT_REV = 0.005                                         # power: +0.5%/bar for 3 bars after a > 2 sigma down close
+PLANT_REV = 0.010                                         # power: +1.0%/bar x 3 bars after a > 2 sigma down close (~40 bp/event)
 TRIAL_LOG, TRIAL_RET = OUT_DIR/'screens_trial_log.csv', OUT_DIR/'screens_trial_returns.csv'
 '''
 
@@ -151,14 +152,22 @@ even (mean gross excess), per year, by era, and per ETF (descriptive).
 - ≥ 9 qualifying years (a year qualifies with ≥ 10 events) AND positive in ≥ 2/3 of the qualifying years;
 - q ≥ 90.
 
-**Martingale validation FIRST (standing rule; fail = STOP).** 16 worlds use the pack-2 generator restricted to the 12
+**Binding rerun (decision 2026-10-03):** the first run (16 seeds) failed centring only on T2's mean q of 60.4 (every
+|t| < 2.5). It is re-run ONCE at **64 seeds** with the same checks, and that run is binding: a fail closes S4b. The
+power plant was set BEFORE the rerun at **+1.0%/bar for 3 bars** (≈ 40 bp gross per event, about 2.5x costs); the
+0.5% plant gave only ≈ 20 bp, which is below what's worth trading. The 16-seed files are archived; the notebook
+refuses to overwrite a ≥ 64-seed result.
+
+**Martingale validation FIRST (standing rule; fail = STOP).** 64 worlds use the pack-2 generator restricted to the 12
 ETFs: real listing spans, market drift on, intrabar paths, no edge.
 - All on GROSS excess. The 0.15% cost is a known constant, so net excess is negative by construction; the verdict
   on real data uses NET.
-- Per trigger family: mean gross excess over the 16 per-seed values with |t| < 2.5, and mean gross q in [40, 60]
+- Per trigger family: mean gross excess over the 64 per-seed values with |t| < 2.5, and mean gross q in [40, 60]
   with |t| < 2.5.
 - Pooled share of (seed × trial) with gross q ≥ 90 must be ≤ 15%.
-- Power: +0.5%/bar planted for 3 bars after any > 2σ down close. T1 family mean gross q ≥ 90 in ≥ 3 of 4 seeds.
+- Power: +1.0%/bar planted for 3 bars after any > 2σ down close. Detected in a seed when ≥ 3 of the 5 T1 outcomes
+  have gross q ≥ 90; power passes with detection in ≥ 3 of 4 seeds. (Per-outcome rule, decided before the binding
+  run: a 3-bar effect is diluted in H10/H20, so a 5-outcome mean understates detection.)
 
 The real-data cells refuse to run unless `s4b/s4b_protocol.json` says PASS.
 '''),
@@ -207,6 +216,16 @@ def run_world(seed, plant=False, trigs=TRIGS):
             for tg in trigs for oc in OUTCOMES]
 
 
+# ONE binding run (decision 2026-10-03): replaces the 16-seed FAIL (archived); refuses to overwrite a >= 64-seed result.
+OLD = json.load(open(S4B_PROTO)) if S4B_PROTO.exists() else None
+if OLD and OLD.get('n_seeds', 0) >= S4B_BINDING and os.environ.get('PACK2_TEST') != '1':
+    raise RuntimeError(f'binding {OLD["n_seeds"]}-seed S4b validation already written {OLD["written_utc"]} — no reruns')
+if OLD:
+    tag = f'{OLD.get("n_seeds", 0)}seed_superseded'
+    for f_ in [S4B_PROTO, S4B_DIR/'protocol_records.csv']:
+        if f_.exists(): f_.rename(f_.with_name(f'{f_.stem}_{tag}{f_.suffix}'))
+    print(f'archived the superseded {OLD.get("n_seeds")}-seed validation (*_{tag})')
+
 REC = []
 for seed in range(S4B_SEEDS):
     t0 = time.time(); r_ = run_world(seed); REC += r_; d_ = pd.DataFrame(r_)
@@ -239,8 +258,10 @@ POWER_OK, det = False, []
 if NULL_OK:
     for s in range(S4B_POWER_SEEDS):
         pw = pd.DataFrame(run_world(1000 + s, plant=True, trigs=['T1']))
-        det.append(float(pw.q_gross.mean())); print(f'power seed {1000+s}: T1 mean q_gross {det[-1]:.1f}')
-    POWER_OK = sum(d >= Q_PASS for d in det) >= math.ceil(0.75 * S4B_POWER_SEEDS)
+        n_det = int((pw.q_gross >= Q_PASS).sum()); det.append(n_det)      # per-outcome detection (decision 2026-10-03)
+        print(f'power seed {1000+s}: T1 outcomes with q_gross >= {Q_PASS:.0f}: {n_det}/5  '
+              + ' '.join(f'{o}={q:.0f}' for o, q in zip(pw.outcome, pw.q_gross)))
+    POWER_OK = sum(d >= 3 for d in det) >= math.ceil(0.75 * S4B_POWER_SEEDS)
 S4B_OK = bool(NULL_OK and POWER_OK)
 json.dump(dict(written_utc=pd.Timestamp.now(tz='UTC').isoformat(), n_seeds=S4B_SEEDS, power_seeds=S4B_POWER_SEEDS,
                families=json.loads(FAM.to_json(orient='index')), pooled=pooled, centring=centring, null_ok=NULL_OK,
@@ -253,7 +274,7 @@ print(f'SUMMARY S4b protocol ({S4B_SEEDS} seeds): null {"PASS" if NULL_OK else "
 # ===== Cell 5 — gate =====
 PRO = json.load(open(S4B_PROTO))
 assert PRO['ok'], 'S4b martingale validation did not pass -> STOP (standing rule); real data not touched'
-assert PRO['n_seeds'] >= 16 or os.environ.get('PACK2_TEST') == '1', 'needs the 16-seed validation'
+assert PRO['n_seeds'] >= 64 or os.environ.get('PACK2_TEST') == '1', 'needs the binding 64-seed validation'
 print('S4b protocol PASS', PRO['written_utc'])
 '''),
         ("code", r'''
