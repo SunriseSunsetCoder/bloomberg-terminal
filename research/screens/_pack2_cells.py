@@ -355,7 +355,9 @@ holding-time × drift, and matching the duration removes it.
 **Checks (decisions 2026-10-03):**
 - SELECTION null, at the verdict threshold: pooled share of (seed × config × universe) with pct >= 90 must be
   <= 15% (calibrated ≈ 10%); per family (S4_T1, S4_T2, S4_T3, S5): mean pct over the 16 per-seed values in [40, 60],
-  |t| < 2.5, family pass rate <= 15%.
+  |t| < 2.5, and the family pass rate NOT significantly above the nominal 10% (one-sided binomial p >= 0.05, n =
+  Kish effective size for seed-clustered records; decision 2026-10-03, replaces a fixed 15% ceiling that false-failed
+  ~54% of calibrated nulls). Per family this false-fails ~5%; across the four families ~18%.
 - Fixed horizons (S4: 60; S5: 20, 60): per (screen, h) mean excess vs EW over 16 seeds |t| < 2.5 and CI-lo > 0 rate
   <= 15%. A failing horizon is DROPPED (recorded), not used on real data.
 - S6 (per universe): mean monthly GROSS excess (costs are negative by construction) over 16 seeds |t| < 2.5 and CI-lo > 0 rate <= 15%.
@@ -526,16 +528,32 @@ def tstat(v):
     v = np.asarray(v, float); v = v[np.isfinite(v)]
     return float(stats.ttest_1samp(v, 50.0).statistic) if len(v) > 2 and v.std() > 0 else np.nan
 
+def clustered_binom_p(passes, clusters, p0):
+    """One-sided binomial test that the pass rate exceeds p0, with n replaced by the Kish effective size
+    n / (1 + (m-1) rho): configs within a seed share trades, so records are clustered by seed (rho = ANOVA
+    intraclass correlation of the pass indicators). Plain binomial on all records false-fails ~54% of calibrated
+    nulls at rho 0.8; this holds ~5% per family (validated by simulation, 2026-10-03)."""
+    x = np.asarray(passes, float); c = pd.Series(clusters).to_numpy(); n = len(x); p = x.mean()
+    if n == 0 or p <= p0: return 1.0, np.nan, float(n)
+    g = pd.Series(x).groupby(c); k_, sz = g.mean().to_numpy(), g.size().to_numpy(); s_ = len(sz); m = n / s_
+    msb = (sz * (k_ - p) ** 2).sum() / max(s_ - 1, 1)
+    msw = sum(((x[c == cl] - k_[i]) ** 2).sum() for i, cl in enumerate(g.mean().index)) / max(n - s_, 1)
+    rho = max(0.0, (msb - msw) / (msb + (m - 1) * msw)) if msb + (m - 1) * msw > 0 else 0.0
+    neff = n / (1 + (m - 1) * rho)
+    return float(stats.binom.sf(math.ceil(p * neff) - 1, int(round(neff)), p0)), rho, neff
+
+P_NOM = 1 - PCT_PASS / 100                                  # nominal pass rate at the verdict threshold (10%)
 ok_rec = REC[REC.pct.notna()]
 pooled = float((ok_rec.pct >= PCT_PASS).mean())
 fam_rows = {}
 for f, g in ok_rec.groupby('family'):
     per_seed = g.groupby('seed').pct.mean()
+    pb, rho_, neff_ = clustered_binom_p(g.pct >= PCT_PASS, g.seed, P_NOM)
     fam_rows[f] = dict(mean_pct=per_seed.mean(), t=tstat(per_seed), pass_rate=float((g.pct >= PCT_PASS).mean()),
-                       n_seeds=len(per_seed))
+                       binom_p=pb, icc=rho_, n_eff=neff_, n_seeds=len(per_seed))
 FAM = pd.DataFrame(fam_rows).T
 fam_ok = bool(len(FAM) == 4 and FAM.mean_pct.between(40, 60).all() and (FAM.t.abs() < 2.5).all()
-              and (FAM.pass_rate <= 0.15).all())
+              and (FAM.binom_p >= 0.05).all())
 SEL_OK = bool(pooled <= 0.15 and fam_ok)
 print(f'SELECTION null: pooled pass rate (pct >= {PCT_PASS:.0f}) {pooled:.1%} (<= 15%)')
 print(FAM.round(3).to_string()); print('family checks:', 'PASS' if fam_ok else 'FAIL')
