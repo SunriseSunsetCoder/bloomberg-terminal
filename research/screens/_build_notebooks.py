@@ -841,7 +841,12 @@ for y, r in OOS.iterrows():
 '''),
 ]
 
+from _pack2_cells import build as _pack2   # screen pack 2 cells live in their own module
+
+P2_PROTO_CELLS, P2_CELLS = _pack2(SETUP, HELPERS)
+
 for name, cells in [("survivorship_check.ipynb", A_CELLS), ("screen_pack1.ipynb", B_CELLS),
-                    ("s3_drill.ipynb", D_CELLS), ("s3_drill_oos.ipynb", O_CELLS)]:
+                    ("s3_drill.ipynb", D_CELLS), ("s3_drill_oos.ipynb", O_CELLS),
+                    ("screen_pack2_protocol.ipynb", P2_PROTO_CELLS), ("screen_pack2.ipynb", P2_CELLS)]:
     (HERE / name).write_text(json.dumps(nb(cells), indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
     print("wrote", HERE / name)
