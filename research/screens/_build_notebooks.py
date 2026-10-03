@@ -845,8 +845,14 @@ from _pack2_cells import build as _pack2   # screen pack 2 cells live in their o
 
 P2_PROTO_CELLS, P2_CELLS = _pack2(SETUP, HELPERS)
 
+from _pack2_cells import PARTS as _P2_PARTS
+from _s4b_cells import build as _s4b                  # S4b reuses the pack-2 config + core
+
+S4B_CELLS = _s4b(_P2_PARTS)
+
 for name, cells in [("survivorship_check.ipynb", A_CELLS), ("screen_pack1.ipynb", B_CELLS),
                     ("s3_drill.ipynb", D_CELLS), ("s3_drill_oos.ipynb", O_CELLS),
-                    ("screen_pack2_protocol.ipynb", P2_PROTO_CELLS), ("screen_pack2.ipynb", P2_CELLS)]:
+                    ("screen_pack2_protocol.ipynb", P2_PROTO_CELLS), ("screen_pack2.ipynb", P2_CELLS),
+                    ("s4b_event_study.ipynb", S4B_CELLS)]:
     (HERE / name).write_text(json.dumps(nb(cells), indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
     print("wrote", HERE / name)

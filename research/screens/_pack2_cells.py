@@ -1,6 +1,9 @@
 # Cell sources for screen pack 2 (imported by _build_notebooks.py). Edit HERE, then rebuild.
 
 
+PARTS = {}
+
+
 def build(SETUP, HELPERS):
     S = SETUP.strip("\n")
     H = HELPERS.strip("\n")
@@ -829,4 +832,5 @@ for s_, v_ in RUN.items():
     if not v_: print(f'  {s_}: STOPPED by the protocol — no trials logged for it')
 '''),
     ]
+    PARTS.update(CONFIG=CONFIG, CORE=CORE)              # reused by the S4b event study
     return PROTO, REAL
