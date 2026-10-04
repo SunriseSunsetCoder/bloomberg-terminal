@@ -123,10 +123,32 @@ is kept as `replication_universe_v1_superseded.csv`. It was never approved or fr
 - **Gating:** each universe is gated on its own validation. A fail means that universe is not evaluated.
 - **Trials:** 4 (2 universes × X1/X2), appended to the screens trial log.
 
+## R7. Amendment — asymmetric reading for ETF60 (declared 2026-10-04T02:14:55Z, BEFORE any real-data result)
+**Recorded validation** (`drill_protocol.json`, written 2026-10-04T02:02:01Z, 16 seeds, universe sha `c19109be…f9c7`):
+
+| universe | exit | mean gross excess | t | mean q | t_q | false pass | power (≥ 3/4 needed) | result |
+|---|---|---|---|---|---|---|---|---|
+| ETF60 | X1 | −0.7 bp | −0.17 | 50.7 | 0.08 | 0% | 1/4 seeds | null PASS, power FAIL |
+| ETF60 | X2 | −2.1 bp | −0.50 | 49.5 | −0.07 | | | |
+| STK300 | X1 | +2.7 bp | 1.22 | 58.5 | 1.34 | 6.3% | not run | **centring FAIL** |
+| STK300 | X2 | +3.9 bp | 1.53 | 61.0 | 1.80 | | | (mean q > 60) |
+
+Real-data Part B has not been evaluated for either universe: both were gated off by the original rule.
+
+**Amendment:**
+- **ETF60 (PRIMARY):** the null is valid (centred, 0% false pass). Power is the only failure: a sensitivity limit at the
+  q ≥ 95 threshold. The real-data replication runs with an ASYMMETRIC reading.
+  - **R2 PASS** = valid replication evidence. This is the R4 trigger: the 2025-26 lockbox on the original 12 may be
+    opened ONCE.
+  - **R2 FAIL** = **INCONCLUSIVE (underpowered)**, NOT a refutation. The lockbox stays sealed.
+  - Nothing else changes: the rule (R1), the pass (R2) and the universe (frozen v3) stay as they are.
+- **STK300 (SECONDARY):** stays **STOPPED** (centring failed). It is not evaluated on real data.
+- The recorded validation is reused as is, never re-run.
+
 ## R6. Results log (append only)
 | step | date | result | commit |
 |---|---|---|---|
 | universe rule frozen | 2026-10-03 | v3 list approved: 60 ETFs, `replication_universe.csv` sha256 `c19109be7f9d2f7e5a250cbec1e07670eb36f02a28f3f29eecb9eae7c733f9c7` | this commit |
-| martingale validation (replication universe) | | | |
+| martingale validation (replication universe) | 2026-10-04 | ETF60: null PASS (q 50.7 / 49.5, 0% false pass), power FAIL (1/4). STK300: centring FAIL (X2 mean q 61.0) -> STOPPED. See R7. | R7 commit |
 | replication (IS 2011-2023) | | | |
 | lockbox 2025-26, original 12 (only if replication passes) | | | |

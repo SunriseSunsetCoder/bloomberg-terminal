@@ -17,6 +17,7 @@ DRILL_EXITS = [('X1', 0, 10), ('X2', 1, 10)]               # frozen T3 rule, R1
 Q_DRILL, FALSE_PASS_MAX = 95.0, 0.10
 DRILL_SEEDS = int(os.environ.get('DRILL_SEEDS', 16)); DRILL_POWER_SEEDS = int(os.environ.get('DRILL_POWER_SEEDS', 4))
 DRILL_PLANT = 0.010
+ETF60_ASYMMETRIC = True    # R7 (2026-10-04T02:14:55Z): ETF60 runs on a passed null; R2 fail = INCONCLUSIVE (underpowered)
 UNIVERSE_APPROVED = True                                  # v3 list approved 2026-10-03 (R5 freeze)
 UNIVERSE_SHA = os.environ.get('DRILL_UNIVERSE_SHA', 'c19109be7f9d2f7e5a250cbec1e07670eb36f02a28f3f29eecb9eae7c733f9c7')   # FROZEN (R5 freeze, rule v3)
 LEV_RE = re.compile(r'(\b-?[1-4](\.\d+)?x\b|ultra|\bbear\b|inverse|leveraged|\bvix\b|(?<!low )(?<!min )volatility'
@@ -282,8 +283,17 @@ def run_universe(univ, seed, plant=False):
     return {ex[0]: drill_trial(ctx, ex, el, seed) for ex in DRILL_EXITS}
 
 
-VAL = {}
-for univ in ['ETF60', 'STK300']:
+OLDV = json.load(open(DRILL_PROTO)) if DRILL_PROTO.exists() else None
+REUSE = bool(OLDV and OLDV.get('universe_sha') == UNIV_SHA_NOW and OLDV.get('n_seeds', 0) >= 16
+             and os.environ.get('PACK2_TEST') != '1')
+VAL = {u: OLDV[u] for u in ['ETF60', 'STK300']} if REUSE else {}
+if REUSE:
+    print(f'validation already recorded {OLDV["written_utc"]} — REUSED, not re-run (R7)')
+    for u, v in VAL.items():
+        print(f'  [{u}] null {"PASS" if v["null_ok"] else "FAIL"} | power {"PASS" if v["power_ok"] else "FAIL/not run"} | '
+              f'false pass {v["false_pass"]:.1%} | ' + ' '.join(f'{ex}: q {f["mean_q"]:.1f} (t {f["t_q"]:+.2f})'
+                                                             for ex, f in v['families'].items()))
+for univ in ([] if REUSE else ['ETF60', 'STK300']):
     rec = []; t0 = time.time()
     for s in range(DRILL_SEEDS):
         res = run_universe(univ, s)
@@ -314,8 +324,9 @@ for univ in ['ETF60', 'STK300']:
                      null_ok=null_ok, power_det=det, power_ok=power_ok, ok=bool(null_ok and power_ok))
     print(f'  [{univ}] null {"PASS" if null_ok else "FAIL"} | power {"PASS" if power_ok else ("FAIL" if null_ok else "not run")}'
           f' -> real data {"ALLOWED" if VAL[univ]["ok"] else "STOPPED"}')
-json.dump(dict(written_utc=pd.Timestamp.now(tz='UTC').isoformat(), n_seeds=DRILL_SEEDS, universe_sha=UNIV_SHA_NOW, **VAL),
-          open(DRILL_PROTO, 'w'), indent=1, default=float)
+if not REUSE:
+    json.dump(dict(written_utc=pd.Timestamp.now(tz='UTC').isoformat(), n_seeds=DRILL_SEEDS, universe_sha=UNIV_SHA_NOW, **VAL),
+              open(DRILL_PROTO, 'w'), indent=1, default=float)
 print('\nSUMMARY drill validation:', {u: ('PASS' if v['ok'] else 'FAIL') for u, v in VAL.items()})
 '''),
         ("markdown", "## Part B — frozen rule on real data (gated per universe)"),
@@ -325,10 +336,14 @@ PRO = json.load(open(DRILL_PROTO))
 assert PRO['universe_sha'] == UNIVERSE_SHA == sha(UNIV_FILE), 'universe changed since validation'
 assert PRO['n_seeds'] >= 16 or os.environ.get('PACK2_TEST') == '1'
 pct = lambda v: f'{v:+.2%}' if v is not None and np.isfinite(v) else 'nan'
+RUN_UNIV = {'ETF60': bool(PRO['ETF60']['null_ok'] if ETF60_ASYMMETRIC else PRO['ETF60']['ok']),
+            'STK300': bool(PRO['STK300']['ok'])}
 REAL = {}
 for univ in ['ETF60', 'STK300']:
-    if not PRO[univ]['ok']:
+    if not RUN_UNIV[univ]:
         print(f'[{univ}] STOPPED by its validation — not evaluated'); continue
+    if univ == 'ETF60' and not PRO['ETF60']['power_ok']:
+        print('[ETF60] null passed, power failed -> ASYMMETRIC reading (R7): R2 PASS = evidence; R2 FAIL = INCONCLUSIVE (underpowered)')
     if univ == 'ETF60':
         ctx = etf_ctx(ETF['O'], ETF['H'], ETF['L'], ETF['C'], ETF['V']); el, labels = None, np.array(U.ticker)
     else:
@@ -365,10 +380,13 @@ for univ in ['ETF60', 'STK300']:
 # ===== Cell 7 — pre-registered reading (R5c) + trial log =====
 prim = r2_pass(REAL['ETF60'][0]) if 'ETF60' in REAL else None
 sec = r2_pass(REAL['STK300'][0]) if 'STK300' in REAL else None
+underpowered = 'ETF60' in REAL and not PRO['ETF60']['power_ok'] and ETF60_ASYMMETRIC
 if prim is None: reading = 'PRIMARY not evaluated (validation failed) -> no replication evidence'
-elif prim: reading = 'PRIMARY PASS -> primary evidence: the T3 rule replicates (lockbox may be opened ONCE, R4)'
+elif prim: reading = 'PRIMARY R2 PASS -> valid replication evidence: the T3 rule replicates (lockbox may be opened ONCE, R4)'
+elif underpowered: reading = 'PRIMARY R2 FAIL -> INCONCLUSIVE (underpowered; R7) — not a refutation; lockbox stays sealed'
 elif sec: reading = 'PRIMARY FAIL, SECONDARY PASS -> likely survivorship: does not replicate'
 else: reading = 'PRIMARY FAIL' + (', SECONDARY FAIL' if sec is not None else '') + ' -> does not replicate'
+if 'STK300' not in REAL: reading += ' | SECONDARY (stocks) STOPPED by its validation'
 print('READING (R5c):', reading)
 now = pd.Timestamp.now(tz='UTC').isoformat(); rows, rets = [], []
 for univ, (res, _) in REAL.items():
@@ -378,7 +396,8 @@ for univ, (res, _) in REAL.items():
                          n=o['n'], n_months=len(m), WR=float((o['exc'] > 0).mean()) if o['n'] else np.nan, avg_net=o.get('mean'),
                          sd=m.std(), skew=m.skew(), kurt=m.kurt(), sr_monthly=m.mean() / m.std() if m.std() > 0 else np.nan,
                          pct_null=o.get('q'), verdict=r2_pass(res), backfilled=False,
-                         note=('survivorship-biased (stocks)' if univ == 'STK300' else 'primary replication') + '; frozen T3 rule',
+                         note=('survivorship-biased (stocks)' if univ == 'STK300' else
+                               'primary replication' + ('; asymmetric reading R7 (underpowered)' if underpowered else '')) + '; frozen T3 rule',
                          logged_at=now))
         rets += [dict(config_id=cid, month=mm, ret=v) for mm, v in m.items()]
 if rows:
