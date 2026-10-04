@@ -126,7 +126,7 @@ is kept as `replication_universe_v1_superseded.csv`. It was never approved or fr
 ## R6. Results log (append only)
 | step | date | result | commit |
 |---|---|---|---|
-| universe rule frozen | | | |
+| universe rule frozen | 2026-10-03 | v3 list approved: 60 ETFs, `replication_universe.csv` sha256 `c19109be7f9d2f7e5a250cbec1e07670eb36f02a28f3f29eecb9eae7c733f9c7` | this commit |
 | martingale validation (replication universe) | | | |
 | replication (IS 2011-2023) | | | |
 | lockbox 2025-26, original 12 (only if replication passes) | | | |
