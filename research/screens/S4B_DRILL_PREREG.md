@@ -73,6 +73,20 @@ The per-year and qualifying-year leg of the screen is NOT part of the drill pass
 - The resulting list is printed, saved as `replication_universe.csv`, and frozen by sha256 in this file and in the
   notebook BEFORE any outcome is computed.
 
+#### R5a amendment — rule v2 (2026-10-03, at universe review, BEFORE the freeze; no outcomes computed)
+The first list (v1) had 4 classification errors: BNY (a single stock), AMJ (an ETN), MINT (short-maturity bond) and
+CWB (convertible bond). Tiingo's `assetType` is unreliable: LLL, TSS and VR are single stocks listed only as ETF rows.
+Added rules, applied in rank order while filling:
+- **Ticker reuse:** exclude a ticker with more than one Tiingo `supported_tickers` row (mixed histories).
+- **Fund identity:** the current Tiingo name must carry a fund marker (ETF / Fund / Trust / Index / Portfolio / Shares
+  or a fund-issuer brand). The current entity's Tiingo start date must be ≤ 2013-01-02, so the 2013 history used for
+  ranking belongs to the fund named today.
+- **ETNs:** exclude ETN / ETNs / exchange-traded notes / ETN brands (iPath, ETRACS, ELEMENTS, VelocityShares).
+- **Non-equity, added:** convertible, maturity, duration, ultra-short, short-term.
+
+The list is refilled to 60 from the next-ranked candidates under the same rules, using cached 2013 data. The v1 list
+is kept as `replication_universe_v1_superseded.csv`. It was never approved or frozen.
+
 ### R5b. SECONDARY — the existing stock universe (no new data)
 - **Universe:** top 300 stocks by trailing 60-bar dollar volume (t-60..t-1), point-in-time. This is pack-2's U2: same
   asset file and overrides.

@@ -9,6 +9,7 @@ def build(P2, S4B):
 DRILL_DIR = OUT_DIR/'s4b_drill'; DCACHE = DRILL_DIR/'cache'; DCACHE.mkdir(parents=True, exist_ok=True)
 REP_DIR = REF_DIR/'replication'; REP_DIR.mkdir(parents=True, exist_ok=True)
 UNIV_FILE, DRILL_PROTO = DRILL_DIR/'replication_universe.csv', DRILL_DIR/'drill_protocol.json'
+UNIV_RULE_FILE, UNIV_RULE_VERSION = DRILL_DIR/'replication_universe_rule.json', 'v2'   # v2: review fixes 2026-10-03
 U1_ETFS = ['SPY', 'XLB', 'XLC', 'XLE', 'XLF', 'XLI', 'XLK', 'XLP', 'XLRE', 'XLU', 'XLV', 'XLY']
 N_ETF, MAX_COUNTRY, CORR_MAX, RANK_YEAR, MIN_BARS_2013 = 60, 20, 0.95, 2013, 200
 US_EXCH = {'NYSE', 'NYSE ARCA', 'NYSE MKT', 'AMEX', 'NASDAQ', 'BATS'}
@@ -24,7 +25,12 @@ NONEQ_RE = re.compile(r'(\bbond|treasury|\btreas\b|\bmuni|municipal|\btips\b|inf
                       r'senior loan|\bloan\b|preferred|mortgage|\bmbs\b|aggregate|high yield|corporate|\bcredit\b|'
                       r'fixed income|money market|t-bill|gold trust|gold shares|silver trust|physical|bullion|'
                       r'commodit|oil fund|gas fund|invesco db|powershares db|currencyshares|dollar index|futures|'
-                      r'covered call|buy-?write|allocation|target date|managed futures|\betn\b)', re.I)
+                      r'covered call|buy-?write|allocation|target date|managed futures|convertible|maturity|'
+                      r'duration|ultra[- ]?short|short[- ]term)', re.I)
+ETN_RE = re.compile(r'(\betns?\b|exchange[- ]traded notes?|\bnotes? due\b|ipath|etracs|\belements\b|velocityshares)', re.I)
+FUND_RE = re.compile(r'(\betf\b|\bfund\b|\btrust\b|\bindex\b|portfolio|\bshares\b|ishares|spdr|vanguard|powershares|'
+                     r'invesco|vaneck|market vectors|wisdomtree|first trust|global x|schwab|guggenheim|\balps\b|'
+                     r'xtrackers|x-trackers|proshares|direxion|pimco|select sector)', re.I)
 COUNTRY_RE = re.compile(r'(msci (?!usa)|emerging|europe|euro\b|eurozone|asia|pacific|eafe|international|\bintl\b|'
                         r'world ex|ex-us|ex us|ex-u\.s|global|china|japan|india|brazil|mexico|canada|germany|'
                         r'united kingdom|\bu\.k\.|australia|korea|taiwan|hong kong|singapore|south africa|russia|'
@@ -128,7 +134,7 @@ and lockbox, R5 the universes and the reading. Nothing here is tuned. Lockbox: e
 original 12 ETFs stays sealed (R4).
 
 **Flow (run in this order; each step stops until the previous one is done):**
-1. **Step 0** builds the PRIMARY universe by rule (R5a) and prints it.
+1. **Step 0** builds the PRIMARY universe by rule (R5a, rule v2) and prints it.
    - You review it and set `UNIVERSE_APPROVED = True`.
    - Paste the printed sha256 back; it's frozen in git (R5 freeze commit) and set as `UNIVERSE_SHA`.
    - Until then, nothing downstream runs.
@@ -158,10 +164,18 @@ print(f'corpus {len(TICKERS)} x {len(CAL)} [{time.time()-t0:.0f}s] | SPY-weak ye
         ("code", r'''
 # ===== Cell 3 — build the 60-ETF universe (cached pulls; rule only, no outcomes) =====
 token = tiingo_token(); assert token, 'TIINGO_API_KEY needed'
+rule_now = json.load(open(UNIV_RULE_FILE)).get('rule_version') if UNIV_RULE_FILE.exists() else ('v1' if UNIV_FILE.exists() else None)
+if UNIV_FILE.exists() and rule_now != UNIV_RULE_VERSION:      # superseded list (never approved/frozen): keep for the record
+    UNIV_FILE.rename(UNIV_FILE.with_name(f'replication_universe_{rule_now}_superseded.csv'))
+    print(f'rule changed {rule_now} -> {UNIV_RULE_VERSION}: rebuilding (superseded list kept)')
 if not UNIV_FILE.exists():
-    raw = urllib.request.urlopen('https://apimedia.tiingo.com/docs/tiingo/daily/supported_tickers.zip', timeout=180).read()
-    zf = zipfile.ZipFile(io.BytesIO(raw)); st = pd.read_csv(zf.open(zf.namelist()[0]))
+    st_f = DCACHE/'supported_tickers.csv'
+    if not st_f.exists():
+        raw = urllib.request.urlopen('https://apimedia.tiingo.com/docs/tiingo/daily/supported_tickers.zip', timeout=180).read()
+        zf = zipfile.ZipFile(io.BytesIO(raw)); pd.read_csv(zf.open(zf.namelist()[0])).to_csv(st_f, index=False)
+    st = pd.read_csv(st_f)
     st['ticker'] = st['ticker'].astype(str).str.upper()
+    n_rows = st.groupby('ticker').size()                      # > 1 row = reused ticker / mixed histories
     sd_, ed_ = pd.to_datetime(st['startDate'], errors='coerce'), pd.to_datetime(st['endDate'], errors='coerce')
     pool = st[(st.assetType == 'ETF') & st.exchange.isin(US_EXCH) & (st.priceCurrency == 'USD')
               & (sd_ <= '2013-12-31') & (ed_ >= '2013-12-31') & ~st.ticker.isin(U1_ETFS)
@@ -188,15 +202,23 @@ if not UNIV_FILE.exists():
     # U1 2013 returns (corpus, adjusted) for the near-duplicate screen
     u1r = pd.DataFrame({e: pd.Series(P['C'][:, TICKERS.index(e)], index=CAL) for e in U1_ETFS if e in TICKERS}).pct_change()
     u1r = u1r[u1r.index.year == RANK_YEAR]
-    names_f = DCACHE/'names.json'; NAMES = json.load(open(names_f)) if names_f.exists() else {}
+    meta_f = DCACHE/'meta.json'; META = json.load(open(meta_f)) if meta_f.exists() else {}
     keep, excl, n_country = [], [], 0
     for tk, row in ranked.iterrows():
         if len(keep) >= N_ETF: break
-        if tk not in NAMES:
-            try: NAMES[tk] = tiingo_get(f'https://api.tiingo.com/tiingo/daily/{tk}?token={token}').get('name', '') or ''
-            except Exception: NAMES[tk] = ''
-            json.dump(NAMES, open(names_f, 'w'))
-        nm = NAMES[tk]
+        if tk not in META:
+            try:
+                m_ = tiingo_get(f'https://api.tiingo.com/tiingo/daily/{tk}?token={token}')
+                META[tk] = dict(name=m_.get('name') or '', startDate=m_.get('startDate'), endDate=m_.get('endDate'))
+            except Exception:
+                META[tk] = dict(name='', startDate=None, endDate=None)
+            json.dump(META, open(meta_f, 'w'))
+        nm = META[tk]['name']; sd_m = pd.to_datetime(META[tk]['startDate'], errors='coerce')
+        if n_rows.get(tk, 0) > 1: excl.append((tk, nm, 'ticker reuse: multiple Tiingo rows')); continue
+        if not FUND_RE.search(nm): excl.append((tk, nm, 'not a fund (current name has no fund marker)')); continue
+        if not (pd.notna(sd_m) and sd_m <= pd.Timestamp('2013-01-02')):
+            excl.append((tk, nm, f'current fund starts {META[tk]["startDate"]} (2013 history not this fund)')); continue
+        if ETN_RE.search(nm): excl.append((tk, nm, 'ETN (debt note)')); continue
         if LEV_RE.search(nm): excl.append((tk, nm, 'leveraged/inverse/vol')); continue
         if NONEQ_RE.search(nm): excl.append((tk, nm, 'non-equity')); continue
         r = B13[B13.ticker == tk].set_index('date')['adjClose'].sort_index().pct_change()
@@ -208,12 +230,13 @@ if not UNIV_FILE.exists():
         keep.append(dict(rank=len(keep) + 1, ticker=tk, name=nm, underlying='non-US' if is_c else 'US',
                          dvol_2013=row.dvol, max_corr_u1=round(float(cm), 3) if np.isfinite(cm) else np.nan))
     U = pd.DataFrame(keep); U.to_csv(UNIV_FILE, index=False)
+    json.dump(dict(rule_version=UNIV_RULE_VERSION, built_utc=pd.Timestamp.now(tz='UTC').isoformat()), open(UNIV_RULE_FILE, 'w'))
     pd.DataFrame(excl, columns=['ticker', 'name', 'reason']).to_csv(DRILL_DIR/'replication_excluded.csv', index=False)
 U = pd.read_csv(UNIV_FILE); EX = pd.read_csv(DRILL_DIR/'replication_excluded.csv')
 pd.set_option('display.max_rows', 300); pd.set_option('display.width', 220)
 print(U.assign(dvol_2013=(U.dvol_2013 / 1e6).round(1)).to_string(index=False))
 print(f'\n{len(U)} ETFs | non-US underlying {int((U.underlying == "non-US").sum())} (cap {MAX_COUNTRY}) | '
-      f'excluded while filling: {EX.reason.str.split(" ").str[0].value_counts().to_dict()}')
+      f'excluded while filling: {EX.reason.str.split(":| \\(").str[0].value_counts().to_dict()}')
 print(EX.to_string(index=False))
 UNIV_SHA_NOW = sha(UNIV_FILE); print(f'\nreplication_universe.csv sha256 = {UNIV_SHA_NOW}')
 assert UNIVERSE_APPROVED, 'Review the list, set UNIVERSE_APPROVED = True, and paste the sha256 back for the freeze commit.'
