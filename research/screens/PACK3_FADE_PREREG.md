@@ -49,5 +49,25 @@ file sizes (F1), prints the IS context, then opens 2025+ once.
 ## F4. Results log (append only)
 | instrument | opened (UTC) | OOS n | net mean (pt) | CI90 | pass? | $ per micro (total) | commit |
 |---|---|---|---|---|---|---|---|
-| MES | | | | | | | |
-| MNQ | | | | | | | |
+| MES | 2026-10-04T03:14 | 353 | −0.914 | [−2.504, +0.739] | **no** | −1,614 | F5 commit |
+| MNQ | 2026-10-04T03:14 | 356 | −0.807 | [−7.935, +6.114] | **no** | −574 | F5 commit |
+
+OOS window: 2025-01-02 .. 2026-07-01, from `pack3/fade_oos_result.json`.
+
+| quarter | MES n | MES mean net (pt) | MES $/micro | MNQ n | MNQ mean net (pt) | MNQ $/micro |
+|---|---|---|---|---|---|---|
+| 2025Q1 | 57 | −3.244 | −924 | 58 | −1.904 | −221 |
+| 2025Q2 | 59 | +3.349 | +988 | 59 | +17.452 | +2,059 |
+| 2025Q3 | 59 | −3.625 | −1,069 | 59 | −7.951 | −938 |
+| 2025Q4 | 59 | +0.862 | +254 | 60 | +2.642 | +317 |
+| 2026Q1 | 59 | +0.616 | +182 | 59 | +5.795 | +684 |
+| 2026Q2 | 59 | −3.333 | −983 | 60 | −18.808 | −2,257 |
+| 2026Q3 | 1 | −12.248 | −61 | 1 | −109.370 | −219 |
+
+Gross mean (context only): MES −0.166 pt, MNQ +0.313 pt. Hit rate: MES 45.0%, MNQ 47.2%.
+
+## F5. Outcome (recorded 2026-10-04)
+- **The fade hypothesis FAILED out of sample on BOTH instruments.** The net mean is negative and the CI90 includes 0
+  for both, so neither meets "net > 0 AND CI90 lower bound > 0". **Screen pack 3 is CLOSED.**
+- **LOCKBOX SPENT:** the MES/MNQ 1-minute data from 2025-01-01 onward (files as in F1) has now been SEEN. No future
+  rule may claim that period as unseen or out-of-sample. See `LOCKBOX_REGISTER.md`.

@@ -98,3 +98,16 @@ per ETF. Excess is measured against a same-length, same-ETF baseline.
 - Break-even round-trip cost: T3 X1 +0.35%, T3 X2 +0.38%.
 - 15 S4b trials logged. **T3 X1/X2 are the best 2 of 15**, and they share the same entries (one effect, two exits).
 - Drill: see `S4B_DRILL_PREREG.md`.
+
+## Pack 3 — market intraday momentum (last half-hour), MES / MNQ 1-min (2026-10-04)
+- **Step 0:** ET clock, close-labelled bars, additive back-adjusted. Only raw OHLCV was used; derived columns were
+  ignored. IS 2021-02-10 .. 2024-12-31.
+- **Validation (16 seeds):** MES PRIMARY was STOPPED by the false-pass ceiling (2/16 = 12.5%). Its centring was fine
+  (pct 47.8, t −0.30): a noisy-threshold false stop, not a biased null. The other three cells passed.
+- **IS results:** PRIMARY (end-of-day momentum) was not worth drilling (MNQ). SECONDARY (first-half-hour momentum)
+  was significantly NEGATIVE (MNQ sign-shuffle pct 3.0, 0/4 years; MES pct 12.7).
+- **Fade follow-up** (pre-registered, `PACK3_FADE_PREREG.md`):
+  - Rule: side = −sign(prior 16:00 -> 10:00), trade 15:30 -> 16:00.
+  - **FAILED OOS** (2025-01-02 .. 2026-07-01): MES net −0.914 pt CI90 [−2.504, +0.739], n=353, −$1,614/micro;
+    MNQ net −0.807 pt CI90 [−7.935, +6.114], n=356, −$574/micro.
+- **Pack 3 CLOSED.** The MES/MNQ 2025+ lockbox is **SPENT** (see `LOCKBOX_REGISTER.md`).
