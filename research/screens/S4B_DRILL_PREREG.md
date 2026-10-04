@@ -53,9 +53,51 @@ The per-year and qualifying-year leg of the screen is NOT part of the drill pass
 - **Lockbox:** 2025-2026 data on the original 12 ETFs (SPY + 11 sector SPDRs) stays SEALED until the replication
   PASSES. It is then opened ONCE, for this frozen rule only. The replication universe's 2025+ data is sealed too.
 
-## R5. Replication universe
-The selection rule is set by the design approval (next commit) and frozen BEFORE any replication price data is pulled.
-It is a rule only: liquidity / listing / asset-class screens, never results.
+## R5. Replication universes (rule frozen 2026-10-03, before any replication data is pulled)
+
+### R5a. PRIMARY — 60 new ETFs (Tiingo adjusted daily)
+- **Pool:** Tiingo `supported_tickers` rows with assetType ETF, a US exchange (NYSE, NYSE ARCA, NYSE MKT, AMEX,
+  NASDAQ, BATS) and USD; first price date ≤ 2013-12-31 (trading by 2014-01-01); last date ≥ 2013-12-31. U1 (SPY +
+  11 sector SPDRs) is excluded.
+- **Ranking:** median daily dollar volume (raw close × raw volume) over calendar 2013, with ≥ 200 bars in 2013. Walk
+  the ranked list and keep a fund unless an exclusion applies.
+- **Exclusions:**
+  - leveraged / inverse / volatility, by name (the pack-2 LEV pattern);
+  - non-equity, by name: bond, treasury, muni, TIPS, floating-rate, loan, preferred, mortgage, aggregate, high-yield,
+    corporate/credit, money market, bullion/commodity pools, currency trusts, dollar index, futures, covered-call /
+    buy-write, allocation / target-date;
+  - **near-duplicates of U1:** 2013 daily-return correlation > 0.95 with any U1 ETF.
+- **Size and cap:** take the first **60** survivors, with **at most 20 country/region funds** (non-US underlying, by
+  name). Funds beyond the cap are skipped.
+- **Survivorship:** the ranking is point-in-time (2013). Funds that close later stay in until their last bar.
+- The resulting list is printed, saved as `replication_universe.csv`, and frozen by sha256 in this file and in the
+  notebook BEFORE any outcome is computed.
+
+### R5b. SECONDARY — the existing stock universe (no new data)
+- **Universe:** top 300 stocks by trailing 60-bar dollar volume (t-60..t-1), point-in-time. This is pack-2's U2: same
+  asset file and overrides.
+- **Rule:** the same frozen T3 rule (R1), measured against the same stock's own baseline. Signals AND baseline days
+  require U2 membership on the signal day.
+- **Labelled "SURVIVORSHIP-BIASED IN FAVOUR OF DIP-BUYING".** Survivors' dips recovered by construction.
+
+### R5c. Pre-registered reading
+| primary (ETFs) | secondary (stocks) | reading |
+|---|---|---|
+| PASS | any | **primary evidence: the T3 rule replicates** |
+| FAIL | PASS | likely survivorship: does not replicate |
+| FAIL | FAIL | does not replicate |
+
+**"Replication passes" (R4 lockbox trigger) = the PRIMARY passes R2.**
+
+### R5d. Validation for BOTH universes (martingale world, before either is evaluated)
+- **Setup:** 16 seeds per universe; real listing spans; market drift; stocks keep their real volume (U2 membership).
+  Per exit (X1, X2), on GROSS excess.
+- **Centring:** mean excess |t| < 2.5, and mean q in [40, 60] with |t| < 2.5.
+- **False pass:** the share of seeds meeting the gross R2 pass (both exits q ≥ 95 and CI90 lower bound > 0, era > 0)
+  must be ≤ 10%.
+- **Power:** +1.0%/bar planted for 3 bars after a > 2σ down close. Both exits must reach q ≥ 95 in ≥ 3 of 4 seeds.
+- **Gating:** each universe is gated on its own validation. A fail means that universe is not evaluated.
+- **Trials:** 4 (2 universes × X1/X2), appended to the screens trial log.
 
 ## R6. Results log (append only)
 | step | date | result | commit |
