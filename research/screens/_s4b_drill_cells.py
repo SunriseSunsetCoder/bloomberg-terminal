@@ -9,7 +9,7 @@ def build(P2, S4B):
 DRILL_DIR = OUT_DIR/'s4b_drill'; DCACHE = DRILL_DIR/'cache'; DCACHE.mkdir(parents=True, exist_ok=True)
 REP_DIR = REF_DIR/'replication'; REP_DIR.mkdir(parents=True, exist_ok=True)
 UNIV_FILE, DRILL_PROTO = DRILL_DIR/'replication_universe.csv', DRILL_DIR/'drill_protocol.json'
-UNIV_RULE_FILE, UNIV_RULE_VERSION = DRILL_DIR/'replication_universe_rule.json', 'v2'   # v2: review fixes 2026-10-03
+UNIV_RULE_FILE, UNIV_RULE_VERSION = DRILL_DIR/'replication_universe_rule.json', 'v3'   # v2/v3: review fixes 2026-10-03
 U1_ETFS = ['SPY', 'XLB', 'XLC', 'XLE', 'XLF', 'XLI', 'XLK', 'XLP', 'XLRE', 'XLU', 'XLV', 'XLY']
 N_ETF, MAX_COUNTRY, CORR_MAX, RANK_YEAR, MIN_BARS_2013 = 60, 20, 0.95, 2013, 200
 US_EXCH = {'NYSE', 'NYSE ARCA', 'NYSE MKT', 'AMEX', 'NASDAQ', 'BATS'}
@@ -37,7 +37,10 @@ COUNTRY_RE = re.compile(r'(msci (?!usa)|emerging|europe|euro\b|eurozone|asia|pac
                         r'latin america|\bbric|frontier|developed markets|foreign|acwi|chile|turkey|indonesia|'
                         r'thailand|malaysia|philippines|vietnam|israel|italy|spain|france|switzerland|sweden|'
                         r'netherlands|belgium|austria|nordic|middle east|africa|peru|colombia|poland|greece|'
-                        r'ireland|argentina|norway|qatar|saudi)', re.I)
+                        r'ireland|argentina|norway|qatar|saudi|'
+                        # v3: country-index names (NKY "Nikkei 225" was labelled US)
+                        r'nikkei|topix|stoxx|\bdax\b|hang seng|kospi|sensex|nifty|bovespa|\bibex\b|\bcac 40\b|\basx\b|'
+                        r'\btsx\b|kokusai|\bworld\b|all[- ]world)', re.I)
 '''
 
     DRILL_CORE = r'''

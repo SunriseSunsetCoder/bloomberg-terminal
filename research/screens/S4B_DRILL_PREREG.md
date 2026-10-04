@@ -87,6 +87,16 @@ Added rules, applied in rank order while filling:
 The list is refilled to 60 from the next-ranked candidates under the same rules, using cached 2013 data. The v1 list
 is kept as `replication_universe_v1_superseded.csv`. It was never approved or frozen.
 
+#### R5a amendment — rule v3 (2026-10-03, at universe review, BEFORE the freeze; no outcomes computed)
+- **The error:** v2 #59 NKY ("Precidian MAXIS Nikkei 225 Index ETF") was labelled US-underlying because the
+  country/region classifier had no index-name markers. Its 2013 correlation with U1 was −0.02 (stale prices).
+- **Fix:** the classifier also matches country-index names: Nikkei, TOPIX, STOXX, DAX, Hang Seng, KOSPI, Sensex,
+  Nifty, Bovespa, IBEX, CAC 40, ASX, TSX, Kokusai, World / All-World.
+- **Effect:** re-checking all 60 v2 names, only NKY changes class. It becomes non-US, the 20-fund cap is already full,
+  so the rule excludes it, and #60 is refilled by rule.
+- **Not changed:** gold-miner and agribusiness industry funds (GDX, GDXJ, MOO) are global-holding industry funds that
+  trade in North American hours. They're not country/region funds and stay as they are.
+
 ### R5b. SECONDARY — the existing stock universe (no new data)
 - **Universe:** top 300 stocks by trailing 60-bar dollar volume (t-60..t-1), point-in-time. This is pack-2's U2: same
   asset file and overrides.
