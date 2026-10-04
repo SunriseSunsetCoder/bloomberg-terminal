@@ -75,3 +75,26 @@ per ETF. Excess is measured against a same-length, same-ETF baseline.
 - Power was not run, because the null failed. The plant size was still the approved +0.5%/bar.
 - On fixtures, the same plant came to only about +20 bp of gross excess per event, and power fell short (q 70-88).
 - **Real data was not touched:** the gate stopped Part B. No S4b trials were logged.
+
+### Binding 64-seed validation (23:42 UTC): PASS -> real data run once
+| family | mean gross excess | t | mean q | t_q | share q ≥ 90 |
+|---|---|---|---|---|---|
+| T1 | +1.1 bp | 0.58 | 52.4 | 0.91 | 7.8% |
+| T2 | +0.6 bp | 0.35 | 51.3 | 0.48 | 8.1% |
+| T3 | +5.2 bp | 1.82 | 55.4 | 1.77 | 14.7% |
+
+- Pooled 10.2%.
+- Power: per-seed count of T1 outcomes at q ≥ 90 was 3, 4, 5, 0. That's 3 of 4 seeds detected -> PASS.
+- **T3 was the family most tilted on noise** (+5 bp gross, t 1.8), within the limits but closest to them.
+
+### Real data (2011-2023, 12 ETFs, net of 0.15%)
+| rule | n | avg bars | excess net | CI90 | q | era 19-23 | qual. years pos | verdict |
+|---|---|---|---|---|---|---|---|---|
+| T3 X1 | 725 | 4.6 | +0.20% | [−0.03%, +0.42%] | 91.8 | +0.34% | 9/13 | **WORTH DRILLING** |
+| T3 X2 | 662 | 5.8 | +0.23% | [−0.04%, +0.48%] | 92.1 | +0.32% | 9/13 | **WORTH DRILLING** |
+| T3 H5 / H10 / H20 | 732 / 593 / 485 | — | +0.12 / +0.34 / +0.53% | lower bound < 0 | 77 / 89 / 86 | > 0 | 8/13 | no |
+| T1, T2 (all outcomes) | 716-1150 | — | −0.38% .. +0.01% | — | 14-54 | — | ≤ 9/13 | no |
+
+- Break-even round-trip cost: T3 X1 +0.35%, T3 X2 +0.38%.
+- 15 S4b trials logged. **T3 X1/X2 are the best 2 of 15**, and they share the same entries (one effect, two exits).
+- Drill: see `S4B_DRILL_PREREG.md`.
