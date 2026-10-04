@@ -43,6 +43,9 @@ Proposed mechanism: dealer long-gamma dampening in the 0DTE era. A morning move 
 - **Before opening:** the notebook checks the file sizes, and prints the IS (2021-02-10 .. 2024-12-31) result of this
   same rule. That's context only, since IS data has already been seen.
 
+**Frozen OOS notebook:** `pack3_fade_oos.ipynb`, sha256 `8b43c14b56cb0d4347ba0cd4ab4657b7dce103c47d1e19490a1353fb7d2c05b8` (LF bytes as committed). It checks the
+file sizes (F1), prints the IS context, then opens 2025+ once.
+
 ## F4. Results log (append only)
 | instrument | opened (UTC) | OOS n | net mean (pt) | CI90 | pass? | $ per micro (total) | commit |
 |---|---|---|---|---|---|---|---|

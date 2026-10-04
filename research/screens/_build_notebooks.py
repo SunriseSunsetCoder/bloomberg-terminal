@@ -863,11 +863,16 @@ from _pack3_screen_cells import build as _pack3_screen
 
 P3_SCREEN_CELLS = _pack3_screen(SETUP)
 
+from _pack3_fade_cells import build as _pack3_fade   # one-time OOS for the frozen fade rule
+
+P3_FADE_CELLS = _pack3_fade(SETUP)
+
 for name, cells in [("survivorship_check.ipynb", A_CELLS), ("screen_pack1.ipynb", B_CELLS),
                     ("s3_drill.ipynb", D_CELLS), ("s3_drill_oos.ipynb", O_CELLS),
                     ("screen_pack2_protocol.ipynb", P2_PROTO_CELLS), ("screen_pack2.ipynb", P2_CELLS),
                     ("s4b_event_study.ipynb", S4B_CELLS), ("s4b_drill.ipynb", S4B_DRILL_CELLS),
                     ("pack3_step0.ipynb", P3_STEP0_CELLS),
-                    ("pack3_screen.ipynb", P3_SCREEN_CELLS)]:
+                    ("pack3_screen.ipynb", P3_SCREEN_CELLS),
+                    ("pack3_fade_oos.ipynb", P3_FADE_CELLS)]:
     (HERE / name).write_text(json.dumps(nb(cells), indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
     print("wrote", HERE / name)
