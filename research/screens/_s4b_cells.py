@@ -2,6 +2,9 @@
 # Imported by _build_notebooks.py; reuses screen pack 2's config + core. Edit HERE, then rebuild.
 
 
+S4B_PARTS = {}
+
+
 def build(PARTS):
     CONFIG, CORE = PARTS['CONFIG'], PARTS['CORE']
 
@@ -327,4 +330,5 @@ for _, r in LOG.iterrows():
           f'excess {r.avg_net:+.3%}')
 '''),
     ]
+    S4B_PARTS.update(CONFIG=S4B_CONFIG, CORE=S4B_CORE)    # reused by the S4b drill
     return CELLS
