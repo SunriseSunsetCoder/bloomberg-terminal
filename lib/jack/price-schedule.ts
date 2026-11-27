@@ -77,7 +77,32 @@ async function runIntradayMonitor(now: Date): Promise<void> {
   await evaluateIntradayAlerts(quotes, now);
 }
 
+/**
+ * JACK TRADE FREEZE — `JACK_TRADE_FREEZE=1` in the VPS env (restart Next to apply).
+ *
+ * Added 2026-11-26 while CwH is parked. When set, this whole tick is a no-op: no
+ * intraday monitor (heads-up alerts + jack:prices refresh), no 18:00 EOD pass (which
+ * runs runOutcomeTracker AND the close-based SYSTEM alerts), no health alerts from
+ * either. Pairs with `--data-only` in pipeline/run_daily.cmd, which stops the nightly
+ * detect/ingest/alert/outcomes stages; together they are the hard stop. Open
+ * positions do not get outcomes resolved and JANLY freezes — intended.
+ *
+ * NOT gated (manual, operator-initiated): the UPDATE OUTCOMES / REFRESH PRICES buttons
+ * and a hand-run VALIDATE. Unfreeze: remove the env line and restart.
+ */
+export function tradeFreezeActive(): boolean {
+  return process.env.JACK_TRADE_FREEZE === "1";
+}
+let freezeLogged = false;
+
 export async function priceScheduleTick(): Promise<void> {
+  if (tradeFreezeActive()) {
+    if (!freezeLogged) {
+      console.log("JACK_TRADE_FREEZE=1 — scheduled price refresh, outcomes and alerts are OFF.");
+      freezeLogged = true;
+    }
+    return;
+  }
   if (!isPersistenceAvailable()) return; // VPS-only
   const now = new Date();
   if (!isTradingDay(now)) return; // weekend / NYSE holiday
