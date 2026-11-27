@@ -1,0 +1,11 @@
+{
+  "_comment": "NYSE full closures + 13:00 early closes for M2. Shared by strategies/m2/m2_alert.py and lib/m2 (the IV-tab M2 panel) so the two can never disagree on what a session is. Weekends are handled in code. Extend before calendar_through lapses; verify against nyse.com.",
+  "calendar_through": "2027-12-31",
+  "holidays": [
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19",
+    "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18",
+    "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24"
+  ],
+  "early_closes": ["2026-11-27", "2026-12-24", "2027-11-26"]
+}

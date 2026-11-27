@@ -32,7 +32,14 @@ STATE (data/m2/m2_state.json)
     on remembering a hand edit). EXIT clears it. --set-flat / --set-in-trade override.
     hold_day is stored for reading but RE-DERIVED every run from entry_date and the
     daily bars (entry session = day 0), so a missed run cannot skew the count.
-    Every ENTER / EXIT / manual override is appended to data/m2/m2_trades.csv.
+    Every SETUP / ENTER / EXIT / manual override is appended to data/m2/m2_trades.csv
+    (once per event per session date). This script is the ONLY writer; the IV-tab M2
+    panel reads the CSV and the state file and never writes either.
+
+PARITY WITH THE PAGE (lib/m2/signal.ts)
+    --emit-fixture writes strategies/m2/parity_fixture.json: synthetic cases with this
+    file's outputs. scripts/m2-parity-check.ts asserts the TS port matches them exactly;
+    --selftest fails if the committed fixture is out of date with this file.
 
 DATA — Tiingo only, never yfinance, never the JACK corpus
     history : /tiingo/daily/SPY/prices, adjClose (dividend-adjusted — a quarterly
@@ -95,16 +102,16 @@ STALE_MINUTES = 20
 HISTORY_DAYS = 420      # calendar days fetched — comfortably > 200 sessions
 TITLE = "M2 — SELL SPY PUT (bullish dip)"
 
-# NYSE full closures and 13:00 early closes. Weekends are handled separately.
-# Extend before CALENDAR_THROUGH lapses — the script warns (log + Telegram, once) after.
-NYSE_HOLIDAYS = {
-    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19",
-    "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
-    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18",
-    "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
-}
-NYSE_EARLY_CLOSES = {"2026-11-27", "2026-12-24", "2027-11-26"}
-CALENDAR_THROUGH = date(2027, 12, 31)
+# NYSE full closures and 13:00 early closes, from the JSON file the IV-tab M2 panel
+# (lib/m2) also reads — one calendar, so the page and the alert agree on sessions.
+# Weekends are handled separately. The script warns (log + Telegram, once) after
+# calendar_through lapses.
+CALENDAR_PATH = Path(__file__).resolve().parent / "nyse_calendar.json"
+_CAL = json.loads(CALENDAR_PATH.read_text(encoding="utf-8"))
+NYSE_HOLIDAYS = set(_CAL["holidays"])
+NYSE_EARLY_CLOSES = set(_CAL["early_closes"])
+CALENDAR_THROUGH = date.fromisoformat(_CAL["calendar_through"])
+FIXTURE_PATH = Path(__file__).resolve().parent / "parity_fixture.json"
 
 
 # ============================================================================
@@ -263,19 +270,34 @@ def _parse_ts(ts: str) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+# Which IEX field dates the quote, in priority order. Tiingo documents the sale time
+# as `lastSaleTimeStamp` (capital S); the lower-case spelling is accepted too. Before
+# 2026-11-27 only `lastSaleTimestamp` was read, so the real field was missed and the
+# age fell through to `timestamp`. lib/m2/signal.ts uses this SAME order (fixture-checked).
+QUOTE_TS_FIELDS = ("lastSaleTimeStamp", "lastSaleTimestamp", "timestamp")
+
+
+def quote_from_row(q: dict) -> Tuple[float, datetime]:
+    """One IEX row -> (tngoLast, its ET wall time). Pure; parity-checked against lib/m2."""
+    px = q.get("tngoLast") or q.get("last")
+    if px is None:
+        raise RuntimeError("IEX quote has no tngoLast/last")
+    stamp = None
+    for field in QUOTE_TS_FIELDS:
+        stamp = _parse_ts(str(q.get(field) or ""))
+        if stamp is not None:
+            break
+    if stamp is None:
+        raise RuntimeError("IEX quote has no usable timestamp")
+    return float(px), et_now(stamp.astimezone(timezone.utc))
+
+
 def fetch_quote(key: str) -> Tuple[float, datetime]:
     """(tngoLast, its ET wall time)."""
     rows = _get_json(f"https://api.tiingo.com/iex/{TICKER}", key)
     if not isinstance(rows, list) or not rows:
         raise RuntimeError(f"IEX quote empty: {str(rows)[:120]}")
-    q = rows[0]
-    px = q.get("tngoLast") or q.get("last")
-    if px is None:
-        raise RuntimeError("IEX quote has no tngoLast/last")
-    stamp = _parse_ts(str(q.get("lastSaleTimestamp") or "")) or _parse_ts(str(q.get("timestamp") or ""))
-    if stamp is None:
-        raise RuntimeError("IEX quote has no usable timestamp")
-    return float(px), et_now(stamp.astimezone(timezone.utc))
+    return quote_from_row(rows[0])
 
 
 # ============================================================================
@@ -324,6 +346,16 @@ def append_ledger(row: dict) -> None:
 # The pure decision — no I/O, fully covered by --selftest
 # ============================================================================
 
+def plain_sum(xs: Sequence[float]) -> float:
+    """Left-to-right float sum. NOT the builtin: Python 3.12+ sum() is compensated
+    (Neumaier) while 3.11 is not, and JS adds left-to-right — the builtin would make
+    the SMA doubles depend on the interpreter version. This is identical everywhere."""
+    s = 0.0
+    for x in xs:
+        s += x
+    return s
+
+
 def lower_close_streak(closes: Sequence[float]) -> int:
     n, i = 0, len(closes) - 1
     while i > 0 and closes[i] < closes[i - 1]:
@@ -342,8 +374,8 @@ def evaluate(history: Sequence[Tuple[str, float]], px: float, today: str, state:
     if len(closes) < SMA_FILTER + 4:
         raise RuntimeError(f"only {len(closes)} closes — need {SMA_FILTER + 4}")
 
-    sma200 = sum(closes[-SMA_FILTER:]) / SMA_FILTER
-    sma5 = sum(closes[-SMA_EXIT:]) / SMA_EXIT
+    sma200 = plain_sum(closes[-SMA_FILTER:]) / SMA_FILTER
+    sma5 = plain_sum(closes[-SMA_EXIT:]) / SMA_EXIT
     streak = lower_close_streak(closes)
     streak_id = dates[-1 - streak] if streak else None   # the close the streak fell from
     filt = px > sma200
@@ -397,6 +429,8 @@ def evaluate(history: Sequence[Tuple[str, float]], px: float, today: str, state:
             alerts.append(("setup",
                            f"{TITLE} may set up: SPY {f2(px)} {stamp}, 2 lower closes, above 200d "
                            f"({f2(sma200)}). One more lower close tomorrow = entry. Be ready 15:45." + late))
+            ledger.append({**base, "event": "SETUP", "strike": "", "hold_day": "",
+                           "reason": "2 lower closes, filter ON"})
 
     if friday:
         pos = (f"in trade since {st['entry_date']} (day {st['hold_day']}, strike {st['strike']})"
@@ -492,8 +526,17 @@ def run(args) -> int:
         log("dry run: state and ledger NOT written.")
         return 0
 
+    # A same-day re-run must not double-log. ENTER/EXIT change state so they cannot
+    # repeat, but SETUP would; dedupe every event per session date to be safe.
+    lg = state.get("last_logged") or {}
+    logged_today = list(lg.get("events", [])) if lg.get("date") == today.isoformat() else []
     for row in ledger:
+        if row["event"] in logged_today:
+            log(f"ledger: {row['event']} already logged today — not re-logged")
+            continue
         append_ledger(row)
+        logged_today.append(row["event"])
+    new_state["last_logged"] = {"date": today.isoformat(), "events": logged_today}
     new_state["last_alerts"] = {"date": today.isoformat(), "kinds": sent_today}
     new_state["last_run"] = datetime.now().isoformat(timespec="seconds")
     save_state(new_state)
@@ -542,14 +585,9 @@ def selftest() -> int:
             failed += 1
             print(f"  FAIL {label} {detail}")
 
-    def series(tail: Sequence[float], base: float = 100.0, n: int = 260) -> List[Tuple[str, float]]:
-        """Uptrend (so price sits above SMA200), alternating so the streak is 0, then tail."""
-        d0 = date(2025, 1, 1)
-        vals = [base + 0.1 * i + (0.3 if i % 2 else 0) for i in range(n)] + list(tail)
-        return [((d0 + timedelta(days=i)).isoformat(), v) for i, v in enumerate(vals)]
-
+    series = _series
     flat = json.loads(json.dumps(FLAT_STATE))
-    top = 100 + 0.1 * 259 + 0.3  # last value of the base series (i=259 is odd)
+    top = _TOP
 
     print("[1] streak + time helpers")
     check("streak 3", lower_close_streak([5, 4, 3, 2]) == 3)
@@ -567,7 +605,8 @@ def selftest() -> int:
     a, st, led = evaluate(series([top + 1, top + 0.5]), top + 0.2, "2026-12-02", flat)
     check("setup fires", [k for k, _ in a] == ["setup"], str(a))
     check("  wording is the bullish put", "SELL SPY PUT (bullish dip)" in a[0][1])
-    check("  no state change", st["in_trade"] is False and not led)
+    check("  no state change", st["in_trade"] is False)
+    check("  ledger SETUP row", [r["event"] for r in led] == ["SETUP"], str(led))
 
     print("[3] ENTER on the 3rd lower close, sets in_trade, first-only")
     h3 = series([top + 1, top + 0.5, top + 0.2])
@@ -620,8 +659,141 @@ def selftest() -> int:
     a, _, _ = evaluate(series([top + 1, top + 0.5]), top + 0.2, "2026-11-27", flat, early_close=True)
     check("early-close note appended", a and "closed early" in a[0][1], str(a))
 
+    print("[7] IEX timestamp field order (lastSaleTimeStamp first)")
+    _, t = quote_from_row({"tngoLast": 650.0, "lastSaleTimeStamp": "2026-12-01T15:40:00-05:00",
+                           "timestamp": "2026-12-01T15:44:00-05:00"})
+    check("capital-S lastSaleTimeStamp wins", t.strftime("%H:%M") == "15:40", str(t))
+    _, t = quote_from_row({"tngoLast": 650.0, "timestamp": "2026-12-01T20:44:00+00:00"})
+    check("falls back to timestamp", t.strftime("%H:%M") == "15:44", str(t))
+
+    print("[8] parity fixture is current (lib/m2 is checked against it)")
+    try:
+        committed = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        committed = None
+    check("strategies/m2/parity_fixture.json matches this file's output — "
+          "re-run --emit-fixture after any logic change",
+          committed == json.loads(json.dumps(build_fixture())))
+
     print(f"\n{'ALL PASS' if failed == 0 else 'FAILURES'} — {passed} passed, {failed} failed")
     return 0 if failed == 0 else 1
+
+
+# ============================================================================
+# Parity fixture — the contract lib/m2/signal.ts is held to
+# ============================================================================
+
+def _series(tail: Sequence[float], base: float = 100.0, n: int = 260) -> List[Tuple[str, float]]:
+    """Uptrend (so price sits above SMA200), alternating so the streak is 0, then tail."""
+    d0 = date(2025, 1, 1)
+    vals = [base + 0.1 * i + (0.3 if i % 2 else 0) for i in range(n)] + list(tail)
+    return [((d0 + timedelta(days=i)).isoformat(), v) for i, v in enumerate(vals)]
+
+
+_TOP = 100 + 0.1 * 259 + 0.3  # last value of the base series (i=259 is odd)
+
+
+def _fixture_cases() -> List[dict]:
+    flat = json.loads(json.dumps(FLAT_STATE))
+    top = _TOP
+    h3 = _series([top + 1, top + 0.5, top + 0.2])
+    h4 = h3 + [("2026-12-03", top - 0.1)]
+    hx = h4
+    falling = hx + [("2026-12-04", top - 1), ("2026-12-07", top - 2), ("2026-12-08", top - 3),
+                    ("2026-12-09", top - 4)]
+    # the 3-streak in h3 falls from its top+1 close — that bar's date is the streak id
+    entered = {**flat, "last_entry_streak_id": h3[-3][0]}
+    in_trade = {**flat, "in_trade": True, "entry_date": "2026-12-03", "strike": 600}
+    low = [((date(2025, 1, 1) + timedelta(days=i)).isoformat(), 300 - 0.5 * i + (0.3 if i % 2 else 0))
+           for i in range(260)]
+    lowv = low[-1][1]
+    c = [
+        ("quiet", _series([top + 1]), top + 0.5, "2026-12-01", flat, False),
+        ("setup", _series([top + 1, top + 0.5]), top + 0.2, "2026-12-02", flat, False),
+        ("enter", h3, top - 0.1, "2026-12-03", flat, False),
+        ("same streak no re-fire", h4, top - 0.3, "2026-12-04", entered, False),
+        ("new streak re-arms", h4 + [("2026-12-04", top - 0.3), ("2026-12-07", top + 0.4),
+                                     ("2026-12-08", top + 0.3), ("2026-12-09", top + 0.2)],
+         top + 0.1, "2026-12-10", entered, False),
+        ("filter off", low + [("2026-12-01", lowv - 1), ("2026-12-02", lowv - 2)], lowv - 3,
+         "2026-12-03", flat, False),
+        ("entry day hold 0", hx, top - 0.05, "2026-12-03", in_trade, False),
+        ("exit sma5", hx, top + 2, "2026-12-04", in_trade, False),
+        ("exit 5th session", falling, top - 5, "2026-12-10", in_trade, False),
+        ("hold 4 stays", falling[:-1], top - 4, "2026-12-09", in_trade, False),
+        ("friday weekly", _series([top + 1]), top + 2, "2026-12-04", flat, True),
+        ("equal close breaks streak", _series([top + 1, top + 0.5]), top + 0.5, "2026-12-02", flat, False),
+    ]
+    # Strike rounding: Python round() is half-to-even; these hit exact .5 products.
+    for px in (610.0, 630.0, 650.0, 670.0, 641.3):
+        c.append((f"strike rounding {px}", _series([], base=px - 40), px, "2026-12-01", flat, False))
+    out = []
+    for name, hist, px, today, state, friday in c:
+        alerts, st, led = evaluate(hist, px, today, state, friday=friday)
+        sma200 = plain_sum(([v for _, v in hist] + [px])[-SMA_FILTER:]) / SMA_FILTER
+        sma5 = plain_sum(([v for _, v in hist] + [px])[-SMA_EXIT:]) / SMA_EXIT
+        out.append({
+            "name": name, "history": [[d, v] for d, v in hist], "px": px, "today": today,
+            "friday": friday, "state": state,
+            "expected": {
+                "kinds": [k for k, _ in alerts],
+                "sma200": sma200, "sma5": sma5,
+                "streak": st["metrics"]["streak"], "filter_on": st["metrics"]["filter_on"],
+                "strike": round(STRIKE_MULT * px),
+                "state": {k: st.get(k) for k in ("in_trade", "entry_date", "strike", "hold_day",
+                                                 "last_entry_streak_id")},
+                "ledger": [{"event": r["event"], "hold_day": r["hold_day"], "strike": r["strike"]}
+                           for r in led],
+            },
+        })
+    return out
+
+
+def build_fixture() -> dict:
+    quotes = [
+        {"tngoLast": 650.12, "lastSaleTimeStamp": "2026-12-01T15:44:58.186520297-05:00",
+         "timestamp": "2026-12-01T15:45:01-05:00"},
+        {"tngoLast": 650.12, "lastSaleTimestamp": "2026-12-01T20:40:00Z", "timestamp": "2026-12-01T20:44:00Z"},
+        {"tngoLast": None, "last": 649.5, "timestamp": "2026-07-15T19:45:30.5+00:00"},
+        {"tngoLast": 651.0, "timestamp": "2026-03-09T13:31:00+00:00"},
+    ]
+    qx = []
+    for q in quotes:
+        px, et = quote_from_row(q)
+        qx.append({"row": q, "expected": {"px": px, "et": et.strftime("%Y-%m-%dT%H:%M:%S")}})
+    utcs = ["2026-01-15T20:45:00", "2026-07-15T19:45:00", "2026-03-08T06:59:00", "2026-03-08T07:00:00",
+            "2026-11-01T05:59:00", "2026-11-01T06:00:00"]
+    return {
+        "_comment": "GENERATED by `python strategies/m2/m2_alert.py --emit-fixture`. Do not edit. "
+                    "scripts/m2-parity-check.ts asserts lib/m2/signal.ts reproduces every expected value.",
+        "constants": {"sma_filter": SMA_FILTER, "sma_exit": SMA_EXIT, "max_hold": MAX_HOLD,
+                      "strike_mult": STRIKE_MULT, "stale_minutes": STALE_MINUTES,
+                      "quote_ts_fields": list(QUOTE_TS_FIELDS)},
+        "streak": [{"closes": cl, "expected": lower_close_streak(cl)}
+                   for cl in ([5, 4, 3, 2], [5, 4, 4, 3], [1, 2, 3], [3, 2, 1, 1], [9])],
+        "et_now": [{"utc": u, "expected": et_now(datetime.fromisoformat(u).replace(tzinfo=timezone.utc))
+                    .strftime("%Y-%m-%dT%H:%M:%S")} for u in utcs],
+        "is_session": [{"date": d, "expected": is_session(date.fromisoformat(d))}
+                       for d in ("2026-11-26", "2026-11-27", "2026-11-28", "2026-12-25", "2027-03-26",
+                                 "2027-03-29")],
+        "quotes": qx,
+        "evaluate": _fixture_cases(),
+    }
+
+
+def emit_fixture() -> int:
+    # One record per line: readable diffs without a line per bar (260-bar histories).
+    fx = build_fixture()
+    parts = []
+    for k, v in fx.items():
+        if isinstance(v, list):
+            body = ",\n".join("  " + json.dumps(x, separators=(",", ":")) for x in v)
+            parts.append(f" {json.dumps(k)}: [\n{body}\n ]")
+        else:
+            parts.append(f" {json.dumps(k)}: {json.dumps(v)}")
+    FIXTURE_PATH.write_text("{\n" + ",\n".join(parts) + "\n}\n", encoding="utf-8")
+    print(f"wrote {FIXTURE_PATH}")
+    return 0
 
 
 # ============================================================================
@@ -638,10 +810,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--strike", type=float, default=None)
     p.add_argument("--status", action="store_true", help="Print the state file and exit.")
     p.add_argument("--selftest", action="store_true", help="Offline logic checks.")
+    p.add_argument("--emit-fixture", action="store_true",
+                   help="Write strategies/m2/parity_fixture.json for the lib/m2 parity check.")
     args = p.parse_args(argv)
 
     if args.selftest:
         return selftest()
+    if args.emit_fixture:
+        return emit_fixture()
     if args.status:
         print(json.dumps(load_state(), indent=2))
         return 0
