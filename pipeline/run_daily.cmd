@@ -62,7 +62,9 @@ if defined JACK_PYTHON (
 >>"%WRAPLOG%" echo LAUNCH %DATE% %TIME%  repo=%REPO%  py=%PY%  args=%*
 >>"%WRAPLOG%" echo ======================================================================
 
-"%PY%" -u "%REPO%\pipeline\run_daily.py" %* >>"%WRAPLOG%" 2>&1
+REM TRADE FREEZE (2026-11-26): --data-only = calendar guard + Tiingo pull only.
+REM UNFREEZE: delete "--data-only " from the next line (and JACK_TRADE_FREEZE from the VPS env).
+"%PY%" -u "%REPO%\pipeline\run_daily.py" --data-only %* >>"%WRAPLOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 >>"%WRAPLOG%" echo ---- run_daily.py exit %RC% ----

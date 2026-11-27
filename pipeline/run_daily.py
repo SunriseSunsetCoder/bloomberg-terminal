@@ -11,6 +11,7 @@ Chains the proven stage scripts in order and STOPS at the first failure:
     python pipeline/run_daily.py                  # the nightly run
     python pipeline/run_daily.py --skip-pull      # detect+ingest on the current corpus
     python pipeline/run_daily.py --dry-run        # plan only, nothing executed
+    python pipeline/run_daily.py --data-only      # TRADE FREEZE: guard + pull only
     python pipeline/run_daily.py --selftest       # offline checks, no network, no subprocess
 
 Every stage is invoked as a SUBPROCESS of the existing script. Nothing here
@@ -58,6 +59,15 @@ WHY 60s ARE RETURNED BUT 50 IS NOT
 
 Task Scheduler surfaces this as "Last Run Result", so a glance at the task
 history names the failing stage without opening a log.
+
+--data-only — THE TRADE FREEZE (2026-11-26, CwH parked)
+    Runs the calendar guard and STAGE 1/5 (the pull, with its tier-cap watcher,
+    ledger backstop, failure floor and pull-failure Telegram) exactly as normal,
+    then stops with exit 0. Detect, ingest, the fire alert and outcomes do not
+    run. Nothing skipped is an input to the pull: the universe is the corpus
+    folder glob, and the detector writes only to <data-dir>/results/.
+    Switched on in pipeline/run_daily.cmd; unfreeze by deleting it there. The
+    Next-app half of the freeze is JACK_TRADE_FREEZE=1 (lib/jack/price-schedule.ts).
 
 WHY 50 IS NEVER RETURNED
     By the time the alert runs, the board is already written and correct. Failing
@@ -1716,6 +1726,23 @@ def selftest() -> int:
         OUTCOME_PROBLEMS.clear()
         OUTCOME_PROBLEMS.extend(_saved)
 
+    print("\n[16] --data-only (trade freeze) — pull runs, nothing after it does")
+    import io as _io3, contextlib as _ctx3
+    _buf3 = _io3.StringIO()
+    with _ctx3.redirect_stdout(_buf3):
+        # 2026-11-25 is a session; --skip-pull keeps it offline, so this drives the
+        # real main() path from the calendar guard through the freeze return.
+        _rc3 = main(["--date", "2026-11-25", "--skip-pull", "--data-only", "--log-dir",
+                     str(Path(os.environ.get("TEMP", ".")) / "jack_selftest_logs")])
+    _out3 = _buf3.getvalue()
+    check("data-only exits 0", _rc3 == EXIT_OK, str(_rc3))
+    check("  the pull stage ran", "STAGE 1/5" in _out3)
+    check("  and the freeze banner printed", "DATA-ONLY FREEZE" in _out3)
+    check("  detector never started", "STAGE 2/5" not in _out3)
+    check("  ingest / alert / outcomes never started",
+          not any(t in _out3 for t in ("STAGE 3/5", "STAGE 4/5", "STAGE 5/5")))
+    check("  flags line records data_only=True", "data_only=True" in _out3)
+
     print(f"\n{'ALL PASS' if failed == 0 else 'FAILURES'} — {passed} passed, {failed} failed\n")
     return 0 if failed == 0 else 1
 
@@ -1768,6 +1795,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--skip-outcomes", action="store_true",
                         help="Skip the outcome-replay stage. The board and alert still "
                              "run; only the theoretical-outcome bookkeeping is skipped.")
+    parser.add_argument("--data-only", action="store_true",
+                        help="TRADE FREEZE: calendar guard + Tiingo pull only, then exit 0. "
+                             "Detect, ingest, alert and outcomes are skipped.")
     parser.add_argument("--no-alert", action="store_true",
                         help="Render the Phase 5 alert into the log but do NOT send it. "
                              "For previewing the message without pinging the channel.")
@@ -1817,7 +1847,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         tee.line(f"clock      : {datetime.now():%Y-%m-%d %H:%M:%S} "
                  f"{time.tzname[time.daylight and time.localtime().tm_isdst > 0]}")
         tee.line(f"flags      : skip_pull={args.skip_pull} dry_run={args.dry_run} "
-                 f"force={args.force} max_fail_pct={args.max_fail_pct}")
+                 f"force={args.force} max_fail_pct={args.max_fail_pct} "
+                 f"data_only={args.data_only}")
 
         # ---- calendar guard ------------------------------------------------
         tee.rule("CALENDAR GUARD")
@@ -1838,6 +1869,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         code = stage_pull(tee, args, run_date)
         if code != EXIT_OK:
+            return code
+
+        # TRADE FREEZE: the pull is the only stage that runs. See --data-only above.
+        if args.data_only:
+            tee.rule("DATA-ONLY FREEZE")
+            tee.line("--data-only: bars are current. detect / ingest / alert / outcomes "
+                     "SKIPPED by the trade freeze — no new setups, no board update, no "
+                     "JACK alert, no outcome replay.")
+            code = EXIT_OK
             return code
 
         code, watchlist = stage_detect(tee, args)
