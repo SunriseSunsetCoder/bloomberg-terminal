@@ -11,6 +11,7 @@
     "format": "biome format --write .",
     "typecheck": "tsc --noEmit",
     "selftest:parity": "tsx scripts/jack-render-path-parity-selftest.ts",
+    "selftest:m2": "tsx scripts/m2-parity-check.ts",
     "prepare": "husky"
   },
   "dependencies": {

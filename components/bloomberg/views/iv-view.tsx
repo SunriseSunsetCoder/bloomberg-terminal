@@ -9,6 +9,7 @@ import {
   termStructureColor,
   type OptionsSignalResponse,
 } from "../hooks/useIVRegime";
+import { M2Panel } from "../ui/m2-panel";
 
 interface IVViewProps {
   isDarkMode: boolean;
@@ -43,37 +44,28 @@ export function IVView({ isDarkMode, onBack }: IVViewProps) {
   const bgClass = isDarkMode ? "bg-black" : "bg-gray-100";
   const textClass = isDarkMode ? "text-amber-300" : "text-gray-900";
 
-  if (isLoading) {
-    return (
-      <div className={`${bgClass} ${textClass} font-mono p-6 min-h-screen`}>
-        <BackBar onBack={onBack} isDarkMode={isDarkMode} />
-        <div className="text-amber-400 mt-4">Loading IV regime...</div>
-      </div>
-    );
-  }
-
-  if (error || !regime) {
-    return (
-      <div className={`${bgClass} ${textClass} font-mono p-6 min-h-screen`}>
-        <BackBar onBack={onBack} isDarkMode={isDarkMode} />
-        <div className="text-red-400 mt-4">
-          IV regime unavailable: {error instanceof Error ? error.message : "unknown error"}
-          <button
-            onClick={() => refetch()}
-            className="ml-4 px-3 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 border border-amber-700"
-          >
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
-
+  // No early returns: the IV section's loading / error states render INSIDE the page so
+  // the M2 panel below is always shown — a VIX (Yahoo) outage must not hide M2, whose
+  // data comes from Tiingo and the alert script's files.
   return (
     <div className={`${bgClass} ${textClass} font-mono min-h-screen`}>
       <BackBar onBack={onBack} isDarkMode={isDarkMode} />
 
       <div className="p-4 text-sm">
+        {isLoading ? (
+          <div className="text-amber-400">Loading IV regime...</div>
+        ) : error || !regime ? (
+          <div className="text-red-400">
+            IV regime unavailable: {error instanceof Error ? error.message : "unknown error"}
+            <button
+              onClick={() => refetch()}
+              className="ml-4 px-3 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 border border-amber-700"
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+        <>
         {/* Top strip: VIX / IV Rank / IV Pct / Term Ratio */}
         <div className="grid grid-cols-4 gap-3 mb-4">
           <MetricCell label="VIX" value={regime.vix.toFixed(2)} />
@@ -172,6 +164,11 @@ export function IVView({ isDarkMode, onBack }: IVViewProps) {
             </div>
           )}
         </div>
+        </>
+        )}
+
+        {/* M2 — bottom of the tab, independent of the IV regime fetch */}
+        <M2Panel />
       </div>
     </div>
   );

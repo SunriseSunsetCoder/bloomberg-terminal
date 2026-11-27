@@ -26,4 +26,15 @@ if ! npm run --silent selftest:parity; then
   exit 1
 fi
 
+# M2 parity — the IV-tab panel (lib/m2/signal.ts) and the 15:45 Telegram alert
+# (strategies/m2/m2_alert.py) are two implementations of one rule set across a
+# Python/TS boundary. The Python emits the fixture; this asserts the TS matches it
+# exactly, so the page and the alert cannot disagree on streak / filter / strike.
+echo "🔍 M2 parity check..."
+if ! npm run --silent selftest:m2; then
+  echo "❌ M2 parity FAILED — lib/m2 disagrees with m2_alert.py (re-run --emit-fixture?)."
+  echo "💡 To bypass: BYPASS_PUSH_PROTECTION=1 git push"
+  exit 1
+fi
+
 echo "✅ Pre-push checks passed!"
