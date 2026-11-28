@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "Scheduled FOMC DECISION (announcement) dates for strategies/prefomc/prefomc_alert.py.",
+    "SELF-CONTAINED on purpose: nothing else reads or checks this list (no botfolio / fleet link).",
+    "Scheduled meetings only; never add an unscheduled / emergency meeting.",
+    "Check after any edit: python strategies/prefomc/prefomc_alert.py --check-calendar",
+    "TO ADD A YEAR: put the Fed's dates under decisions.<year>. If they are not final, also add",
+    "the year to tentative_years: every SELL for a tentative year says so."
+  ],
+  "source": "federalreserve.gov/monetarypolicy/fomccalendars.htm",
+  "decisions": {
+    "2026": ["2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
+             "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09"],
+    "2027": ["2027-01-27", "2027-03-17", "2027-04-28", "2027-06-09",
+             "2027-07-28", "2027-09-15", "2027-10-27", "2027-12-08"]
+  },
+  "tentative_years": ["2027"],
+  "_tentative_note": "2027 is TENTATIVE until the Fed publishes its calendar. When it does: fix any date that moved, remove \"2027\" from tentative_years, run --check-calendar."
+}
